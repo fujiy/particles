@@ -9,7 +9,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use particle::{
     PARTICLE_RADIUS_M, PARTICLE_SPACING_M, PARTICLE_SPEED_LIMIT_MPS, ParticleWorld,
-    SMOOTHING_RADIUS_M, nominal_particle_draw_radius_m,
+    TERRAIN_BOUNDARY_RADIUS_M, WATER_KERNEL_RADIUS_M, nominal_particle_draw_radius_m,
 };
 use render::{
     TerrainRenderState, WaterRenderState, bootstrap_terrain_chunks,
@@ -176,7 +176,7 @@ fn step_water_particles(
 ) {
     let running = sim_state.running;
     if running {
-        terrain_world.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
+        terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let start = Instant::now();
         particle_world.step_if_running(&terrain_world, running);
         perf_metrics.physics_time_this_frame_secs += start.elapsed().as_secs_f64();
@@ -210,7 +210,7 @@ fn apply_sim_reset(
     }
 
     terrain_world.reset_fixed_world();
-    terrain_world.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
+    terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
     particle_world.reset_to_initial();
     sim_state.running = false;
 }
@@ -508,7 +508,7 @@ fn handle_world_interactions(
     }
 
     if terrain_changed {
-        terrain_world.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
+        terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
     }
 
     interaction_state.last_drag_world = Some(cursor_world);
@@ -558,7 +558,7 @@ fn draw_grid_overlay(mut gizmos: Gizmos, overlay_state: Res<GridOverlayState>) {
     let min_y = WORLD_MIN_CHUNK_Y as f32 * CHUNK_WORLD_SIZE_M;
     let max_y = (WORLD_MAX_CHUNK_Y + 1) as f32 * CHUNK_WORLD_SIZE_M;
 
-    let neighbor_step = SMOOTHING_RADIUS_M;
+    let neighbor_step = WATER_KERNEL_RADIUS_M;
     let min_neighbor_x = (min_x / neighbor_step).floor() as i32;
     let max_neighbor_x = (max_x / neighbor_step).ceil() as i32;
     let min_neighbor_y = (min_y / neighbor_step).floor() as i32;

@@ -13,6 +13,9 @@ pub const WORLD_MIN_CHUNK_X: i32 = -2;
 pub const WORLD_MAX_CHUNK_X: i32 = 1;
 pub const WORLD_MIN_CHUNK_Y: i32 = -2;
 pub const WORLD_MAX_CHUNK_Y: i32 = 1;
+pub const TERRAIN_SDF_SAMPLES_PER_CELL: i32 = 2;
+const SDF_INF: f32 = 1.0e9;
+const SDF_DIAGONAL_COST: f32 = std::f32::consts::SQRT_2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerrainMaterial {
@@ -105,6 +108,11 @@ pub struct TerrainWorld {
     static_particle_pos: Vec<Vec2>,
     static_particle_grid: HashMap<IVec2, Vec<usize>>,
     static_particles_dirty: bool,
+    sdf_samples: Vec<f32>,
+    sdf_width: usize,
+    sdf_height: usize,
+    sdf_sample_spacing_m: f32,
+    sdf_origin_m: Vec2,
 }
 
 impl TerrainWorld {
@@ -114,6 +122,11 @@ impl TerrainWorld {
         self.static_particle_pos.clear();
         self.static_particle_grid.clear();
         self.static_particles_dirty = true;
+        self.sdf_samples.clear();
+        self.sdf_width = 0;
+        self.sdf_height = 0;
+        self.sdf_sample_spacing_m = 0.0;
+        self.sdf_origin_m = Vec2::ZERO;
 
         for chunk_y in WORLD_MIN_CHUNK_Y..=WORLD_MAX_CHUNK_Y {
             for chunk_x in WORLD_MIN_CHUNK_X..=WORLD_MAX_CHUNK_X {
@@ -251,9 +264,33 @@ impl TerrainWorld {
             }
         }
 
+        self.rebuild_signed_distance_field();
         self.static_particles_dirty = false;
     }
 
+    pub fn sample_signed_distance_and_normal(&self, world_pos: Vec2) -> Option<(f32, Vec2)> {
+        let d = self.sample_signed_distance(world_pos)?;
+        let eps = self.sdf_sample_spacing_m.max(1e-4);
+        let dx = self
+            .sample_signed_distance(world_pos + Vec2::new(eps, 0.0))
+            .unwrap_or(d)
+            - self
+                .sample_signed_distance(world_pos - Vec2::new(eps, 0.0))
+                .unwrap_or(d);
+        let dy = self
+            .sample_signed_distance(world_pos + Vec2::new(0.0, eps))
+            .unwrap_or(d)
+            - self
+                .sample_signed_distance(world_pos - Vec2::new(0.0, eps))
+                .unwrap_or(d);
+        let normal = Vec2::new(dx, dy).normalize_or_zero();
+        if normal == Vec2::ZERO {
+            return Some((d, Vec2::Y));
+        }
+        Some((d, normal))
+    }
+
+    #[allow(dead_code)]
     pub fn gather_static_neighbors(
         &self,
         position: Vec2,
@@ -278,6 +315,94 @@ impl TerrainWorld {
 
     pub fn static_particle_positions(&self) -> &[Vec2] {
         &self.static_particle_pos
+    }
+
+    fn rebuild_signed_distance_field(&mut self) {
+        let samples_per_cell = TERRAIN_SDF_SAMPLES_PER_CELL.max(1) as usize;
+        let world_cells_w = ((WORLD_MAX_CHUNK_X - WORLD_MIN_CHUNK_X + 1) * CHUNK_SIZE_I32) as usize;
+        let world_cells_h = ((WORLD_MAX_CHUNK_Y - WORLD_MIN_CHUNK_Y + 1) * CHUNK_SIZE_I32) as usize;
+
+        self.sdf_width = world_cells_w * samples_per_cell;
+        self.sdf_height = world_cells_h * samples_per_cell;
+        self.sdf_sample_spacing_m = CELL_SIZE_M / samples_per_cell as f32;
+        self.sdf_origin_m = Vec2::new(
+            WORLD_MIN_CHUNK_X as f32 * CHUNK_WORLD_SIZE_M + 0.5 * self.sdf_sample_spacing_m,
+            WORLD_MIN_CHUNK_Y as f32 * CHUNK_WORLD_SIZE_M + 0.5 * self.sdf_sample_spacing_m,
+        );
+
+        let sample_count = self.sdf_width * self.sdf_height;
+        if sample_count == 0 {
+            self.sdf_samples.clear();
+            return;
+        }
+
+        let mut solid_mask = vec![false; sample_count];
+        for y in 0..self.sdf_height {
+            for x in 0..self.sdf_width {
+                let idx = sdf_index(self.sdf_width, x, y);
+                let sample_pos = self.sdf_origin_m
+                    + Vec2::new(
+                        x as f32 * self.sdf_sample_spacing_m,
+                        y as f32 * self.sdf_sample_spacing_m,
+                    );
+                let cell = world_to_cell(sample_pos);
+                solid_mask[idx] = matches!(
+                    self.get_loaded_cell_or_empty(cell),
+                    TerrainCell::Solid { .. }
+                );
+            }
+        }
+        let non_solid_mask = solid_mask.iter().map(|&v| !v).collect::<Vec<_>>();
+        let distance_to_solid = distance_transform(
+            &solid_mask,
+            self.sdf_width,
+            self.sdf_height,
+            self.sdf_sample_spacing_m,
+        );
+        let distance_to_non_solid = distance_transform(
+            &non_solid_mask,
+            self.sdf_width,
+            self.sdf_height,
+            self.sdf_sample_spacing_m,
+        );
+        let half_sample = 0.5 * self.sdf_sample_spacing_m;
+        self.sdf_samples.resize(sample_count, 0.0);
+        for i in 0..sample_count {
+            self.sdf_samples[i] = if solid_mask[i] {
+                -distance_to_non_solid[i] + half_sample
+            } else {
+                distance_to_solid[i] - half_sample
+            };
+        }
+    }
+
+    fn sample_signed_distance(&self, world_pos: Vec2) -> Option<f32> {
+        if self.sdf_samples.is_empty() || self.sdf_width == 0 || self.sdf_height == 0 {
+            return None;
+        }
+
+        let width_max = (self.sdf_width.saturating_sub(1)) as f32;
+        let height_max = (self.sdf_height.saturating_sub(1)) as f32;
+        let fx =
+            ((world_pos.x - self.sdf_origin_m.x) / self.sdf_sample_spacing_m).clamp(0.0, width_max);
+        let fy = ((world_pos.y - self.sdf_origin_m.y) / self.sdf_sample_spacing_m)
+            .clamp(0.0, height_max);
+
+        let x0 = fx.floor() as usize;
+        let y0 = fy.floor() as usize;
+        let x1 = (x0 + 1).min(self.sdf_width - 1);
+        let y1 = (y0 + 1).min(self.sdf_height - 1);
+        let tx = fx - x0 as f32;
+        let ty = fy - y0 as f32;
+
+        let d00 = self.sdf_samples[sdf_index(self.sdf_width, x0, y0)];
+        let d10 = self.sdf_samples[sdf_index(self.sdf_width, x1, y0)];
+        let d01 = self.sdf_samples[sdf_index(self.sdf_width, x0, y1)];
+        let d11 = self.sdf_samples[sdf_index(self.sdf_width, x1, y1)];
+
+        let dx0 = d00 + (d10 - d00) * tx;
+        let dx1 = d01 + (d11 - d01) * tx;
+        Some(dx0 + (dx1 - dx0) * ty)
     }
 
     fn ensure_chunk_mut(&mut self, chunk_coord: IVec2) -> &mut TerrainChunk {
@@ -323,6 +448,70 @@ fn local_cell_to_index(local_cell: IVec2) -> usize {
     debug_assert!(local_cell.x >= 0 && local_cell.x < CHUNK_SIZE_I32);
     debug_assert!(local_cell.y >= 0 && local_cell.y < CHUNK_SIZE_I32);
     (local_cell.y as usize) * CHUNK_SIZE + (local_cell.x as usize)
+}
+
+fn sdf_index(width: usize, x: usize, y: usize) -> usize {
+    y * width + x
+}
+
+fn distance_transform(mask: &[bool], width: usize, height: usize, spacing: f32) -> Vec<f32> {
+    let mut dist = vec![SDF_INF; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let idx = sdf_index(width, x, y);
+            if mask[idx] {
+                dist[idx] = 0.0;
+            }
+        }
+    }
+
+    for y in 0..height {
+        for x in 0..width {
+            let idx = sdf_index(width, x, y);
+            let mut d = dist[idx];
+            if x > 0 {
+                d = d.min(dist[sdf_index(width, x - 1, y)] + 1.0);
+            }
+            if y > 0 {
+                d = d.min(dist[sdf_index(width, x, y - 1)] + 1.0);
+            }
+            if x > 0 && y > 0 {
+                d = d.min(dist[sdf_index(width, x - 1, y - 1)] + SDF_DIAGONAL_COST);
+            }
+            if x + 1 < width && y > 0 {
+                d = d.min(dist[sdf_index(width, x + 1, y - 1)] + SDF_DIAGONAL_COST);
+            }
+            dist[idx] = d;
+        }
+    }
+
+    for y in (0..height).rev() {
+        for x in (0..width).rev() {
+            let idx = sdf_index(width, x, y);
+            let mut d = dist[idx];
+            if x + 1 < width {
+                d = d.min(dist[sdf_index(width, x + 1, y)] + 1.0);
+            }
+            if y + 1 < height {
+                d = d.min(dist[sdf_index(width, x, y + 1)] + 1.0);
+            }
+            if x + 1 < width && y + 1 < height {
+                d = d.min(dist[sdf_index(width, x + 1, y + 1)] + SDF_DIAGONAL_COST);
+            }
+            if x > 0 && y + 1 < height {
+                d = d.min(dist[sdf_index(width, x - 1, y + 1)] + SDF_DIAGONAL_COST);
+            }
+            dist[idx] = d;
+        }
+    }
+
+    for d in &mut dist {
+        if *d < SDF_INF {
+            *d *= spacing;
+        }
+    }
+
+    dist
 }
 
 #[cfg(test)]
@@ -376,5 +565,26 @@ mod tests {
         terrain.rebuild_static_particles_if_dirty(0.25);
         assert!(!terrain.static_particles_dirty);
         assert!(!terrain.static_particle_positions().is_empty());
+    }
+
+    #[test]
+    fn sdf_sign_matches_solid_and_empty_space() {
+        let mut terrain = TerrainWorld::default();
+        terrain.reset_fixed_world();
+        terrain.rebuild_static_particles_if_dirty(0.25);
+
+        let inside_ground = Vec2::new(0.0, 0.1);
+        let above_ground = Vec2::new(0.0, 0.8);
+        let d_inside = terrain
+            .sample_signed_distance_and_normal(inside_ground)
+            .map(|(d, _)| d)
+            .unwrap();
+        let d_above = terrain
+            .sample_signed_distance_and_normal(above_ground)
+            .map(|(d, _)| d)
+            .unwrap();
+
+        assert!(d_inside < 0.0);
+        assert!(d_above > 0.0);
     }
 }

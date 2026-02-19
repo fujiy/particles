@@ -5,12 +5,12 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::particle::{
-    ParticleWorld, REST_DENSITY, SMOOTHING_RADIUS_M, nominal_particle_draw_radius_m,
+    ParticleWorld, REST_DENSITY, TERRAIN_BOUNDARY_RADIUS_M, nominal_particle_draw_radius_m,
 };
 use super::terrain::{
     CELL_PIXEL_SIZE, CELL_SIZE_M, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_WORLD_SIZE_M, TerrainCell,
     TerrainChunk, TerrainMaterial, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
-    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
+    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, world_to_cell,
 };
 
 #[derive(Resource, Default)]
@@ -36,15 +36,15 @@ const WORLD_CHUNK_WIDTH: u32 = (WORLD_MAX_CHUNK_X - WORLD_MIN_CHUNK_X + 1) as u3
 const WORLD_CHUNK_HEIGHT: u32 = (WORLD_MAX_CHUNK_Y - WORLD_MIN_CHUNK_Y + 1) as u32;
 const WATER_IMAGE_WIDTH: u32 = WORLD_CHUNK_WIDTH * CHUNK_PIXEL_SIZE;
 const WATER_IMAGE_HEIGHT: u32 = WORLD_CHUNK_HEIGHT * CHUNK_PIXEL_SIZE;
-const WATER_DOT_THRESHOLD_REST_DENSITY_RATIO: f32 = 0.20;
-const WATER_DOT_SMOOTH_WIDTH: f32 = 5.0;
+const WATER_DOT_THRESHOLD_REST_DENSITY_RATIO: f32 = 0.4;
+const WATER_DOT_SMOOTH_WIDTH: f32 = 1.0;
 const WATER_BLUR_RADIUS_DOTS: i32 = 2;
 const WATER_DOT_SCALE: f32 = CELL_PIXEL_SIZE as f32 / CELL_SIZE_M;
 const WATER_RENDER_Z: f32 = 6.0;
 
 pub fn bootstrap_terrain_chunks(mut terrain_world: ResMut<TerrainWorld>) {
     terrain_world.reset_fixed_world();
-    terrain_world.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
+    terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
 }
 
 pub fn sync_dirty_terrain_chunks_to_render(
@@ -102,6 +102,7 @@ pub fn sync_dirty_terrain_chunks_to_render(
 pub fn sync_water_dots_to_render(
     mut commands: Commands,
     particles: Res<ParticleWorld>,
+    terrain: Res<TerrainWorld>,
     mut water_state: ResMut<WaterRenderState>,
     mut images: ResMut<Assets<Image>>,
 ) {
@@ -153,6 +154,9 @@ pub fn sync_water_dots_to_render(
                     continue;
                 }
                 let sample_world = water_pixel_to_world(IVec2::new(px, py));
+                if is_solid_terrain_at_world(&terrain, sample_world) {
+                    continue;
+                }
                 let r2 = (sample_world - pos).length_squared();
                 let w = kernel_poly6_for_render(r2, draw_radius);
                 if w == 0.0 {
@@ -190,6 +194,10 @@ pub fn sync_water_dots_to_render(
                 blurred,
             );
             if coverage <= 0.0 {
+                continue;
+            }
+            let sample_world = water_pixel_to_world(IVec2::new(px as i32, py as i32));
+            if is_solid_terrain_at_world(&terrain, sample_world) {
                 continue;
             }
             let mut color = water_palette_color(px as i32, py as i32, blurred, dot_threshold);
@@ -346,6 +354,13 @@ fn water_pixel_to_world(pixel: IVec2) -> Vec2 {
 fn water_density_index(px: i32, py: i32) -> usize {
     let image_y = WATER_IMAGE_HEIGHT as i32 - 1 - py;
     (image_y as u32 * WATER_IMAGE_WIDTH + px as u32) as usize
+}
+
+fn is_solid_terrain_at_world(terrain: &TerrainWorld, world_pos: Vec2) -> bool {
+    matches!(
+        terrain.get_loaded_cell_or_empty(world_to_cell(world_pos)),
+        TerrainCell::Solid { .. }
+    )
 }
 
 fn kernel_poly6_for_render(r2: f32, support_radius: f32) -> f32 {
