@@ -5,14 +5,9 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::terrain::{
-    CELL_PIXEL_SIZE, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainCell,
-    TerrainChunk, TerrainMaterial, TerrainWorld,
+    CELL_PIXEL_SIZE, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_WORLD_SIZE_M, TerrainCell, TerrainChunk,
+    TerrainMaterial, TerrainWorld,
 };
-
-const WORLD_MIN_CHUNK_X: i32 = -2;
-const WORLD_MAX_CHUNK_X: i32 = 1;
-const WORLD_MIN_CHUNK_Y: i32 = -2;
-const WORLD_MAX_CHUNK_Y: i32 = 1;
 
 #[derive(Resource, Default)]
 pub struct TerrainRenderState {
@@ -25,27 +20,7 @@ struct TerrainChunkSprite {
 }
 
 pub fn bootstrap_terrain_chunks(mut terrain_world: ResMut<TerrainWorld>) {
-    for chunk_y in WORLD_MIN_CHUNK_Y..=WORLD_MAX_CHUNK_Y {
-        for chunk_x in WORLD_MIN_CHUNK_X..=WORLD_MAX_CHUNK_X {
-            terrain_world.ensure_chunk_loaded(IVec2::new(chunk_x, chunk_y));
-        }
-    }
-
-    let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32;
-    let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1;
-    let min_cell_y = WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32;
-    let max_cell_y = (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1;
-
-    terrain_world.fill_rect(
-        IVec2::new(min_cell_x, min_cell_y),
-        IVec2::new(min_cell_x, max_cell_y),
-        TerrainCell::rock(),
-    );
-    terrain_world.fill_rect(
-        IVec2::new(max_cell_x, min_cell_y),
-        IVec2::new(max_cell_x, max_cell_y),
-        TerrainCell::rock(),
-    );
+    terrain_world.reset_fixed_world();
 }
 
 pub fn sync_dirty_terrain_chunks_to_render(

@@ -9,6 +9,10 @@ pub const CELL_PIXEL_SIZE: u32 = 4;
 pub const CHUNK_PIXEL_SIZE: u32 = (CHUNK_SIZE as u32) * CELL_PIXEL_SIZE;
 pub const CHUNK_WORLD_SIZE_M: f32 = (CHUNK_SIZE as f32) * CELL_SIZE_M;
 pub const DEFAULT_SOLID_HP: u16 = 1_000;
+pub const WORLD_MIN_CHUNK_X: i32 = -2;
+pub const WORLD_MAX_CHUNK_X: i32 = 1;
+pub const WORLD_MIN_CHUNK_Y: i32 = -2;
+pub const WORLD_MAX_CHUNK_Y: i32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerrainMaterial {
@@ -101,6 +105,33 @@ pub struct TerrainWorld {
 }
 
 impl TerrainWorld {
+    pub fn reset_fixed_world(&mut self) {
+        self.chunks.clear();
+        self.dirty_chunks.clear();
+
+        for chunk_y in WORLD_MIN_CHUNK_Y..=WORLD_MAX_CHUNK_Y {
+            for chunk_x in WORLD_MIN_CHUNK_X..=WORLD_MAX_CHUNK_X {
+                self.ensure_chunk_loaded(IVec2::new(chunk_x, chunk_y));
+            }
+        }
+
+        let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32;
+        let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1;
+        let min_cell_y = WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32;
+        let max_cell_y = (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1;
+
+        self.fill_rect(
+            IVec2::new(min_cell_x, min_cell_y),
+            IVec2::new(min_cell_x, max_cell_y),
+            TerrainCell::rock(),
+        );
+        self.fill_rect(
+            IVec2::new(max_cell_x, min_cell_y),
+            IVec2::new(max_cell_x, max_cell_y),
+            TerrainCell::rock(),
+        );
+    }
+
     pub fn ensure_chunk_loaded(&mut self, chunk_coord: IVec2) {
         self.ensure_chunk_mut(chunk_coord);
     }
@@ -156,6 +187,14 @@ impl TerrainWorld {
 
     pub fn chunk(&self, chunk_coord: IVec2) -> Option<&TerrainChunk> {
         self.chunks.get(&chunk_coord)
+    }
+
+    pub fn get_loaded_cell_or_empty(&self, global_cell: IVec2) -> TerrainCell {
+        let (chunk_coord, local_cell) = global_to_chunk_local(global_cell);
+        self.chunks
+            .get(&chunk_coord)
+            .map(|chunk| chunk.get(local_cell))
+            .unwrap_or_default()
     }
 
     pub fn take_dirty_chunks(&mut self) -> Vec<IVec2> {
