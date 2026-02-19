@@ -102,12 +102,18 @@ impl TerrainChunk {
 pub struct TerrainWorld {
     chunks: HashMap<IVec2, TerrainChunk>,
     dirty_chunks: HashSet<IVec2>,
+    static_particle_pos: Vec<Vec2>,
+    static_particle_grid: HashMap<IVec2, Vec<usize>>,
+    static_particles_dirty: bool,
 }
 
 impl TerrainWorld {
     pub fn reset_fixed_world(&mut self) {
         self.chunks.clear();
         self.dirty_chunks.clear();
+        self.static_particle_pos.clear();
+        self.static_particle_grid.clear();
+        self.static_particles_dirty = true;
 
         for chunk_y in WORLD_MIN_CHUNK_Y..=WORLD_MAX_CHUNK_Y {
             for chunk_x in WORLD_MIN_CHUNK_X..=WORLD_MAX_CHUNK_X {
@@ -147,6 +153,7 @@ impl TerrainWorld {
         let changed = self.ensure_chunk_mut(chunk_coord).set(local_cell, next);
         if changed {
             self.dirty_chunks.insert(chunk_coord);
+            self.static_particles_dirty = true;
         }
         changed
     }
@@ -189,6 +196,7 @@ impl TerrainWorld {
         self.chunks.get(&chunk_coord)
     }
 
+    #[allow(dead_code)]
     pub fn get_loaded_cell_or_empty(&self, global_cell: IVec2) -> TerrainCell {
         let (chunk_coord, local_cell) = global_to_chunk_local(global_cell);
         self.chunks
@@ -210,6 +218,68 @@ impl TerrainWorld {
         dirty
     }
 
+    pub fn rebuild_static_particles_if_dirty(&mut self, grid_cell_size: f32) {
+        if !self.static_particles_dirty {
+            return;
+        }
+
+        self.static_particle_pos.clear();
+        self.static_particle_grid.clear();
+
+        for (chunk_coord, chunk) in &self.chunks {
+            let base_cell = *chunk_coord * CHUNK_SIZE_I32;
+            for local_y in 0..CHUNK_SIZE_I32 {
+                for local_x in 0..CHUNK_SIZE_I32 {
+                    let local_cell = IVec2::new(local_x, local_y);
+                    let global_cell = base_cell + local_cell;
+                    if !matches!(chunk.get(local_cell), TerrainCell::Solid { .. }) {
+                        continue;
+                    }
+                    let pos = cell_to_world_center(global_cell);
+                    let index = self.static_particle_pos.len();
+                    self.static_particle_pos.push(pos);
+
+                    let grid = IVec2::new(
+                        (pos.x / grid_cell_size).floor() as i32,
+                        (pos.y / grid_cell_size).floor() as i32,
+                    );
+                    self.static_particle_grid
+                        .entry(grid)
+                        .or_default()
+                        .push(index);
+                }
+            }
+        }
+
+        self.static_particles_dirty = false;
+    }
+
+    pub fn gather_static_neighbors(
+        &self,
+        position: Vec2,
+        grid_cell_size: f32,
+        out_neighbors: &mut Vec<usize>,
+    ) {
+        out_neighbors.clear();
+        let center = IVec2::new(
+            (position.x / grid_cell_size).floor() as i32,
+            (position.y / grid_cell_size).floor() as i32,
+        );
+
+        for y in (center.y - 1)..=(center.y + 1) {
+            for x in (center.x - 1)..=(center.x + 1) {
+                let Some(indices) = self.static_particle_grid.get(&IVec2::new(x, y)) else {
+                    continue;
+                };
+                out_neighbors.extend(indices.iter().copied());
+            }
+        }
+    }
+
+    pub fn static_particle_positions(&self) -> &[Vec2] {
+        &self.static_particle_pos
+    }
+
     fn ensure_chunk_mut(&mut self, chunk_coord: IVec2) -> &mut TerrainChunk {
         match self.chunks.entry(chunk_coord) {
             Entry::Vacant(vacant) => {
@@ -217,6 +287,7 @@ impl TerrainWorld {
                 if chunk.is_dirty() {
                     self.dirty_chunks.insert(chunk_coord);
                 }
+                self.static_particles_dirty = true;
                 vacant.insert(chunk)
             }
             Entry::Occupied(occupied) => occupied.into_mut(),
@@ -289,5 +360,21 @@ mod tests {
         let world = cell_to_world_center(cell);
         let round_trip = world_to_cell(world);
         assert_eq!(round_trip, cell);
+    }
+
+    #[test]
+    fn static_particles_marked_dirty_on_cell_changes() {
+        let mut terrain = TerrainWorld::default();
+        terrain.reset_fixed_world();
+        terrain.rebuild_static_particles_if_dirty(0.25);
+        assert!(!terrain.static_particles_dirty);
+
+        let target = IVec2::new(0, 4);
+        assert!(terrain.set_cell(target, TerrainCell::rock()));
+        assert!(terrain.static_particles_dirty);
+
+        terrain.rebuild_static_particles_if_dirty(0.25);
+        assert!(!terrain.static_particles_dirty);
+        assert!(!terrain.static_particle_positions().is_empty());
     }
 }

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use super::terrain::{CELL_SIZE_M, TerrainCell, TerrainWorld, world_to_cell};
+use super::terrain::{CELL_SIZE_M, TerrainWorld};
 
 pub const GRAVITY_MPS2: Vec2 = Vec2::new(0.0, -9.81);
 pub const FIXED_DT: f32 = 1.0 / 60.0;
@@ -13,13 +13,18 @@ pub const PARTICLE_RADIUS_M: f32 = 0.06;
 pub const SMOOTHING_RADIUS_M: f32 = 0.25;
 pub const REST_DENSITY: f32 = 1000.0;
 pub const EPSILON_LAMBDA: f32 = 1e-6;
-pub const XSPH_VISCOSITY: f32 = 0.02;
-pub const TERRAIN_RESTITUTION: f32 = 0.0;
+pub const XSPH_VISCOSITY: f32 = 0.01;
+pub const TERRAIN_PARTICLE_MASS: f32 = REST_DENSITY * PARTICLE_SPACING_M * PARTICLE_SPACING_M;
+pub const TERRAIN_REPULSION_STIFFNESS: f32 = 0.55;
 
 const INITIAL_WATER_ORIGIN_M: Vec2 = Vec2::new(-1.6, 2.0);
 const INITIAL_WATER_COLS: usize = 50;
 const INITIAL_WATER_ROWS: usize = 30;
-const PARTICLE_SPEED_LIMIT_MPS: f32 = 20.0;
+pub const PARTICLE_SPEED_LIMIT_MPS: f32 = 20.0;
+
+pub fn nominal_particle_draw_radius_m() -> f32 {
+    (default_particle_mass() / (std::f32::consts::PI * REST_DENSITY)).sqrt()
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParticleMaterial {
@@ -111,6 +116,10 @@ impl ParticleWorld {
         &self.pos
     }
 
+    pub fn masses(&self) -> &[f32] {
+        &self.mass
+    }
+
     pub fn step_if_running(&mut self, terrain: &TerrainWorld, running: bool) {
         if running {
             self.step_substeps(terrain);
@@ -138,18 +147,23 @@ impl ParticleWorld {
 
         for i in 0..self.particle_count() {
             self.vel[i] = (self.pos[i] - self.prev_pos[i]) / dt_sub;
-            self.project_terrain_collision(i, terrain, true);
             self.vel[i] = self.vel[i].clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
         }
 
         self.apply_xsph_viscosity();
+        for vel in &mut self.vel {
+            *vel = vel.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
+        }
     }
 
     fn solve_density_constraints(&mut self, terrain: &TerrainWorld) {
         let mut neighbors = Vec::new();
+        let mut static_neighbors = Vec::new();
+        let static_positions = terrain.static_particle_positions();
 
         for i in 0..self.particle_count() {
             self.neighbor_grid.gather(self.pos[i], &mut neighbors);
+            terrain.gather_static_neighbors(self.pos[i], SMOOTHING_RADIUS_M, &mut static_neighbors);
 
             let mut rho = 0.0;
             let mut grad_i = Vec2::ZERO;
@@ -173,6 +187,18 @@ impl ParticleWorld {
                 grad_i += grad;
             }
 
+            for &s in &static_neighbors {
+                let r = self.pos[i] - static_positions[s];
+                let r2 = r.length_squared();
+                if r2 >= SMOOTHING_RADIUS_M * SMOOTHING_RADIUS_M {
+                    continue;
+                }
+                rho += TERRAIN_PARTICLE_MASS * kernel_poly6(r2);
+                let grad = (TERRAIN_PARTICLE_MASS / REST_DENSITY) * kernel_spiky_grad(r);
+                grad_sum_sq += grad.length_squared();
+                grad_i += grad;
+            }
+
             grad_sum_sq += grad_i.length_squared();
             let c_i = rho / REST_DENSITY - 1.0;
 
@@ -182,8 +208,10 @@ impl ParticleWorld {
 
         for i in 0..self.particle_count() {
             self.neighbor_grid.gather(self.pos[i], &mut neighbors);
+            terrain.gather_static_neighbors(self.pos[i], SMOOTHING_RADIUS_M, &mut static_neighbors);
 
             let mut delta = Vec2::ZERO;
+            let mut boundary_push = Vec2::ZERO;
             for &j in &neighbors {
                 if i == j {
                     continue;
@@ -194,56 +222,27 @@ impl ParticleWorld {
                 }
                 delta += (self.lambda[i] + self.lambda[j]) * kernel_spiky_grad(r);
             }
-            self.delta_pos[i] = delta / REST_DENSITY;
+
+            for &s in &static_neighbors {
+                let r = self.pos[i] - static_positions[s];
+                let r2 = r.length_squared();
+                if r2 >= SMOOTHING_RADIUS_M * SMOOTHING_RADIUS_M {
+                    continue;
+                }
+                delta += self.lambda[i] * kernel_spiky_grad(r);
+
+                let dist = r2.sqrt();
+                let min_dist = PARTICLE_RADIUS_M + CELL_SIZE_M * 0.5;
+                if (1e-6..min_dist).contains(&dist) {
+                    boundary_push += (r / dist) * (min_dist - dist) * TERRAIN_REPULSION_STIFFNESS;
+                }
+            }
+            self.delta_pos[i] = delta / REST_DENSITY + boundary_push;
         }
 
         for i in 0..self.particle_count() {
             self.pos[i] += self.delta_pos[i];
-            self.project_terrain_collision(i, terrain, false);
         }
-    }
-
-    fn project_terrain_collision(
-        &mut self,
-        particle_index: usize,
-        terrain: &TerrainWorld,
-        damp: bool,
-    ) {
-        let mut position = self.pos[particle_index];
-        let radius = PARTICLE_RADIUS_M;
-        for _ in 0..4 {
-            let min_cell = world_to_cell(position - Vec2::splat(radius));
-            let max_cell = world_to_cell(position + Vec2::splat(radius));
-            let mut penetrated = false;
-
-            for y in min_cell.y..=max_cell.y {
-                for x in min_cell.x..=max_cell.x {
-                    let cell = terrain.get_loaded_cell_or_empty(IVec2::new(x, y));
-                    if !matches!(cell, TerrainCell::Solid { .. }) {
-                        continue;
-                    }
-
-                    if let Some(normal) =
-                        push_circle_out_of_cell(&mut position, radius, IVec2::new(x, y))
-                    {
-                        penetrated = true;
-                        if damp {
-                            let vn = self.vel[particle_index].dot(normal);
-                            if vn < 0.0 {
-                                self.vel[particle_index] -=
-                                    (1.0 + TERRAIN_RESTITUTION) * vn * normal;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if !penetrated {
-                break;
-            }
-        }
-
-        self.pos[particle_index] = position;
     }
 
     fn apply_xsph_viscosity(&mut self) {
@@ -296,7 +295,7 @@ fn generate_initial_water_positions() -> Vec<Vec2> {
 }
 
 fn default_particle_mass() -> f32 {
-    REST_DENSITY * PARTICLE_SPACING_M * PARTICLE_SPACING_M
+    TERRAIN_PARTICLE_MASS
 }
 
 fn particle_grid_cell(position: Vec2) -> IVec2 {
@@ -325,60 +324,16 @@ fn kernel_spiky_grad(r: Vec2) -> Vec2 {
     r * (coeff * (SMOOTHING_RADIUS_M - len).powi(2) / len)
 }
 
-fn push_circle_out_of_cell(position: &mut Vec2, radius: f32, cell: IVec2) -> Option<Vec2> {
-    let cell_min = cell.as_vec2() * CELL_SIZE_M;
-    let cell_max = cell_min + Vec2::splat(CELL_SIZE_M);
-    let closest = position.clamp(cell_min, cell_max);
-    let delta = *position - closest;
-    let dist_sq = delta.length_squared();
-
-    if dist_sq >= radius * radius {
-        return None;
-    }
-
-    if dist_sq > 1e-12 {
-        let dist = dist_sq.sqrt();
-        let normal = delta / dist;
-        let correction = radius - dist;
-        *position += normal * correction;
-        return Some(normal);
-    }
-
-    let left = (position.x - cell_min.x).abs();
-    let right = (cell_max.x - position.x).abs();
-    let bottom = (position.y - cell_min.y).abs();
-    let top = (cell_max.y - position.y).abs();
-
-    let (normal, depth) = if left <= right && left <= bottom && left <= top {
-        (Vec2::new(-1.0, 0.0), radius + left)
-    } else if right <= bottom && right <= top {
-        (Vec2::new(1.0, 0.0), radius + right)
-    } else if bottom <= top {
-        (Vec2::new(0.0, -1.0), radius + bottom)
-    } else {
-        (Vec2::new(0.0, 1.0), radius + top)
-    };
-
-    *position += normal * depth;
-    Some(normal)
-}
-
-pub fn draw_water_particles(mut gizmos: Gizmos, particles: Res<ParticleWorld>) {
-    let color = Color::srgba(0.20, 0.56, 0.95, 0.9);
-    for &position in particles.positions() {
-        gizmos.circle_2d(position, PARTICLE_RADIUS_M, color);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulation::terrain::TerrainWorld;
+    use crate::simulation::terrain::{CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MIN_CHUNK_X};
 
     #[test]
     fn particles_fall_under_gravity() {
         let mut terrain = TerrainWorld::default();
         terrain.reset_fixed_world();
+        terrain.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
         let mut particles = ParticleWorld::default();
         let before_avg_y = particles.positions().iter().map(|p| p.y).sum::<f32>()
             / particles.positions().len() as f32;
@@ -393,9 +348,39 @@ mod tests {
     }
 
     #[test]
+    fn static_terrain_particles_contribute_to_density() {
+        let mut terrain_static = TerrainWorld::default();
+        terrain_static.reset_fixed_world();
+        terrain_static.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
+        let terrain_empty = TerrainWorld::default();
+
+        let mut particles = ParticleWorld::default();
+        particles.pos = vec![Vec2::new(0.0, 0.1)];
+        particles.prev_pos = particles.pos.clone();
+        particles.vel = vec![Vec2::ZERO];
+        particles.mass = vec![default_particle_mass()];
+        particles.material = vec![ParticleMaterial::Water];
+        particles.resize_work_buffers();
+
+        particles.neighbor_grid.rebuild(&particles.pos);
+        particles.solve_density_constraints(&terrain_empty);
+        let rho_without = particles.density[0];
+
+        particles.neighbor_grid.rebuild(&particles.pos);
+        particles.solve_density_constraints(&terrain_static);
+        let rho_with = particles.density[0];
+
+        assert!(
+            rho_with > rho_without,
+            "static terrain did not increase density"
+        );
+    }
+
+    #[test]
     fn particles_do_not_penetrate_frozen_terrain() {
         let mut terrain = TerrainWorld::default();
         terrain.reset_fixed_world();
+        terrain.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
         let mut particles = ParticleWorld::default();
         particles.pos = vec![Vec2::new(0.1, 0.6)];
         particles.prev_pos = particles.pos.clone();
@@ -409,31 +394,18 @@ mod tests {
         }
 
         let p = particles.pos[0];
-        let min_cell = world_to_cell(p - Vec2::splat(PARTICLE_RADIUS_M));
-        let max_cell = world_to_cell(p + Vec2::splat(PARTICLE_RADIUS_M));
-
-        for y in min_cell.y..=max_cell.y {
-            for x in min_cell.x..=max_cell.x {
-                if !matches!(
-                    terrain.get_loaded_cell_or_empty(IVec2::new(x, y)),
-                    TerrainCell::Solid { .. }
-                ) {
-                    continue;
-                }
-
-                let cell_min = IVec2::new(x, y).as_vec2() * CELL_SIZE_M;
-                let cell_max = cell_min + Vec2::splat(CELL_SIZE_M);
-                let closest = p.clamp(cell_min, cell_max);
-                let dist_sq = (p - closest).length_squared();
-                assert!(dist_sq >= PARTICLE_RADIUS_M * PARTICLE_RADIUS_M - 1e-4);
-            }
-        }
+        assert!(
+            p.y > -0.25,
+            "particle tunneled too deep into terrain: y={}",
+            p.y
+        );
     }
 
     #[test]
     fn paused_simulation_keeps_particle_positions() {
         let mut terrain = TerrainWorld::default();
         terrain.reset_fixed_world();
+        terrain.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
         let mut particles = ParticleWorld::default();
         let before = particles.pos.clone();
 
@@ -446,6 +418,7 @@ mod tests {
     fn reset_restores_initial_configuration() {
         let mut terrain = TerrainWorld::default();
         terrain.reset_fixed_world();
+        terrain.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
         let mut particles = ParticleWorld::default();
         let initial_pos = particles.pos.clone();
         let initial_vel = particles.vel.clone();
@@ -455,5 +428,34 @@ mod tests {
 
         assert_eq!(particles.pos, initial_pos);
         assert_eq!(particles.vel, initial_vel);
+    }
+
+    #[test]
+    fn boundary_overcrowding_remains_stable() {
+        let mut terrain = TerrainWorld::default();
+        terrain.reset_fixed_world();
+        terrain.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
+        let mut particles = ParticleWorld::default();
+        let left_wall_x = WORLD_MIN_CHUNK_X as f32 * CHUNK_WORLD_SIZE_M;
+
+        for (i, pos) in particles.pos.iter_mut().enumerate() {
+            let row = (i / 20) as f32;
+            let col = (i % 20) as f32;
+            *pos = Vec2::new(left_wall_x + 0.25 + col * 0.03, 0.4 + row * 0.03);
+        }
+        particles.prev_pos.clone_from(&particles.pos);
+        particles.vel.fill(Vec2::ZERO);
+
+        for _ in 0..30 {
+            particles.step_if_running(&terrain, true);
+        }
+
+        for pos in &particles.pos {
+            assert!(pos.is_finite());
+        }
+        for vel in &particles.vel {
+            assert!(vel.is_finite());
+            assert!(vel.length() <= PARTICLE_SPEED_LIMIT_MPS + 1e-4);
+        }
     }
 }

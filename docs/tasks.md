@@ -5,6 +5,8 @@
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] 水-地形干渉仕様を更新（セルAABB押し戻しを廃止し、SPH一本化を `design.md` に反映）
+- [x] 水-地形干渉方針を更新（地形全粒子化 + 水-地形SPH + AABB投影をフェイルセーフ化）
 - [x] 水粒子v1アルゴリズム仕様を `design.md` に確定（PBF/XPBD + Frozen地形干渉 + Space/R操作）
 - [x] 地形v0実装仕様の確定（`cell_size=0.25m`, `chunk=32x32`, `TerrainWorld/ParticleWorld` 分離、Plugin/描画フロー）
 - [x] Bevy開発環境の構築（Rust + Bevy 0.18系）
@@ -36,6 +38,24 @@
 - [x] `Space` キーでシミュレーション再生/停止トグルを実装
 - [x] `R` キーで初期状態リセットを実装（地形再生成 + 水粒子再生成 + 停止状態）
 - [x] 受け入れ条件テストを実施（落下、非貫通、停止中不変、リセット復元）
+- [x] 地形 `Solid` セルの全粒子化を実装（セル中心に静的地形粒子を生成）
+- [x] `TerrainWorld` に静的地形粒子バッファと再構築処理を追加（地形変更時のみ更新）
+- [x] 水近傍探索に地形静的粒子グリッドを統合（`3x3` 近傍参照）
+- [x] 水の密度拘束（rho/lambda/delta）へ地形静的粒子の寄与を追加
+- [x] 水-地形衝突のセルAABB押し戻し処理を削除し、干渉をSPHベースへ一本化
+- [x] 地形境界の過密緩和を確認する検証シーン/テストを追加
+- [x] 水描画をドット絵化（SPHに基づきセル内ドットへ存在度を分配し、閾値超えドットを水パレットで塗る）
+- [x] 左上HUDにFPSと潜在最大FPSを表示（潜在最大FPS = 1 / フレーム内の実物理処理時間）
+- [x] 粒子デバッグオーバーレイを実装（地形粒子・水粒子を半径円で表示）
+- [x] 右下UIボタンでデバッグオーバーレイ表示を切り替え
+- [x] 近傍探索グリッドとチャンク境界を可視化するグリッドオーバーレイを実装
+- [x] 右下UIにグリッドオーバーレイトグルボタンを追加
+- [x] 粒子デバッグオーバーレイを円から点表示へ変更（描画負荷軽減）
+- [x] 粒子デバッグオーバーレイを低解像度円表示へ調整（見た目サイズを維持しつつ軽量化）
+- [x] REST_DENSITY基準の水描画半径を導入し、水オーバーレイ半径と水ドット描画に適用
+- [x] 水ドット描画にseparable blur + smoothstepを追加し、液体境界を滑らか化
+- [x] WATER_DOT_THRESHOLDをREST_DENSITY比へ変更（密度場を mass*kernel で評価）
+- [x] blur半径を定数化し、`WATER_BLUR_RADIUS_DOTS=3`で調整可能に変更
 
 ## Design Feedback (from Impl sessions)
-- (If implementation reveals required design changes, record requests here)
+- (No open feedback items)
