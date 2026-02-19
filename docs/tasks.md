@@ -62,6 +62,8 @@
 - [x] `Stone` ツールのドラッグで地形（Frozen）を生成
 - [x] `Delete` ツールで一定半径内の水粒子と地形を削除
 - [x] `Esc` キーでツール選択を解除
+- [x] Stoneツールを1セル単位描画に変更（カーソルサイズ1）
+- [x] Water生成をドラッグ軌跡ベースへ変更（標準粒子間隔に応じた個数を配置）
 
 ## Design Feedback (from Impl sessions)
 - (No open feedback items)

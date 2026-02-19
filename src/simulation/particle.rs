@@ -136,34 +136,43 @@ impl ParticleWorld {
         }
     }
 
-    pub fn spawn_water_particles_in_disk(
+    pub fn spawn_water_particles_along_segment(
         &mut self,
-        center: Vec2,
-        radius: f32,
+        from: Vec2,
+        to: Vec2,
         spacing: f32,
         initial_velocity: Vec2,
-    ) {
-        if radius <= 0.0 || spacing <= 0.0 {
-            return;
+        spacing_carry_m: &mut f32,
+    ) -> usize {
+        if spacing <= 0.0 {
+            return 0;
         }
 
-        let min = center - Vec2::splat(radius);
-        let max = center + Vec2::splat(radius);
-        let radius2 = radius * radius;
-        let mut y = min.y;
-        while y <= max.y {
-            let mut x = min.x;
-            while x <= max.x {
-                let pos = Vec2::new(x, y);
-                if pos.distance_squared(center) <= radius2 {
-                    self.push_water_particle(pos, initial_velocity);
-                }
-                x += spacing;
-            }
-            y += spacing;
+        let segment = to - from;
+        let length = segment.length();
+        if length < 1e-6 {
+            return 0;
         }
 
+        let direction = segment / length;
+        let carry = (*spacing_carry_m).clamp(0.0, spacing);
+        let total = carry + length;
+        let spawn_count = (total / spacing).floor() as usize;
+        if spawn_count == 0 {
+            *spacing_carry_m = total;
+            return 0;
+        }
+
+        let first_offset = spacing - carry;
+        for i in 0..spawn_count {
+            let offset = first_offset + i as f32 * spacing;
+            let pos = from + direction * offset;
+            self.push_water_particle(pos, initial_velocity);
+        }
+
+        *spacing_carry_m = total - spawn_count as f32 * spacing;
         self.resize_work_buffers();
+        spawn_count
     }
 
     pub fn remove_particles_in_radius(&mut self, center: Vec2, radius: f32) -> usize {

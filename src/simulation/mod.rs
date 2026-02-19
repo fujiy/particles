@@ -17,7 +17,7 @@ use render::{
 };
 pub use terrain::cell_to_world_center;
 use terrain::{
-    CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X,
+    CELL_SIZE_M, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X,
     WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, world_to_cell,
 };
 
@@ -36,11 +36,9 @@ const DEBUG_OVERLAY_CIRCLE_RESOLUTION: u32 = 8;
 const TOOLBAR_BG_COLOR: Color = Color::srgba(0.05, 0.06, 0.09, 0.88);
 const DRAG_VELOCITY_BRUSH_RADIUS_M: f32 = 0.55;
 const DRAG_VELOCITY_GAIN: f32 = 0.9;
-const TOOL_STROKE_STEP_M: f32 = PARTICLE_SPACING_M * 0.8;
-const TOOL_WATER_BRUSH_RADIUS_M: f32 = 0.28;
-const TOOL_WATER_SPAWN_SPACING_M: f32 = PARTICLE_SPACING_M * 0.9;
-const TOOL_STONE_BRUSH_RADIUS_M: f32 = 0.28;
-const TOOL_DELETE_BRUSH_RADIUS_M: f32 = 0.30;
+const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
+const TOOL_WATER_SPAWN_SPACING_M: f32 = PARTICLE_SPACING_M;
+const TOOL_DELETE_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
 
 pub struct SimulationPlugin;
 
@@ -133,6 +131,7 @@ impl WorldTool {
 struct WorldInteractionState {
     selected_tool: Option<WorldTool>,
     last_drag_world: Option<Vec2>,
+    water_spawn_carry_m: f32,
 }
 
 #[derive(Resource, Debug, Default)]
@@ -382,6 +381,7 @@ fn handle_world_tool_button_interaction(
         if *interaction == Interaction::Pressed {
             interaction_state.selected_tool = Some(button.tool);
             interaction_state.last_drag_world = None;
+            interaction_state.water_spawn_carry_m = 0.0;
         }
     }
 }
@@ -424,16 +424,19 @@ fn handle_world_interactions(
     if keyboard.just_pressed(KeyCode::Escape) {
         interaction_state.selected_tool = None;
         interaction_state.last_drag_world = None;
+        interaction_state.water_spawn_carry_m = 0.0;
     }
 
     if !mouse_buttons.pressed(MouseButton::Left) {
         interaction_state.last_drag_world = None;
+        interaction_state.water_spawn_carry_m = 0.0;
         return;
     }
 
     let alt_pressed = keyboard.pressed(KeyCode::AltLeft) || keyboard.pressed(KeyCode::AltRight);
     if alt_pressed || mouse_buttons.pressed(MouseButton::Middle) {
         interaction_state.last_drag_world = None;
+        interaction_state.water_spawn_carry_m = 0.0;
         return;
     }
 
@@ -442,11 +445,13 @@ fn handle_world_interactions(
         .any(|interaction| *interaction != Interaction::None)
     {
         interaction_state.last_drag_world = None;
+        interaction_state.water_spawn_carry_m = 0.0;
         return;
     }
 
     let Some(cursor_world) = cursor_world_position(&windows, &camera_query) else {
         interaction_state.last_drag_world = None;
+        interaction_state.water_spawn_carry_m = 0.0;
         return;
     };
 
@@ -454,24 +459,25 @@ fn handle_world_interactions(
     let dt = time.delta_secs().max(1e-4);
     let stroke_velocity = (cursor_world - previous_world) / dt;
     let mut terrain_changed = false;
+    if interaction_state.selected_tool != Some(WorldTool::Water) {
+        interaction_state.water_spawn_carry_m = 0.0;
+    }
 
     match interaction_state.selected_tool {
         Some(WorldTool::Water) => {
-            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                particle_world.spawn_water_particles_in_disk(
-                    point,
-                    TOOL_WATER_BRUSH_RADIUS_M,
-                    TOOL_WATER_SPAWN_SPACING_M,
-                    stroke_velocity.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS),
-                );
-            });
+            particle_world.spawn_water_particles_along_segment(
+                previous_world,
+                cursor_world,
+                TOOL_WATER_SPAWN_SPACING_M,
+                Vec2::ZERO,
+                &mut interaction_state.water_spawn_carry_m,
+            );
         }
         Some(WorldTool::Stone) => {
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                terrain_changed |= paint_terrain_cells_in_radius(
+                terrain_changed |= paint_single_terrain_cell(
                     &mut terrain_world,
-                    point,
-                    TOOL_STONE_BRUSH_RADIUS_M,
+                    world_to_cell(point),
                     TerrainCell::rock(),
                 );
             });
@@ -488,6 +494,7 @@ fn handle_world_interactions(
             });
         }
         None => {
+            interaction_state.water_spawn_carry_m = 0.0;
             let velocity_delta = stroke_velocity * DRAG_VELOCITY_GAIN;
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
                 particle_world.add_velocity_in_radius(
@@ -708,6 +715,17 @@ fn paint_terrain_cells_in_radius(
     }
 
     changed
+}
+
+fn paint_single_terrain_cell(
+    terrain_world: &mut TerrainWorld,
+    cell: IVec2,
+    cell_value: TerrainCell,
+) -> bool {
+    if !cell_in_fixed_world(cell) {
+        return false;
+    }
+    terrain_world.set_cell(cell, cell_value)
 }
 
 fn cell_in_fixed_world(cell: IVec2) -> bool {
