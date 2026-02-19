@@ -29,17 +29,42 @@
 
 ---
 
-## 2. 世界表現（台帳）と「粒子化」ポリシー
+## 2. 世界表現（台帳）と地形アクティベーション方針
 
-### 2.1 基本：静的な地形・建築は“タイル台帳”
+### 2.1 基本：地形・建築は同一の「粗粒子クラスタ」表現
 
-* 地形／建築ブロックはタイル（または局所グリッド）として保持し、描画もタイルスプライトが基本。
-* **物理粒子として常時シミュするのは「動く／壊れる／流れる」部分だけ**。
+* 地形／建築ブロックは局所グリッド上で **1ブロック=1粗粒子** として保持する。
+* 隣接ブロックは結合（距離拘束/クラスタ拘束）で接続し、岩盤や構造物の連続性を表現する。
+* つまりデータ表現は「地形」と「動的デブリ」で分けず、**同じ粒子クラスタ**を使う。
 
-### 2.2 破壊・崩落時：タイル→粒子（デブリ化）
+### 2.2 実行モード分離：`Frozen` / `Active`
 
-* 破壊で生じた塊は、粗粒子＋拘束（後述）へ変換して動的化。
-* 逆に、落ち着いたデブリは「沈静化（sleep）」して、必要なら再タイル化（最適化オプション）。
+* 表現は統一するが、毎フレームの計算は分離する。
+* `Frozen`（地形の通常状態）
+
+  * 位置積分・拘束反復を省略し、静的境界相当として扱う。
+  * 描画・当たり判定用の情報のみ更新する。
+* `Active`（衝撃や破壊で動く状態）
+
+  * XPBDの積分・拘束解法・破断判定を実行する。
+  * 変化があった粒子を中心に、近傍セルのみ局所更新する。
+
+### 2.3 `Frozen`→`Active` の起動条件（Wake）
+
+* 衝撃、拘束ひずみ、局所ダメージのいずれかが閾値を超えた粒子を起点に `Active` 化する。
+* 起点の近傍半径 `r_wake` 内の粒子を同時に `Active` 化する（近傍伝播）。
+* 実装上は「起点粒子を含む近接セル集合」を更新対象にする。
+
+### 2.4 `Active`→`Frozen` の復帰条件（Sleep）
+
+* 速度・角速度相当・ひずみが低い状態が `t_sleep` 継続したクラスタは `Frozen` に戻す。
+* モードの振動を防ぐため、`wake_threshold > sleep_threshold` のヒステリシスを必須とする。
+
+### 2.5 破壊と分離塊
+
+* 各結合に `damage` を持ち、反力/ひずみに応じて蓄積し、閾値で破断する。
+* 破断後の連結成分再計算は **Active領域内のみ**で行う（全地形再計算はしない）。
+* 分離した成分は独立クラスタとして `Active` 維持し、「岩が割れて離れて転がる」挙動を表現する。
 
 ---
 
@@ -114,6 +139,11 @@
 ### 5.3 衝突コスト対策：境界粒子のみ接触対象
 
 * 物体内部粒子は“形状維持／破壊”用で、接触判定は **境界粒子**中心にする（候補数を抑える）。
+
+### 5.4 地形への適用ルール
+
+* 地形も同じクラスタ拘束モデルを使うが、通常は `Frozen` で運用する。
+* 衝撃・破壊時のみ局所的に `Active` 化して計算し、静穏化後に再 `Frozen` 化する。
 
 ---
 
@@ -235,6 +265,195 @@
 3. 水：密度拘束（PBF/XPBD）で「溜まる／流れる」
 4. 流体描画：方式A（密度Image＋閾値＋縁取り）
 5. 固体塊：クラスタ拘束で“剛体っぽい”挙動
-6. 破壊：拘束破断＋ダメージ蓄積
-7. LOD（画面外低頻度＋スリープ）＋チャンクdirty更新
-8. 必要ならGPU化（まず描画→次に物理）
+6. `Frozen/Active` 切替（wake/sleep + ヒステリシス）と局所更新の導入
+7. 破壊：拘束破断＋局所連結再計算＋分離クラスタ化
+8. LOD（画面外低頻度＋スリープ）＋チャンクdirty更新
+9. 必要ならGPU化（まず描画→次に物理）
+
+---
+
+## 11. Impl Session 引き渡し仕様（v0: Frozen Terrain）
+
+この章は、次の実装フェーズで迷わないための「確定仕様」を記す。  
+対象は「地形データ管理と表示」までで、地形は常時 `Frozen` とする。
+
+### 11.1 単位系・グリッド定数
+
+* 物理単位はSIベース（`m`, `s`, `kg`）。
+* Bevyワールド座標は `1.0 = 1m` とする。
+* 地形セルサイズは `CELL_SIZE_M = 0.25`（m）。
+* チャンクサイズは `CHUNK_SIZE = 32`（cells/axis）。
+* よって1チャンクは `8m x 8m`（`32 * 0.25`）。
+* 描画は当面 `PIXELS_PER_METER = 64` を採用し、1セルは16px（`0.25m * 64`）。
+* 描画用セルピクセルは `CELL_PIXEL_SIZE = 16` とする。
+
+### 11.2 座標定義（Chunk とは何か）
+
+* `global_cell`: 世界全体の整数セル座標 `(x, y)`。
+* `chunk_coord`: チャンク座標 `(cx, cy)`。
+* `local_cell`: チャンク内ローカル座標 `(lx, ly)`（`0..31`）。
+* 分解は `div_floor` / `rem_euclid` を使う（負座標を正しく扱う）。
+
+### 11.3 TerrainWorld 仕様
+
+* `TerrainWorld` は地形台帳の `Resource`。
+* 内部は疎チャンク管理：
+  * `HashMap<ChunkCoord, TerrainChunk>`
+  * `HashSet<ChunkCoord>` または同等のdirty追跡
+* `TerrainChunk` は最低限以下を持つ：
+  * `cells: [TerrainCell; CHUNK_SIZE * CHUNK_SIZE]`
+  * `dirty: bool`
+* `TerrainCell` は当面以下：
+  * `Empty`
+  * `Solid { material: TerrainMaterial, hp: u16 }`
+* v0では全セルを `Frozen` 扱いとし、`Active` 化は実装しない（将来拡張）。
+
+### 11.4 ParticleWorld 仕様（v0の位置づけ）
+
+* `ParticleWorld` は動的粒子用 `Resource` として雛形のみ導入する。
+* v0では本格シミュレーションは行わず、将来拡張のための境界だけ用意する。
+* `TerrainWorld` と分離する理由：
+  * 地形（静的）は毎tickソート不要
+  * 動的粒子のみを毎tickで近傍構築・更新したい
+  * 将来の近傍探索で `dynamic-dynamic` と `dynamic-static(Terrain)` を併用できる
+
+### 11.5 Terrain API（v0必須）
+
+* `get_cell(global_cell) -> TerrainCell`
+* `set_cell(global_cell, cell) -> bool`
+  * 値が変わった場合のみ `true` を返し、該当チャンクをdirtyにする。
+* `fill_rect(min_cell, max_cell, cell)`
+  * 内部で `set_cell` を使い、dirty規則を統一する。
+* `for_each_in_chunk(chunk_coord, f)`
+  * 読み取り用イテレーション。
+* 座標変換ユーティリティ：
+  * `world_to_cell(Vec2) -> IVec2`
+  * `cell_to_world_center(IVec2) -> Vec2`
+
+### 11.6 初期地形生成（v0）
+
+* まずは決定論的な固定地形（乱数ノイズなし）。
+* 生成規則：`global_y <= 0` のセルを `Solid(rock)`、それ以外を `Empty`。
+* チャンクは遅延生成（アクセス時に生成）でよい。
+
+### 11.7 Bevy統合（Plugin/スケジュール）
+
+* `SimulationPlugin` を用意し、`App` から有効化する。
+* `SimulationPlugin` で以下を登録：
+  * `TerrainWorld` `Resource`
+  * `ParticleWorld` `Resource`（雛形）
+  * 描画同期用の管理 `Resource`（チャンクEntity/Image対応表）
+* スケジュール：
+  * `FixedUpdate`
+    * `terrain_fixed_step`（v0では実質no-opまたは軽い保守処理）
+  * `Update`
+    * `sync_dirty_terrain_chunks_to_render`（dirtyチャンクの画像再生成）
+
+### 11.8 地形描画仕様（v0）
+
+* 方式：**チャンクごとに1枚の `Image` + `Sprite`**。
+* チャンク画像サイズは `CHUNK_SIZE * CELL_PIXEL_SIZE`。
+* 補間はnearest（ドット絵前提）。
+* dirty管理：
+  * セル変更時にチャンクdirty化
+  * 再描画はdirtyチャンク単位で全再生成（セル単位差分更新はしない）
+* `Image` 再生成後、対応 `Sprite` を更新する。
+
+### 11.9 v0の非対象（明示）
+
+* `Frozen -> Active` wake/sleep
+* 破壊、連結再計算、分離クラスタ
+* 動的粒子との双方向相互作用
+* 流体/粉体シミュレーション本体
+
+---
+
+## 12. Impl Session 引き渡し仕様（v1: 水粒子 + Frozen地形）
+
+この章は、次実装フェーズで「水粒子を重力で落とし、Frozen地形と干渉させる」ための確定仕様を記す。
+
+### 12.1 スコープ
+
+* 対象は「水粒子シミュレーションの最小実装」。
+* 地形は引き続き `Frozen` のまま（地形変形なし）。
+* 水は `ParticleWorld` でのみ更新する。
+
+### 12.2 粒子・ソルバ定数（初期値）
+
+* `GRAVITY_MPS2 = Vec2(0.0, -9.81)`
+* `FIXED_DT = 1.0 / 60.0`
+* `SUBSTEPS = 2`（`dt_sub = FIXED_DT / SUBSTEPS`）
+* `SOLVER_ITERS = 6`
+* `PARTICLE_SPACING_M = 0.125`
+* `PARTICLE_RADIUS_M = 0.06`
+* `SMOOTHING_RADIUS_M = 0.25`
+* `REST_DENSITY = 1000.0`（水の目標密度、相対調整可）
+* `EPSILON_LAMBDA = 1e-6`
+* `XSPH_VISCOSITY = 0.02`
+* `TERRAIN_RESTITUTION = 0.0`（地形で跳ねない）
+
+### 12.3 データ構造（v1で追加）
+
+* `ParticleWorld`（SoA）
+  * `pos: Vec<Vec2>`
+  * `prev_pos: Vec<Vec2>`
+  * `vel: Vec<Vec2>`
+  * `mass: Vec<f32>`
+  * `material: Vec<ParticleMaterial>`（当面は `Water` のみ）
+* ワークバッファ
+  * `density: Vec<f32>`
+  * `lambda: Vec<f32>`
+  * `delta_pos: Vec<Vec2>`
+* 近傍探索
+  * 動的粒子のみ、均一グリッド（空間ハッシュ）を毎substep更新。
+
+### 12.4 1 substep のアルゴリズム
+
+1. `prev_pos[i] = pos[i]`
+2. 外力積分：`vel[i] += GRAVITY_MPS2 * dt_sub`
+3. 予測位置：`pos[i] += vel[i] * dt_sub`
+4. 近傍探索グリッド再構築（動的粒子のみ）
+5. `SOLVER_ITERS` 回反復：
+   * 密度 `rho_i` をSPHカーネルで計算
+   * 拘束 `C_i = rho_i / REST_DENSITY - 1`
+   * `lambda_i` を計算
+   * 近傍粒子から `delta_pos[i]` を蓄積
+   * `pos[i] += delta_pos[i]`
+   * 地形衝突投影（12.5）
+6. 速度更新：`vel[i] = (pos[i] - prev_pos[i]) / dt_sub`
+7. 地形接触の法線内向き速度を除去（`restitution=0`）
+8. XSPH粘性を適用
+
+### 12.5 水粒子 vs Frozen地形（衝突投影）
+
+* 地形は `TerrainWorld` の `Solid` セルを静的障害物として扱う。
+* 粒子ごとに、`[pos - r, pos + r]` が重なるセル範囲のみ走査する。
+* 各 `Solid` セルに対して「円（粒子） vs AABB（セル）」最近接点を計算。
+* 貫通時は法線方向に押し戻して非貫通化する。
+* 速度は法線方向の内向き成分を除去する（接線は残す）。
+* 地形側は不動（`inv_mass = 0` 相当）。
+
+### 12.6 Bevy実行フロー（v1）
+
+* `FixedUpdate`:
+  * `if sim_state.running { step_water_particles(SUBSTEPS) }`
+* `Update`:
+  * 地形描画のdirty同期
+  * 水粒子の可視化同期（最初はデバッグ描画で可）
+
+### 12.7 操作仕様（v1）
+
+* `Space`: シミュレーション再生/停止トグル
+  * `running = !running`
+  * 停止中は `FixedUpdate` で粒子更新しない
+* `R`: 初期状態へリセット
+  * 初期地形（固定生成）を再作成
+  * 初期水粒子配置を再生成
+  * `running = false` で再開待ちにする
+
+### 12.8 受け入れ条件（v1）
+
+* 水粒子が重力で落下する。
+* 粒子が地形セルを貫通しない。
+* `Space` で停止中は粒子位置が変化しない。
+* `R` で初期配置に戻る。
