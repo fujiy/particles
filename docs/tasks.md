@@ -5,6 +5,9 @@
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] Design Feedback反映: 水-岩干渉仕様を「岩SPH寄与なし + SDF `boundary_push`」へ更新（`design.md` §12.1/§12.5）
+- [x] Design Feedback反映: 新規定数 `TERRAIN_SDF_SAMPLES_PER_CELL` / `TERRAIN_SDF_PUSH_RADIUS_M` / `TERRAIN_REPULSION_STIFFNESS` を仕様へ追加（`design.md` §12.2）
+- [x] Design Feedback反映: 水描画仕様に「岩セル上の水ドット抑制・岩優先表示」を追加（`design.md` §8.2）
 - [x] 水-地形干渉仕様を更新（セルAABB押し戻しを廃止し、SPH一本化を `design.md` に反映）
 - [x] 水-地形干渉方針を更新（地形全粒子化 + 水-地形SPH + AABB投影をフェイルセーフ化）
 - [x] 水粒子v1アルゴリズム仕様を `design.md` に確定（PBF/XPBD + Frozen地形干渉 + Space/R操作）
@@ -71,6 +74,4 @@
 - [x] 描画時に岩セル上の水ドット生成/描画を抑制し、重なり時は岩ドットを優先表示
 
 ## Design Feedback (from Impl sessions)
-- [ ] 水-岩干渉仕様が `design.md` §12.5 から変更: 「地形静的粒子をSPH拘束へ寄与」ではなく、「地形セル由来SDF + 法線方向 `boundary_push`（岩SPH寄与なし）」へ移行。根拠は、粒子境界由来の表面凹凸で水が引っかかる問題の低減。
-- [ ] 新規チューニング定数を仕様へ反映したい: `TERRAIN_SDF_SAMPLES_PER_CELL`, `TERRAIN_SDF_PUSH_RADIUS_M`, `TERRAIN_REPULSION_STIFFNESS`。`design.md` §12.2/§12.5 の定数表と干渉アルゴリズム記述の更新が必要。
-- [ ] 描画仕様が `design.md` §8.2 から拡張: 岩セル上の水ドット生成/描画を抑制して地形を優先表示するマスク処理を導入（見た目の重なり解消を優先、密度可視化の厳密性は低下）。
+- (No open feedback items)
