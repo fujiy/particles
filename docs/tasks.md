@@ -56,6 +56,12 @@
 - [x] 水ドット描画にseparable blur + smoothstepを追加し、液体境界を滑らか化
 - [x] WATER_DOT_THRESHOLDをREST_DENSITY比へ変更（密度場を mass*kernel で評価）
 - [x] blur半径を定数化し、`WATER_BLUR_RADIUS_DOTS=3`で調整可能に変更
+- [x] 通常状態のマウスドラッグで水粒子へ速度を付与する操作を追加
+- [x] 画面下ツールバーを追加し、`Water`/`Stone`/`Delete` ツール選択を実装
+- [x] `Water` ツールのドラッグで水粒子を生成
+- [x] `Stone` ツールのドラッグで地形（Frozen）を生成
+- [x] `Delete` ツールで一定半径内の水粒子と地形を削除
+- [x] `Esc` キーでツール選択を解除
 
 ## Design Feedback (from Impl sessions)
 - (No open feedback items)

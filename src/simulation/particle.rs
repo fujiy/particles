@@ -120,6 +120,67 @@ impl ParticleWorld {
         &self.mass
     }
 
+    pub fn add_velocity_in_radius(
+        &mut self,
+        center: Vec2,
+        radius: f32,
+        velocity_delta: Vec2,
+        velocity_limit_mps: f32,
+    ) {
+        let radius2 = radius * radius;
+        for i in 0..self.particle_count() {
+            if self.pos[i].distance_squared(center) > radius2 {
+                continue;
+            }
+            self.vel[i] = (self.vel[i] + velocity_delta).clamp_length_max(velocity_limit_mps);
+        }
+    }
+
+    pub fn spawn_water_particles_in_disk(
+        &mut self,
+        center: Vec2,
+        radius: f32,
+        spacing: f32,
+        initial_velocity: Vec2,
+    ) {
+        if radius <= 0.0 || spacing <= 0.0 {
+            return;
+        }
+
+        let min = center - Vec2::splat(radius);
+        let max = center + Vec2::splat(radius);
+        let radius2 = radius * radius;
+        let mut y = min.y;
+        while y <= max.y {
+            let mut x = min.x;
+            while x <= max.x {
+                let pos = Vec2::new(x, y);
+                if pos.distance_squared(center) <= radius2 {
+                    self.push_water_particle(pos, initial_velocity);
+                }
+                x += spacing;
+            }
+            y += spacing;
+        }
+
+        self.resize_work_buffers();
+    }
+
+    pub fn remove_particles_in_radius(&mut self, center: Vec2, radius: f32) -> usize {
+        let radius2 = radius * radius;
+        let mut removed = 0;
+        for i in (0..self.particle_count()).rev() {
+            if self.pos[i].distance_squared(center) > radius2 {
+                continue;
+            }
+            self.swap_remove_particle(i);
+            removed += 1;
+        }
+
+        self.resize_work_buffers();
+        removed
+    }
+
     pub fn step_if_running(&mut self, terrain: &TerrainWorld, running: bool) {
         if running {
             self.step_substeps(terrain);
@@ -265,6 +326,26 @@ impl ParticleWorld {
         }
 
         self.vel.clone_from(&self.viscosity_work);
+    }
+
+    fn push_water_particle(&mut self, position: Vec2, velocity: Vec2) {
+        self.pos.push(position);
+        self.prev_pos.push(position);
+        self.vel.push(velocity);
+        self.mass.push(default_particle_mass());
+        self.material.push(ParticleMaterial::Water);
+    }
+
+    fn swap_remove_particle(&mut self, index: usize) {
+        self.pos.swap_remove(index);
+        self.prev_pos.swap_remove(index);
+        self.vel.swap_remove(index);
+        self.mass.swap_remove(index);
+        self.material.swap_remove(index);
+        self.density.swap_remove(index);
+        self.lambda.swap_remove(index);
+        self.delta_pos.swap_remove(index);
+        self.viscosity_work.swap_remove(index);
     }
 
     fn resize_work_buffers(&mut self) {

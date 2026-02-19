@@ -6,8 +6,10 @@ use std::time::Instant;
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 use particle::{
-    PARTICLE_RADIUS_M, ParticleWorld, SMOOTHING_RADIUS_M, nominal_particle_draw_radius_m,
+    PARTICLE_RADIUS_M, PARTICLE_SPACING_M, PARTICLE_SPEED_LIMIT_MPS, ParticleWorld,
+    SMOOTHING_RADIUS_M, nominal_particle_draw_radius_m,
 };
 use render::{
     TerrainRenderState, WaterRenderState, bootstrap_terrain_chunks,
@@ -15,8 +17,8 @@ use render::{
 };
 pub use terrain::cell_to_world_center;
 use terrain::{
-    CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
-    WORLD_MIN_CHUNK_Y,
+    CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X,
+    WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, world_to_cell,
 };
 
 const HUD_BG_COLOR: Color = Color::srgba(0.05, 0.06, 0.09, 0.82);
@@ -28,8 +30,17 @@ const GRID_NEIGHBOR_COLOR: Color = Color::srgba(0.27, 0.75, 0.98, 0.28);
 const GRID_CHUNK_COLOR: Color = Color::srgba(0.98, 0.78, 0.25, 0.75);
 const GRID_BUTTON_BOTTOM_PX: f32 = 50.0;
 const DEBUG_BUTTON_BOTTOM_PX: f32 = 12.0;
+const TOOLBAR_BOTTOM_PX: f32 = 12.0;
 const TERRAIN_PARTICLE_RADIUS_M: f32 = PARTICLE_RADIUS_M * 0.55;
 const DEBUG_OVERLAY_CIRCLE_RESOLUTION: u32 = 8;
+const TOOLBAR_BG_COLOR: Color = Color::srgba(0.05, 0.06, 0.09, 0.88);
+const DRAG_VELOCITY_BRUSH_RADIUS_M: f32 = 0.55;
+const DRAG_VELOCITY_GAIN: f32 = 0.9;
+const TOOL_STROKE_STEP_M: f32 = PARTICLE_SPACING_M * 0.8;
+const TOOL_WATER_BRUSH_RADIUS_M: f32 = 0.28;
+const TOOL_WATER_SPAWN_SPACING_M: f32 = PARTICLE_SPACING_M * 0.9;
+const TOOL_STONE_BRUSH_RADIUS_M: f32 = 0.28;
+const TOOL_DELETE_BRUSH_RADIUS_M: f32 = 0.30;
 
 pub struct SimulationPlugin;
 
@@ -40,6 +51,7 @@ impl Plugin for SimulationPlugin {
             .init_resource::<SimulationState>()
             .init_resource::<DebugOverlayState>()
             .init_resource::<GridOverlayState>()
+            .init_resource::<WorldInteractionState>()
             .init_resource::<SimulationPerfMetrics>()
             .init_resource::<TerrainRenderState>()
             .init_resource::<WaterRenderState>()
@@ -54,13 +66,16 @@ impl Plugin for SimulationPlugin {
                 (
                     handle_sim_controls,
                     apply_sim_reset,
-                    sync_dirty_terrain_chunks_to_render,
-                    sync_water_dots_to_render,
                     handle_grid_overlay_button,
                     handle_overlay_button,
+                    handle_world_tool_button_interaction,
+                    handle_world_interactions,
+                    sync_dirty_terrain_chunks_to_render,
+                    sync_water_dots_to_render,
                     update_simulation_hud,
                     update_grid_overlay_button_label,
                     update_overlay_button_label,
+                    update_world_tool_button_visuals,
                     draw_grid_overlay,
                     draw_particle_debug_overlay,
                     finalize_frame_metrics,
@@ -97,6 +112,29 @@ impl Default for GridOverlayState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorldTool {
+    Water,
+    Stone,
+    Delete,
+}
+
+impl WorldTool {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Water => "Water",
+            Self::Stone => "Stone",
+            Self::Delete => "Delete",
+        }
+    }
+}
+
+#[derive(Resource, Debug, Default)]
+struct WorldInteractionState {
+    selected_tool: Option<WorldTool>,
+    last_drag_world: Option<Vec2>,
+}
+
 #[derive(Resource, Debug, Default)]
 struct SimulationPerfMetrics {
     physics_time_this_frame_secs: f64,
@@ -120,6 +158,16 @@ struct GridOverlayToggleButton;
 
 #[derive(Component)]
 struct GridOverlayToggleButtonLabel;
+
+#[derive(Component, Clone, Copy)]
+struct WorldToolButton {
+    tool: WorldTool,
+}
+
+#[derive(Component, Clone, Copy)]
+struct WorldToolButtonLabel {
+    tool: WorldTool,
+}
 
 fn step_water_particles(
     sim_state: Res<SimulationState>,
@@ -187,6 +235,49 @@ fn setup_simulation_ui(mut commands: Commands) {
                 TextColor(Color::WHITE),
                 SimulationHudText,
             ));
+        });
+
+    commands
+        .spawn((Node {
+            position_type: PositionType::Absolute,
+            left: px(0.0),
+            right: px(0.0),
+            bottom: px(TOOLBAR_BOTTOM_PX),
+            justify_content: JustifyContent::Center,
+            ..default()
+        },))
+        .with_children(|parent| {
+            parent
+                .spawn((
+                    Node {
+                        padding: UiRect::axes(px(10.0), px(8.0)),
+                        column_gap: px(8.0),
+                        ..default()
+                    },
+                    BackgroundColor(TOOLBAR_BG_COLOR),
+                ))
+                .with_children(|toolbar| {
+                    for tool in [WorldTool::Water, WorldTool::Stone, WorldTool::Delete] {
+                        toolbar
+                            .spawn((
+                                Button,
+                                Node {
+                                    padding: UiRect::axes(px(10.0), px(6.0)),
+                                    ..default()
+                                },
+                                BackgroundColor(BUTTON_BG_OFF),
+                                WorldToolButton { tool },
+                            ))
+                            .with_children(|button| {
+                                button.spawn((
+                                    Text::new(tool.label()),
+                                    TextFont::from_font_size(14.0),
+                                    TextColor(Color::WHITE),
+                                    WorldToolButtonLabel { tool },
+                                ));
+                            });
+                    }
+                });
         });
 
     commands
@@ -278,6 +369,142 @@ fn handle_grid_overlay_button(
             }
         }
     }
+}
+
+fn handle_world_tool_button_interaction(
+    mut interactions: Query<
+        (&Interaction, &WorldToolButton),
+        (Changed<Interaction>, With<WorldToolButton>),
+    >,
+    mut interaction_state: ResMut<WorldInteractionState>,
+) {
+    for (interaction, button) in &mut interactions {
+        if *interaction == Interaction::Pressed {
+            interaction_state.selected_tool = Some(button.tool);
+            interaction_state.last_drag_world = None;
+        }
+    }
+}
+
+fn update_world_tool_button_visuals(
+    interaction_state: Res<WorldInteractionState>,
+    mut buttons: Query<(&Interaction, &WorldToolButton, &mut BackgroundColor)>,
+    mut labels: Query<(&WorldToolButtonLabel, &mut Text)>,
+) {
+    for (interaction, button, mut bg) in &mut buttons {
+        *bg = match *interaction {
+            Interaction::Pressed => BUTTON_BG_PRESS.into(),
+            Interaction::Hovered => BUTTON_BG_HOVER.into(),
+            Interaction::None => {
+                toggle_button_bg(interaction_state.selected_tool == Some(button.tool))
+            }
+        };
+    }
+
+    for (label, mut text) in &mut labels {
+        if interaction_state.selected_tool == Some(label.tool) {
+            text.0 = format!("{} [Selected]", label.tool.label());
+        } else {
+            text.0 = label.tool.label().to_string();
+        }
+    }
+}
+
+fn handle_world_interactions(
+    time: Res<Time>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+    mouse_buttons: Res<ButtonInput<MouseButton>>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    ui_buttons: Query<&Interaction, With<Button>>,
+    mut interaction_state: ResMut<WorldInteractionState>,
+    mut particle_world: ResMut<ParticleWorld>,
+    mut terrain_world: ResMut<TerrainWorld>,
+) {
+    if keyboard.just_pressed(KeyCode::Escape) {
+        interaction_state.selected_tool = None;
+        interaction_state.last_drag_world = None;
+    }
+
+    if !mouse_buttons.pressed(MouseButton::Left) {
+        interaction_state.last_drag_world = None;
+        return;
+    }
+
+    let alt_pressed = keyboard.pressed(KeyCode::AltLeft) || keyboard.pressed(KeyCode::AltRight);
+    if alt_pressed || mouse_buttons.pressed(MouseButton::Middle) {
+        interaction_state.last_drag_world = None;
+        return;
+    }
+
+    if ui_buttons
+        .iter()
+        .any(|interaction| *interaction != Interaction::None)
+    {
+        interaction_state.last_drag_world = None;
+        return;
+    }
+
+    let Some(cursor_world) = cursor_world_position(&windows, &camera_query) else {
+        interaction_state.last_drag_world = None;
+        return;
+    };
+
+    let previous_world = interaction_state.last_drag_world.unwrap_or(cursor_world);
+    let dt = time.delta_secs().max(1e-4);
+    let stroke_velocity = (cursor_world - previous_world) / dt;
+    let mut terrain_changed = false;
+
+    match interaction_state.selected_tool {
+        Some(WorldTool::Water) => {
+            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
+                particle_world.spawn_water_particles_in_disk(
+                    point,
+                    TOOL_WATER_BRUSH_RADIUS_M,
+                    TOOL_WATER_SPAWN_SPACING_M,
+                    stroke_velocity.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS),
+                );
+            });
+        }
+        Some(WorldTool::Stone) => {
+            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
+                terrain_changed |= paint_terrain_cells_in_radius(
+                    &mut terrain_world,
+                    point,
+                    TOOL_STONE_BRUSH_RADIUS_M,
+                    TerrainCell::rock(),
+                );
+            });
+        }
+        Some(WorldTool::Delete) => {
+            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
+                particle_world.remove_particles_in_radius(point, TOOL_DELETE_BRUSH_RADIUS_M);
+                terrain_changed |= paint_terrain_cells_in_radius(
+                    &mut terrain_world,
+                    point,
+                    TOOL_DELETE_BRUSH_RADIUS_M,
+                    TerrainCell::Empty,
+                );
+            });
+        }
+        None => {
+            let velocity_delta = stroke_velocity * DRAG_VELOCITY_GAIN;
+            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
+                particle_world.add_velocity_in_radius(
+                    point,
+                    DRAG_VELOCITY_BRUSH_RADIUS_M,
+                    velocity_delta,
+                    PARTICLE_SPEED_LIMIT_MPS,
+                );
+            });
+        }
+    }
+
+    if terrain_changed {
+        terrain_world.rebuild_static_particles_if_dirty(SMOOTHING_RADIUS_M);
+    }
+
+    interaction_state.last_drag_world = Some(cursor_world);
 }
 
 fn update_grid_overlay_button_label(
@@ -424,6 +651,72 @@ fn draw_particle_debug_overlay(
             )
             .resolution(DEBUG_OVERLAY_CIRCLE_RESOLUTION);
     }
+}
+
+fn cursor_world_position(
+    windows: &Query<&Window, With<PrimaryWindow>>,
+    cameras: &Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+) -> Option<Vec2> {
+    let window = windows.iter().next()?;
+    let cursor = window.cursor_position()?;
+    let (camera, camera_transform) = cameras.iter().next()?;
+    camera.viewport_to_world_2d(camera_transform, cursor).ok()
+}
+
+fn stroke_points(from: Vec2, to: Vec2, spacing: f32, mut paint: impl FnMut(Vec2)) {
+    if spacing <= 0.0 {
+        paint(to);
+        return;
+    }
+
+    let delta = to - from;
+    let distance = delta.length();
+    if distance <= spacing {
+        paint(to);
+        return;
+    }
+
+    let steps = (distance / spacing).ceil() as i32;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        paint(from.lerp(to, t));
+    }
+}
+
+fn paint_terrain_cells_in_radius(
+    terrain_world: &mut TerrainWorld,
+    center: Vec2,
+    radius: f32,
+    cell_value: TerrainCell,
+) -> bool {
+    let min_cell = world_to_cell(center - Vec2::splat(radius));
+    let max_cell = world_to_cell(center + Vec2::splat(radius));
+    let radius2 = radius * radius;
+    let mut changed = false;
+
+    for y in min_cell.y..=max_cell.y {
+        for x in min_cell.x..=max_cell.x {
+            let cell = IVec2::new(x, y);
+            if !cell_in_fixed_world(cell) {
+                continue;
+            }
+            if cell_to_world_center(cell).distance_squared(center) > radius2 {
+                continue;
+            }
+            changed |= terrain_world.set_cell(cell, cell_value);
+        }
+    }
+
+    changed
+}
+
+fn cell_in_fixed_world(cell: IVec2) -> bool {
+    let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32;
+    let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1;
+    let min_cell_y = WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32;
+    let max_cell_y = (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1;
+
+    (min_cell_x..=max_cell_x).contains(&cell.x) && (min_cell_y..=max_cell_y).contains(&cell.y)
 }
 
 fn finalize_frame_metrics(mut perf_metrics: ResMut<SimulationPerfMetrics>) {
