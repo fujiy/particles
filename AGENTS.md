@@ -30,3 +30,15 @@
 ## Commit Command Rule
 - When the user says `commit`, run `git commit` with an appropriate commit message.
 - Commits are basically performed in `Impl session`.
+- Commit unit must be "one intent" (one design decision or one implementation outcome).
+- Do not mix unrelated changes in the same commit.
+
+## Commit Policy (Best Practice)
+- `Design session`:
+  - Commit only when a design/spec decision is finalized.
+  - Commit targets are `docs/design.md` and `docs/tasks.md` only.
+- `Impl session`:
+  - Commit per completed task or coherent implementation slice.
+  - Commit targets are implementation files + related tests + `docs/tasks.md` status update.
+  - Do not include `docs/design.md` edits.
+- Before implementation commits, compile checks and tests must pass.
