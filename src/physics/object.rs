@@ -3,9 +3,10 @@ use std::collections::{HashMap, HashSet};
 use bevy::log::tracing;
 use bevy::prelude::*;
 
+use super::connectivity::connected_components_4;
 use super::terrain::{
     CELL_SIZE_M, CHUNK_WORLD_SIZE_M, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
-    WORLD_MIN_CHUNK_Y,
+    WORLD_MIN_CHUNK_Y, world_to_cell,
 };
 
 pub type ObjectId = u32;
@@ -500,51 +501,166 @@ impl ObjectWorld {
         shape_stiffness_alpha: f32,
         shape_iters: usize,
     ) -> Option<ObjectId> {
-        if particle_indices.is_empty() {
-            return None;
-        }
-
-        let mut mass_sum = 0.0;
-        let mut com = Vec2::ZERO;
-        for &index in &particle_indices {
-            let mass = particle_mass[index];
-            mass_sum += mass;
-            com += particle_pos[index] * mass;
-        }
-        if mass_sum <= 1e-6 {
-            return None;
-        }
-        com /= mass_sum;
-
-        let mut rest_local = Vec::with_capacity(particle_indices.len());
-        for &index in &particle_indices {
-            rest_local.push(particle_pos[index] - com);
-        }
-        recenter_rest_local(&mut rest_local, &particle_indices, particle_mass);
-        let local_sdf = build_local_sdf(&rest_local);
-
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        self.objects.push(ObjectData {
+        let object = build_object_data(
             id,
             particle_indices,
-            rest_local,
-            mass_sum,
-            shape_stiffness_alpha: shape_stiffness_alpha.clamp(0.0, 1.0),
-            shape_iters: shape_iters.max(1),
-            shape_dirty: true,
-            physics_dirty: true,
-            local_sdf,
-            pose_center: Vec2::ZERO,
-            pose_theta: 0.0,
-            prev_pose_center: Vec2::ZERO,
-            prev_pose_theta: 0.0,
-            aabb_world: Aabb2::default(),
-            prev_aabb_world: Aabb2::default(),
-            pose_initialized: false,
-        });
+            particle_pos,
+            particle_mass,
+            shape_stiffness_alpha,
+            shape_iters,
+        )?;
+        self.objects.push(object);
         self.rebuild_object_index_map();
         Some(id)
+    }
+
+    pub fn split_object_after_detach(
+        &mut self,
+        object_id: ObjectId,
+        detached_particle_indices: &HashSet<usize>,
+        particle_pos: &[Vec2],
+        particle_mass: &[f32],
+    ) {
+        let Some(&object_index) = self.object_index_by_id.get(&object_id) else {
+            return;
+        };
+        let (shape_stiffness_alpha, shape_iters, object_particles) = {
+            let object = &self.objects[object_index];
+            (
+                object.shape_stiffness_alpha,
+                object.shape_iters,
+                object.particle_indices.clone(),
+            )
+        };
+
+        let remaining_particles: Vec<usize> = object_particles
+            .into_iter()
+            .filter(|index| !detached_particle_indices.contains(index))
+            .collect();
+
+        if remaining_particles.is_empty() {
+            self.objects.remove(object_index);
+            self.reaction_impulses.remove(&object_id);
+            self.rebuild_object_index_map();
+            return;
+        }
+
+        let mut particles_by_cell: HashMap<IVec2, Vec<usize>> = HashMap::new();
+        for &particle_index in &remaining_particles {
+            if particle_index >= particle_pos.len() || particle_index >= particle_mass.len() {
+                continue;
+            }
+            particles_by_cell
+                .entry(world_to_cell(particle_pos[particle_index]))
+                .or_default()
+                .push(particle_index);
+        }
+        if particles_by_cell.is_empty() {
+            self.objects.remove(object_index);
+            self.reaction_impulses.remove(&object_id);
+            self.rebuild_object_index_map();
+            return;
+        }
+
+        let occupied_cells: HashSet<IVec2> = particles_by_cell.keys().copied().collect();
+        let mut components = connected_components_4(&occupied_cells);
+        components.sort_by_key(|component| std::cmp::Reverse(component.len()));
+
+        let mut component_particles = Vec::new();
+        for component in components {
+            let mut indices = Vec::new();
+            for cell in component {
+                if let Some(cell_particles) = particles_by_cell.get(&cell) {
+                    indices.extend(cell_particles.iter().copied());
+                }
+            }
+            if indices.is_empty() {
+                continue;
+            }
+            indices.sort_unstable();
+            component_particles.push(indices);
+        }
+
+        if component_particles.is_empty() {
+            self.objects.remove(object_index);
+            self.reaction_impulses.remove(&object_id);
+            self.rebuild_object_index_map();
+            return;
+        }
+
+        let largest_component = component_particles.remove(0);
+        let Some(rebuilt) = build_object_data(
+            object_id,
+            largest_component,
+            particle_pos,
+            particle_mass,
+            shape_stiffness_alpha,
+            shape_iters,
+        ) else {
+            self.objects.remove(object_index);
+            self.reaction_impulses.remove(&object_id);
+            self.rebuild_object_index_map();
+            return;
+        };
+        self.objects[object_index] = rebuilt;
+
+        for particles in component_particles {
+            let id = self.next_id;
+            self.next_id = self.next_id.wrapping_add(1);
+            let Some(object) = build_object_data(
+                id,
+                particles,
+                particle_pos,
+                particle_mass,
+                shape_stiffness_alpha,
+                shape_iters,
+            ) else {
+                continue;
+            };
+            self.objects.push(object);
+        }
+
+        self.rebuild_object_index_map();
+    }
+
+    pub fn split_objects_after_detach(
+        &mut self,
+        detached_particle_indices: &HashSet<usize>,
+        particle_pos: &[Vec2],
+        particle_mass: &[f32],
+    ) {
+        if detached_particle_indices.is_empty() {
+            return;
+        }
+        let object_ids: Vec<_> = self
+            .objects
+            .iter()
+            .filter(|object| {
+                object
+                    .particle_indices
+                    .iter()
+                    .any(|index| detached_particle_indices.contains(index))
+            })
+            .map(|object| object.id)
+            .collect();
+        for object_id in object_ids {
+            self.split_object_after_detach(
+                object_id,
+                detached_particle_indices,
+                particle_pos,
+                particle_mass,
+            );
+        }
+    }
+
+    pub fn split_all_disconnected_objects(&mut self, particle_pos: &[Vec2], particle_mass: &[f32]) {
+        let object_ids: Vec<_> = self.objects.iter().map(|object| object.id).collect();
+        let detached = HashSet::new();
+        for object_id in object_ids {
+            self.split_object_after_detach(object_id, &detached, particle_pos, particle_mass);
+        }
     }
 
     pub fn apply_particle_remap(&mut self, old_to_new: &[Option<usize>], particle_mass: &[f32]) {
@@ -778,6 +894,62 @@ impl ObjectWorld {
             self.object_index_by_id.insert(object.id, index);
         }
     }
+}
+
+fn build_object_data(
+    id: ObjectId,
+    particle_indices: Vec<usize>,
+    particle_pos: &[Vec2],
+    particle_mass: &[f32],
+    shape_stiffness_alpha: f32,
+    shape_iters: usize,
+) -> Option<ObjectData> {
+    if particle_indices.is_empty() {
+        return None;
+    }
+
+    let mut mass_sum = 0.0;
+    let mut com = Vec2::ZERO;
+    let mut valid_indices = Vec::with_capacity(particle_indices.len());
+    for &index in &particle_indices {
+        if index >= particle_pos.len() || index >= particle_mass.len() {
+            continue;
+        }
+        let mass = particle_mass[index];
+        mass_sum += mass;
+        com += particle_pos[index] * mass;
+        valid_indices.push(index);
+    }
+    if mass_sum <= 1e-6 || valid_indices.is_empty() {
+        return None;
+    }
+    com /= mass_sum;
+
+    let mut rest_local = Vec::with_capacity(valid_indices.len());
+    for &index in &valid_indices {
+        rest_local.push(particle_pos[index] - com);
+    }
+    recenter_rest_local(&mut rest_local, &valid_indices, particle_mass);
+    let local_sdf = build_local_sdf(&rest_local);
+
+    Some(ObjectData {
+        id,
+        particle_indices: valid_indices,
+        rest_local,
+        mass_sum,
+        shape_stiffness_alpha: shape_stiffness_alpha.clamp(0.0, 1.0),
+        shape_iters: shape_iters.max(1),
+        shape_dirty: true,
+        physics_dirty: true,
+        local_sdf,
+        pose_center: Vec2::ZERO,
+        pose_theta: 0.0,
+        prev_pose_center: Vec2::ZERO,
+        prev_pose_theta: 0.0,
+        aabb_world: Aabb2::default(),
+        prev_aabb_world: Aabb2::default(),
+        pose_initialized: false,
+    })
 }
 
 fn compute_object_pose_and_aabb(
@@ -1183,6 +1355,33 @@ mod tests {
         assert!(
             unique_ids.len() >= 2,
             "expected at least two object splats near query point"
+        );
+    }
+
+    #[test]
+    fn split_object_after_detach_creates_new_components() {
+        let mut objects = ObjectWorld::default();
+        let positions = vec![
+            Vec2::new(-CELL_SIZE_M, 0.0),
+            Vec2::new(0.0, 0.0),
+            Vec2::new(CELL_SIZE_M, 0.0),
+        ];
+        let masses = vec![1.0, 1.0, 1.0];
+        let object_id = objects
+            .create_object(vec![0, 1, 2], &positions, &masses, 0.9, 2)
+            .expect("object should be created");
+        let detached = HashSet::from([1usize]);
+
+        objects.split_object_after_detach(object_id, &detached, &positions, &masses);
+
+        assert_eq!(objects.objects().len(), 2);
+        assert!(objects.objects().iter().any(|object| object.id == object_id));
+        assert!(
+            objects
+                .objects()
+                .iter()
+                .all(|object| !object.particle_indices.contains(&1)),
+            "detached particle should not remain in any object"
         );
     }
 }

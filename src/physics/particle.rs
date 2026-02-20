@@ -4,11 +4,15 @@ use bevy::log::tracing;
 use bevy::prelude::*;
 use rayon::prelude::*;
 
+use super::connectivity::{FOUR_NEIGHBOR_OFFSETS, flood_fill_4_limited};
 use super::material::{
     ENABLE_GRANULAR_TO_SOLID_RECONVERSION, particle_properties, particles_per_cell,
     solid_break_properties, terrain_break_collision_impulse_threshold, terrain_fracture_particle,
+    terrain_solid_particle,
 };
-use super::object::{ObjectId, ObjectPhysicsField, ObjectWorld};
+use super::object::{
+    OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectId, ObjectPhysicsField, ObjectWorld,
+};
 use super::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
     WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, cell_to_world_center, world_to_cell,
@@ -25,6 +29,7 @@ pub const TERRAIN_GHOST_DENSITY_SCALE: f32 = 1.0;
 pub const TERRAIN_GHOST_DELTA_SCALE: f32 = 1.0;
 pub const PARALLEL_PARTICLE_THRESHOLD: usize = 512;
 pub const PARTICLE_CONTACT_PUSH_FACTOR: f32 = 0.5;
+pub const DETACH_FLOOD_FILL_MAX_CELLS: usize = 128;
 const PARTICLE_ESCAPE_MARGIN_X_CELLS: i32 = CHUNK_SIZE_I32;
 const PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS: i32 = CHUNK_SIZE_I32;
 const PARTICLE_ESCAPE_MARGIN_TOP_CELLS: i32 = CHUNK_SIZE_I32 * 8;
@@ -168,6 +173,37 @@ impl ComputeDeltaThreadScratch {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct TerrainFractureSeed {
+    impulse_sum: f32,
+    velocity_weighted_sum: Vec2,
+    contact_weighted_sum: Vec2,
+}
+
+impl TerrainFractureSeed {
+    fn accumulate(&mut self, impulse: f32, velocity: Vec2, contact_pos: Vec2) {
+        self.impulse_sum += impulse;
+        self.velocity_weighted_sum += velocity * impulse;
+        self.contact_weighted_sum += contact_pos * impulse;
+    }
+
+    fn velocity(self) -> Vec2 {
+        if self.impulse_sum <= 1e-6 {
+            Vec2::ZERO
+        } else {
+            self.velocity_weighted_sum / self.impulse_sum
+        }
+    }
+
+    fn contact_pos(self) -> Vec2 {
+        if self.impulse_sum <= 1e-6 {
+            Vec2::ZERO
+        } else {
+            self.contact_weighted_sum / self.impulse_sum
+        }
+    }
+}
+
 #[derive(Resource, Debug)]
 pub struct ParticleWorld {
     pub pos: Vec<Vec2>,
@@ -184,8 +220,11 @@ pub struct ParticleWorld {
     neighbor_cache: Vec<Vec<usize>>,
     viscosity_work: Vec<Vec2>,
     object_peak_strain: HashMap<ObjectId, f32>,
+    object_peak_strain_particle: HashMap<ObjectId, usize>,
     pending_object_fractures: HashSet<ObjectId>,
+    pending_object_fracture_particles: HashMap<ObjectId, HashSet<usize>>,
     pending_terrain_fractures: HashSet<IVec2>,
+    pending_terrain_fracture_seeds: HashMap<IVec2, TerrainFractureSeed>,
 }
 
 impl Default for ParticleWorld {
@@ -207,8 +246,11 @@ impl Default for ParticleWorld {
             neighbor_cache: Vec::new(),
             viscosity_work: Vec::new(),
             object_peak_strain: HashMap::new(),
+            object_peak_strain_particle: HashMap::new(),
             pending_object_fractures: HashSet::new(),
+            pending_object_fracture_particles: HashMap::new(),
             pending_terrain_fractures: HashSet::new(),
+            pending_terrain_fracture_seeds: HashMap::new(),
         };
         world.resize_work_buffers();
         world
@@ -222,6 +264,12 @@ impl ParticleWorld {
         self.vel.clone_from(&self.initial_vel);
         self.mass.fill(default_particle_mass());
         self.material.fill(ParticleMaterial::WaterLiquid);
+        self.object_peak_strain.clear();
+        self.object_peak_strain_particle.clear();
+        self.pending_object_fractures.clear();
+        self.pending_object_fracture_particles.clear();
+        self.pending_terrain_fractures.clear();
+        self.pending_terrain_fracture_seeds.clear();
         self.resize_work_buffers();
     }
 
@@ -263,8 +311,11 @@ impl ParticleWorld {
         self.initial_pos = self.pos.clone();
         self.initial_vel = self.vel.clone();
         self.object_peak_strain.clear();
+        self.object_peak_strain_particle.clear();
         self.pending_object_fractures.clear();
+        self.pending_object_fracture_particles.clear();
         self.pending_terrain_fractures.clear();
+        self.pending_terrain_fracture_seeds.clear();
         self.resize_work_buffers();
         Ok(())
     }
@@ -350,15 +401,20 @@ impl ParticleWorld {
         indices
     }
 
-    pub fn apply_pending_terrain_fractures(&mut self, terrain: &mut TerrainWorld) -> bool {
+    pub fn apply_pending_terrain_fractures(
+        &mut self,
+        terrain: &mut TerrainWorld,
+        object_world: &mut ObjectWorld,
+    ) -> bool {
         if self.pending_terrain_fractures.is_empty() {
             return false;
         }
 
         let fracture_cells: Vec<_> = self.pending_terrain_fractures.drain().collect();
+        let fracture_cell_set: HashSet<_> = fracture_cells.iter().copied().collect();
         let mut changed = false;
-        let mut appended = Vec::new();
-        for cell in fracture_cells {
+        let mut appended_indices = Vec::new();
+        for &cell in &fracture_cells {
             let current = terrain.get_loaded_cell_or_empty(cell);
             let TerrainCell::Solid { material, .. } = current else {
                 continue;
@@ -373,13 +429,47 @@ impl ParticleWorld {
             self.append_material_particles_in_cell(
                 cell,
                 target_particle,
-                Vec2::ZERO,
-                &mut appended,
+                self.terrain_fracture_seed_velocity(cell),
+                &mut appended_indices,
             );
         }
-        if !appended.is_empty() {
+
+        let detached_components =
+            self.collect_detached_terrain_components(terrain, &fracture_cell_set);
+
+        for component_cells in detached_components {
+            let spawn_plan = self.build_terrain_detach_spawn_plan(
+                &component_cells,
+                terrain,
+                &fracture_cell_set,
+            );
+            if spawn_plan.cells.is_empty() {
+                continue;
+            }
+            let indices = self.spawn_terrain_detach_component(&spawn_plan);
+            if indices.is_empty() {
+                continue;
+            }
+
+            for cell in &spawn_plan.cells {
+                changed |= terrain.set_cell(*cell, TerrainCell::Empty);
+            }
+            let _ = object_world.create_object(
+                indices,
+                self.positions(),
+                self.masses(),
+                OBJECT_SHAPE_STIFFNESS_ALPHA,
+                OBJECT_SHAPE_ITERS,
+            );
+        }
+
+        if !appended_indices.is_empty() || changed {
             self.resize_work_buffers();
         }
+        if changed {
+            self.auto_fracture_single_cell_objects(object_world);
+        }
+        self.pending_terrain_fracture_seeds.clear();
         changed
     }
 
@@ -446,6 +536,97 @@ impl ParticleWorld {
         }
     }
 
+    pub fn fracture_solid_particles_in_radius(&mut self, center: Vec2, radius: f32) -> HashSet<usize> {
+        let radius2 = radius * radius;
+        let mut detached = HashSet::new();
+        let mut spawned_particles = Vec::new();
+        for i in 0..self.particle_count() {
+            if self.pos[i].distance_squared(center) > radius2 {
+                continue;
+            }
+            let Some(target_material) =
+                solid_break_properties(self.material[i]).and_then(|props| props.fracture_to)
+            else {
+                continue;
+            };
+            detached.insert(i);
+            self.fracture_particle_to_target_material(i, target_material, &mut spawned_particles);
+        }
+        for (position, velocity, mass, material) in spawned_particles {
+            self.pos.push(position);
+            self.prev_pos.push(position);
+            self.vel.push(velocity);
+            self.mass.push(mass);
+            self.material.push(material);
+        }
+        if !detached.is_empty() {
+            self.resize_work_buffers();
+        }
+        detached
+    }
+
+    pub fn detach_terrain_components_after_cell_removal(
+        &mut self,
+        terrain: &mut TerrainWorld,
+        object_world: &mut ObjectWorld,
+        removed_cells: &HashSet<IVec2>,
+    ) -> bool {
+        if removed_cells.is_empty() {
+            return false;
+        }
+        let detached_components = self.collect_detached_terrain_components(terrain, removed_cells);
+        if detached_components.is_empty() {
+            return false;
+        }
+
+        let mut changed = false;
+        let no_seed_cells = HashSet::new();
+        for component_cells in detached_components {
+            let spawn_plan =
+                self.build_terrain_detach_spawn_plan(&component_cells, terrain, &no_seed_cells);
+            if spawn_plan.cells.is_empty() {
+                continue;
+            }
+            let indices = self.spawn_terrain_detach_component(&spawn_plan);
+            if indices.is_empty() {
+                continue;
+            }
+            for cell in &spawn_plan.cells {
+                changed |= terrain.set_cell(*cell, TerrainCell::Empty);
+            }
+            let _ = object_world.create_object(
+                indices,
+                self.positions(),
+                self.masses(),
+                OBJECT_SHAPE_STIFFNESS_ALPHA,
+                OBJECT_SHAPE_ITERS,
+            );
+        }
+        if changed {
+            self.resize_work_buffers();
+            self.auto_fracture_single_cell_objects(object_world);
+        }
+        changed
+    }
+
+    pub fn postprocess_objects_after_topology_edit(&mut self, object_world: &mut ObjectWorld) {
+        object_world.split_all_disconnected_objects(self.positions(), self.masses());
+        self.auto_fracture_single_cell_objects(object_world);
+    }
+
+    pub fn detach_and_postprocess_objects(
+        &mut self,
+        object_world: &mut ObjectWorld,
+        detached_particles: &HashSet<usize>,
+    ) {
+        object_world.split_objects_after_detach(
+            detached_particles,
+            self.positions(),
+            self.masses(),
+        );
+        self.auto_fracture_single_cell_objects(object_world);
+    }
+
     pub fn step_if_running(
         &mut self,
         terrain: &TerrainWorld,
@@ -480,6 +661,7 @@ impl ParticleWorld {
         dt_sub: f32,
     ) {
         self.object_peak_strain.clear();
+        self.object_peak_strain_particle.clear();
         {
             let _span = tracing::info_span!("physics::clear_reaction_impulses").entered();
             object_world.clear_reaction_impulses();
@@ -543,7 +725,7 @@ impl ParticleWorld {
         }
         {
             let _span = tracing::info_span!("physics::fracture_detection").entered();
-            self.detect_fracture_candidates(terrain, object_world);
+            self.detect_fracture_candidates(terrain, object_field, object_world);
             self.apply_object_fractures(object_world);
         }
     }
@@ -1090,15 +1272,23 @@ impl ParticleWorld {
         }
     }
 
-    fn detect_fracture_candidates(&mut self, terrain: &TerrainWorld, object_world: &ObjectWorld) {
+    fn detect_fracture_candidates(
+        &mut self,
+        terrain: &TerrainWorld,
+        object_field: &ObjectPhysicsField,
+        object_world: &ObjectWorld,
+    ) {
         debug_assert!(
             !ENABLE_GRANULAR_TO_SOLID_RECONVERSION,
             "v4 keeps granular->solid reconversion disabled"
         );
         self.pending_object_fractures.clear();
+        self.pending_object_fracture_particles.clear();
         self.pending_terrain_fractures.clear();
+        self.pending_terrain_fracture_seeds.clear();
 
         let mut terrain_impulse = HashMap::<IVec2, f32>::new();
+        let mut terrain_seed = HashMap::<IVec2, TerrainFractureSeed>::new();
         let mut object_terrain_impulse = HashMap::<ObjectId, f32>::new();
         for i in 0..self.particle_count() {
             let particle_material = self.material[i];
@@ -1122,6 +1312,10 @@ impl ParticleWorld {
             }
             if let Some(object_id) = object_world.object_of_particle(i) {
                 *object_terrain_impulse.entry(object_id).or_insert(0.0) += impulse;
+                self.pending_object_fracture_particles
+                    .entry(object_id)
+                    .or_default()
+                    .insert(i);
             }
             let Some(cell) =
                 resolve_terrain_contact_cell(self.pos[i], signed_distance, normal, terrain)
@@ -1130,6 +1324,36 @@ impl ParticleWorld {
             };
             let entry = terrain_impulse.entry(cell).or_insert(0.0);
             *entry = (*entry).max(impulse);
+            terrain_seed
+                .entry(cell)
+                .or_default()
+                .accumulate(impulse, self.vel[i], self.pos[i]);
+        }
+
+        let mut object_contacts = Vec::new();
+        for i in 0..self.particle_count() {
+            let Some(object_id) = object_world.object_of_particle(i) else {
+                continue;
+            };
+            let props = particle_properties(self.material[i]);
+            object_field.gather_candidate_object_ids(self.pos[i], &mut object_contacts);
+            for &contact_id in &object_contacts {
+                if contact_id == object_id {
+                    continue;
+                }
+                let Some(sample) = object_world.evaluate_object_sdf(contact_id, self.pos[i]) else {
+                    continue;
+                };
+                let penetration = props.object_push_radius_m - sample.distance_m;
+                if penetration <= 0.0 {
+                    continue;
+                }
+                self.pending_object_fracture_particles
+                    .entry(object_id)
+                    .or_default()
+                    .insert(i);
+                break;
+            }
         }
 
         for object in object_world.objects() {
@@ -1153,10 +1377,22 @@ impl ParticleWorld {
                 .get(&object.id)
                 .copied()
                 .unwrap_or(0.0);
-            if collision_impulse >= break_props.break_collision_impulse_threshold
+            let should_fracture = collision_impulse >= break_props.break_collision_impulse_threshold
                 || strain >= break_props.break_strain_threshold
-            {
+                ;
+            if should_fracture {
                 self.pending_object_fractures.insert(object.id);
+                let fracture_particles = self
+                    .pending_object_fracture_particles
+                    .entry(object.id)
+                    .or_default();
+                if fracture_particles.is_empty() {
+                    if let Some(&peak_particle) = self.object_peak_strain_particle.get(&object.id) {
+                        fracture_particles.insert(peak_particle);
+                    } else {
+                        fracture_particles.insert(particle_index);
+                    }
+                }
             }
         }
 
@@ -1170,6 +1406,9 @@ impl ParticleWorld {
             let threshold = terrain_break_collision_impulse_threshold(material);
             if impulse >= threshold {
                 self.pending_terrain_fractures.insert(cell);
+                if let Some(seed) = terrain_seed.get(&cell).copied() {
+                    self.pending_terrain_fracture_seeds.insert(cell, seed);
+                }
             }
         }
     }
@@ -1179,13 +1418,11 @@ impl ParticleWorld {
             return;
         }
 
-        let mut removed = HashSet::new();
-        let mut spawned_particles = Vec::new();
+        let mut fracture_plans = Vec::new();
         for object in object_world.objects() {
             if !self.pending_object_fractures.contains(&object.id) {
                 continue;
             }
-
             let Some(&seed_index) = object.particle_indices.first() else {
                 continue;
             };
@@ -1198,49 +1435,36 @@ impl ParticleWorld {
             else {
                 continue;
             };
-            let target_props = particle_properties(target_material);
-            let target_mass = target_props.mass;
-            let split_count = target_props.particles_per_cell.max(1) as usize;
-            for &index in &object.particle_indices {
-                if index >= self.particle_count() {
-                    continue;
-                }
-                let base_pos = self.pos[index];
-                let base_vel = self.vel[index];
-                self.material[index] = target_material;
-                self.mass[index] = target_mass;
-
-                if split_count <= 1 {
-                    continue;
-                }
-                let axis = (split_count as f32).sqrt().ceil() as usize;
-                let spacing = CELL_SIZE_M / axis as f32;
-                let cell_min = base_pos - Vec2::splat(CELL_SIZE_M * 0.5);
-                let mut placed = 0usize;
-
-                'grid: for y in 0..axis {
-                    for x in 0..axis {
-                        if placed >= split_count {
-                            break 'grid;
-                        }
-                        let split_pos = cell_min
-                            + Vec2::new((x as f32 + 0.5) * spacing, (y as f32 + 0.5) * spacing);
-                        if placed == 0 {
-                            self.pos[index] = split_pos;
-                            self.prev_pos[index] = split_pos;
-                        } else {
-                            spawned_particles.push((
-                                split_pos,
-                                base_vel,
-                                target_mass,
-                                target_material,
-                            ));
-                        }
-                        placed += 1;
+            let mut detached = HashSet::new();
+            if let Some(fracture_particles) = self.pending_object_fracture_particles.get(&object.id) {
+                for &index in &object.particle_indices {
+                    if fracture_particles.contains(&index) {
+                        detached.insert(index);
                     }
                 }
             }
-            removed.insert(object.id);
+            if detached.is_empty() {
+                detached.insert(seed_index);
+            }
+            fracture_plans.push((object.id, target_material, detached));
+        }
+
+        let mut spawned_particles = Vec::new();
+        for (object_id, target_material, detached_particles) in fracture_plans {
+            for &index in &detached_particles {
+                self.fracture_particle_to_target_material(
+                    index,
+                    target_material,
+                    &mut spawned_particles,
+                );
+            }
+
+            object_world.split_object_after_detach(
+                object_id,
+                &detached_particles,
+                self.positions(),
+                self.masses(),
+            );
         }
 
         for (position, velocity, mass, material) in spawned_particles {
@@ -1252,8 +1476,9 @@ impl ParticleWorld {
         }
         self.resize_work_buffers();
 
-        object_world.remove_objects_by_ids(&removed);
         self.pending_object_fractures.clear();
+        self.pending_object_fracture_particles.clear();
+        self.auto_fracture_single_cell_objects(object_world);
     }
 
     fn solve_shape_matching_constraints(&mut self, object_world: &mut ObjectWorld) {
@@ -1268,6 +1493,7 @@ impl ParticleWorld {
             }
 
             let mut object_peak_strain = 0.0f32;
+            let mut object_peak_particle = None;
             let shape_iters = object.shape_iters.max(1);
             for _ in 0..shape_iters {
                 let mut mass_sum = 0.0;
@@ -1315,12 +1541,20 @@ impl ParticleWorld {
                     let goal = com + rotated;
                     let current = self.pos[index];
                     let strain = (goal - current).length() / CELL_SIZE_M.max(1e-6);
-                    object_peak_strain = object_peak_strain.max(strain);
+                    if strain > object_peak_strain {
+                        object_peak_strain = strain;
+                        object_peak_particle = Some(index);
+                    }
                     self.pos[index] = current + (goal - current) * alpha;
                 }
             }
-            self.object_peak_strain
-                .insert(object.id, object_peak_strain);
+            self.object_peak_strain.insert(object.id, object_peak_strain);
+            if let Some(particle_index) = object_peak_particle {
+                self.object_peak_strain_particle
+                    .insert(object.id, particle_index);
+            } else {
+                self.object_peak_strain_particle.remove(&object.id);
+            }
         }
     }
 
@@ -1359,6 +1593,104 @@ impl ParticleWorld {
                 out_indices.push(index);
             }
         }
+    }
+
+    fn fracture_particle_to_target_material(
+        &mut self,
+        index: usize,
+        target_material: ParticleMaterial,
+        spawned_particles: &mut Vec<(Vec2, Vec2, f32, ParticleMaterial)>,
+    ) {
+        if index >= self.particle_count() {
+            return;
+        }
+        let target_props = particle_properties(target_material);
+        let target_mass = target_props.mass;
+        let split_count = target_props.particles_per_cell.max(1) as usize;
+        let base_pos = self.pos[index];
+        let base_vel = self.vel[index];
+        self.material[index] = target_material;
+        self.mass[index] = target_mass;
+        if split_count <= 1 {
+            return;
+        }
+
+        let axis = (split_count as f32).sqrt().ceil() as usize;
+        let spacing = CELL_SIZE_M / axis as f32;
+        let cell_min = base_pos - Vec2::splat(CELL_SIZE_M * 0.5);
+        let mut placed = 0usize;
+        'grid: for y in 0..axis {
+            for x in 0..axis {
+                if placed >= split_count {
+                    break 'grid;
+                }
+                let split_pos =
+                    cell_min + Vec2::new((x as f32 + 0.5) * spacing, (y as f32 + 0.5) * spacing);
+                if placed == 0 {
+                    self.pos[index] = split_pos;
+                    self.prev_pos[index] = split_pos;
+                } else {
+                    spawned_particles.push((split_pos, base_vel, target_mass, target_material));
+                }
+                placed += 1;
+            }
+        }
+    }
+
+    fn auto_fracture_single_cell_objects(&mut self, object_world: &mut ObjectWorld) {
+        let mut objects_to_remove = HashSet::new();
+        let mut targets = Vec::<(usize, ParticleMaterial)>::new();
+        for object in object_world.objects() {
+            if object.particle_indices.is_empty() {
+                continue;
+            }
+            let mut occupied_cells = HashSet::new();
+            for &index in &object.particle_indices {
+                if index >= self.particle_count() {
+                    continue;
+                }
+                occupied_cells.insert(world_to_cell(self.pos[index]));
+                if occupied_cells.len() > 1 {
+                    break;
+                }
+            }
+            if occupied_cells.len() != 1 {
+                continue;
+            }
+            let mut has_fracturable = false;
+            for &index in &object.particle_indices {
+                if index >= self.particle_count() {
+                    continue;
+                }
+                let Some(target_material) =
+                    solid_break_properties(self.material[index]).and_then(|props| props.fracture_to)
+                else {
+                    continue;
+                };
+                has_fracturable = true;
+                targets.push((index, target_material));
+            }
+            if has_fracturable {
+                objects_to_remove.insert(object.id);
+            }
+        }
+        if targets.is_empty() {
+            return;
+        }
+
+        let mut spawned_particles = Vec::new();
+        for (index, target_material) in targets {
+            self.fracture_particle_to_target_material(index, target_material, &mut spawned_particles);
+        }
+        for (position, velocity, mass, material) in spawned_particles {
+            self.pos.push(position);
+            self.prev_pos.push(position);
+            self.vel.push(velocity);
+            self.mass.push(mass);
+            self.material.push(material);
+        }
+        self.resize_work_buffers();
+        object_world.remove_objects_by_ids(&objects_to_remove);
     }
 
     fn cull_escaped_particles(&mut self, object_world: &mut ObjectWorld) {
@@ -1444,6 +1776,175 @@ impl ParticleWorld {
         self.neighbor_cache.resize_with(count, Vec::new);
         self.viscosity_work.resize(count, Vec2::ZERO);
     }
+
+    fn terrain_fracture_seed_velocity(&self, fracture_cell: IVec2) -> Vec2 {
+        self.pending_terrain_fracture_seeds
+            .get(&fracture_cell)
+            .copied()
+            .map(TerrainFractureSeed::velocity)
+            .unwrap_or(Vec2::ZERO)
+    }
+
+    fn collect_detached_terrain_components(
+        &self,
+        terrain: &TerrainWorld,
+        removed_cells: &HashSet<IVec2>,
+    ) -> Vec<Vec<IVec2>> {
+        let mut checked = HashSet::new();
+        let mut detached_components = Vec::<Vec<IVec2>>::new();
+        for &removed_cell in removed_cells {
+            for offset in FOUR_NEIGHBOR_OFFSETS {
+                let start = removed_cell + offset;
+                if checked.contains(&start)
+                    || !matches!(terrain.get_loaded_cell_or_empty(start), TerrainCell::Solid { .. })
+                {
+                    continue;
+                }
+                let fill = flood_fill_4_limited(start, DETACH_FLOOD_FILL_MAX_CELLS, |cell| {
+                    matches!(terrain.get_loaded_cell_or_empty(cell), TerrainCell::Solid { .. })
+                });
+                checked.extend(fill.cells.iter().copied());
+                if fill.reached_limit {
+                    continue;
+                }
+                let mut cells = fill.cells.into_iter().collect::<Vec<_>>();
+                cells.sort_by_key(|cell| (cell.y, cell.x));
+                detached_components.push(cells);
+            }
+        }
+        detached_components
+    }
+
+    fn build_terrain_detach_spawn_plan(
+        &self,
+        component_cells: &[IVec2],
+        terrain: &TerrainWorld,
+        fracture_cell_set: &HashSet<IVec2>,
+    ) -> TerrainDetachSpawnPlan {
+        let mut plan_cells = Vec::with_capacity(component_cells.len());
+        let mut cell_materials = Vec::with_capacity(component_cells.len());
+        for &cell in component_cells {
+            let TerrainCell::Solid { material, .. } = terrain.get_loaded_cell_or_empty(cell) else {
+                continue;
+            };
+            let Some(particle_material) = terrain_solid_particle(material) else {
+                continue;
+            };
+            plan_cells.push(cell);
+            cell_materials.push((cell, particle_material));
+        }
+
+        if plan_cells.is_empty() {
+            return TerrainDetachSpawnPlan::default();
+        }
+
+        let mut influencing_fracture_cells = HashSet::new();
+        for &cell in &plan_cells {
+            for offset in FOUR_NEIGHBOR_OFFSETS {
+                let fracture_cell = cell + offset;
+                if fracture_cell_set.contains(&fracture_cell) {
+                    influencing_fracture_cells.insert(fracture_cell);
+                }
+            }
+        }
+
+        let mut seed_weight_sum = 0.0f32;
+        let mut seed_velocity_weighted_sum = Vec2::ZERO;
+        let mut seed_contact_weighted_sum = Vec2::ZERO;
+        for fracture_cell in &influencing_fracture_cells {
+            let Some(seed) = self
+                .pending_terrain_fracture_seeds
+                .get(fracture_cell)
+                .copied()
+            else {
+                continue;
+            };
+            seed_weight_sum += seed.impulse_sum.max(1e-6);
+            seed_velocity_weighted_sum += seed.velocity_weighted_sum;
+            seed_contact_weighted_sum += seed.contact_weighted_sum;
+        }
+
+        let linear_velocity = if seed_weight_sum > 1e-6 {
+            seed_velocity_weighted_sum / seed_weight_sum
+        } else {
+            Vec2::ZERO
+        };
+        let angular_origin = if seed_weight_sum > 1e-6 {
+            seed_contact_weighted_sum / seed_weight_sum
+        } else {
+            let mut weighted_com = Vec2::ZERO;
+            let mut mass_sum = 0.0f32;
+            for &(cell, material) in &cell_materials {
+                let mass = particle_properties(material).mass;
+                weighted_com += cell_to_world_center(cell) * mass;
+                mass_sum += mass;
+            }
+            if mass_sum > 1e-6 {
+                weighted_com / mass_sum
+            } else {
+                cell_to_world_center(plan_cells[0])
+            }
+        };
+
+        let mut angular_velocity = 0.0f32;
+        if seed_weight_sum > 1e-6 {
+            let mut numerator = 0.0f32;
+            let mut denominator = 0.0f32;
+            for fracture_cell in &influencing_fracture_cells {
+                let Some(seed) = self
+                    .pending_terrain_fracture_seeds
+                    .get(fracture_cell)
+                    .copied()
+                else {
+                    continue;
+                };
+                let weight = seed.impulse_sum.max(1e-6);
+                let r = seed.contact_pos() - angular_origin;
+                let rel_v = seed.velocity() - linear_velocity;
+                numerator += weight * (r.x * rel_v.y - r.y * rel_v.x);
+                denominator += weight * r.length_squared();
+            }
+            if denominator > 1e-6 {
+                angular_velocity = numerator / denominator;
+            }
+        }
+
+        TerrainDetachSpawnPlan {
+            cells: plan_cells,
+            cell_materials,
+            linear_velocity,
+            angular_velocity,
+            angular_origin,
+        }
+    }
+
+    fn spawn_terrain_detach_component(&mut self, plan: &TerrainDetachSpawnPlan) -> Vec<usize> {
+        let mut indices = Vec::new();
+        for &(cell, material) in &plan.cell_materials {
+            let mut cell_indices = Vec::new();
+            self.append_material_particles_in_cell(cell, material, Vec2::ZERO, &mut cell_indices);
+            indices.extend(cell_indices);
+        }
+
+        for &index in &indices {
+            let position = self.pos[index];
+            let r = position - plan.angular_origin;
+            let angular_velocity_vec = Vec2::new(-r.y, r.x) * plan.angular_velocity;
+            let velocity = plan.linear_velocity + angular_velocity_vec;
+            self.vel[index] = velocity;
+            self.prev_pos[index] = self.pos[index] - velocity * FIXED_DT;
+        }
+        indices
+    }
+}
+
+#[derive(Debug, Default)]
+struct TerrainDetachSpawnPlan {
+    cells: Vec<IVec2>,
+    cell_materials: Vec<(IVec2, ParticleMaterial)>,
+    linear_velocity: Vec2,
+    angular_velocity: f32,
+    angular_origin: Vec2,
 }
 
 fn particle_grid_axis(particles_per_cell: u32) -> u32 {
@@ -1569,6 +2070,31 @@ mod tests {
     use super::*;
     use crate::physics::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA};
     use crate::physics::terrain::{CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MIN_CHUNK_X};
+
+    fn clear_particles(particles: &mut ParticleWorld) {
+        particles.pos.clear();
+        particles.prev_pos.clear();
+        particles.vel.clear();
+        particles.mass.clear();
+        particles.material.clear();
+        particles.density.clear();
+        particles.lambda.clear();
+        particles.delta_pos.clear();
+        particles.viscosity_work.clear();
+        particles.resize_work_buffers();
+    }
+
+    fn clear_fixed_terrain(terrain: &mut TerrainWorld) {
+        let min_cell = IVec2::new(
+            WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32,
+            WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32,
+        );
+        let max_cell = IVec2::new(
+            (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1,
+            (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1,
+        );
+        terrain.fill_rect(min_cell, max_cell, TerrainCell::Empty);
+    }
 
     #[test]
     fn particles_fall_under_gravity() {
@@ -1914,6 +2440,212 @@ mod tests {
                 .iter()
                 .all(|&m| !matches!(m, ParticleMaterial::SandSolid)),
             "fractured particles should no longer remain solid"
+        );
+    }
+
+    #[test]
+    fn object_fracture_detaches_only_target_particles() {
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+
+        let indices = particles.spawn_material_particles_from_cells(
+            &[IVec2::new(0, 5), IVec2::new(1, 5), IVec2::new(2, 5)],
+            ParticleMaterial::SandSolid,
+            Vec2::ZERO,
+        );
+        let left = indices[0];
+        let middle = indices[1];
+        let right = indices[2];
+
+        let mut objects = ObjectWorld::default();
+        let object_id = objects
+            .create_object(
+                indices.clone(),
+                particles.positions(),
+                particles.masses(),
+                OBJECT_SHAPE_STIFFNESS_ALPHA,
+                OBJECT_SHAPE_ITERS,
+            )
+            .expect("object should be created");
+
+        particles.pending_object_fractures.insert(object_id);
+        particles
+            .pending_object_fracture_particles
+            .entry(object_id)
+            .or_default()
+            .insert(middle);
+        particles.apply_object_fractures(&mut objects);
+
+        assert_eq!(particles.material[left], ParticleMaterial::SandGranular);
+        assert_eq!(particles.material[right], ParticleMaterial::SandGranular);
+        assert_eq!(particles.material[middle], ParticleMaterial::SandGranular);
+        assert!(objects.objects().is_empty());
+    }
+
+    #[test]
+    fn terrain_small_component_detaches_into_object() {
+        let mut terrain = TerrainWorld::default();
+        terrain.reset_fixed_world();
+        clear_fixed_terrain(&mut terrain);
+
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        let mut objects = ObjectWorld::default();
+
+        let fracture_cell = IVec2::new(0, 20);
+        let detached_cell = IVec2::new(1, 20);
+        assert!(terrain.set_cell(fracture_cell, TerrainCell::stone()));
+        assert!(terrain.set_cell(detached_cell, TerrainCell::stone()));
+        let impact_velocity = Vec2::new(2.0, 0.5);
+        let impact_pos = cell_to_world_center(fracture_cell);
+
+        particles.pending_terrain_fractures.insert(fracture_cell);
+        particles.pending_terrain_fracture_seeds.insert(
+            fracture_cell,
+            TerrainFractureSeed {
+                impulse_sum: 10.0,
+                velocity_weighted_sum: impact_velocity * 10.0,
+                contact_weighted_sum: impact_pos * 10.0,
+            },
+        );
+
+        let changed = particles.apply_pending_terrain_fractures(&mut terrain, &mut objects);
+        assert!(changed);
+        assert!(matches!(
+            terrain.get_loaded_cell_or_empty(fracture_cell),
+            TerrainCell::Empty
+        ));
+        assert!(matches!(
+            terrain.get_loaded_cell_or_empty(detached_cell),
+            TerrainCell::Empty
+        ));
+        assert!(
+            objects.objects().is_empty(),
+            "single-cell detached object should be auto-fractured"
+        );
+        assert!(
+            particles
+                .material
+                .iter()
+                .any(|&m| matches!(m, ParticleMaterial::StoneGranular)),
+            "fracture cell should spawn granular particles"
+        );
+    }
+
+    #[test]
+    fn terrain_large_component_stays_in_terrain() {
+        let mut terrain = TerrainWorld::default();
+        terrain.reset_fixed_world();
+        clear_fixed_terrain(&mut terrain);
+
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        let mut objects = ObjectWorld::default();
+
+        let base = IVec2::new(-6, 30);
+        let width = 12;
+        let height = 11;
+        for y in 0..height {
+            for x in 0..width {
+                let cell = base + IVec2::new(x, y);
+                assert!(terrain.set_cell(cell, TerrainCell::stone()));
+            }
+        }
+
+        let fracture_cell = base + IVec2::new(0, 0);
+        particles.pending_terrain_fractures.insert(fracture_cell);
+        particles.pending_terrain_fracture_seeds.insert(
+            fracture_cell,
+            TerrainFractureSeed {
+                impulse_sum: 8.0,
+                velocity_weighted_sum: Vec2::new(1.0, 0.0) * 8.0,
+                contact_weighted_sum: cell_to_world_center(fracture_cell) * 8.0,
+            },
+        );
+
+        let changed = particles.apply_pending_terrain_fractures(&mut terrain, &mut objects);
+        assert!(changed);
+        assert!(matches!(
+            terrain.get_loaded_cell_or_empty(fracture_cell),
+            TerrainCell::Empty
+        ));
+        let remaining_cell = base + IVec2::new(width - 1, height - 1);
+        assert!(matches!(
+            terrain.get_loaded_cell_or_empty(remaining_cell),
+            TerrainCell::Solid { .. }
+        ));
+        assert!(objects.objects().is_empty());
+        assert!(
+            particles
+                .material
+                .iter()
+                .all(|&m| !matches!(m, ParticleMaterial::StoneSolid)),
+            "large terrain component should not be detached into object particles"
+        );
+    }
+
+    #[test]
+    fn edit_removed_cells_detach_small_terrain_component_into_object() {
+        let mut terrain = TerrainWorld::default();
+        terrain.reset_fixed_world();
+        clear_fixed_terrain(&mut terrain);
+
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        let mut objects = ObjectWorld::default();
+
+        let removed_cell = IVec2::new(0, 20);
+        let detached_cells = [IVec2::new(1, 20), IVec2::new(2, 20)];
+        for &cell in &detached_cells {
+            assert!(terrain.set_cell(cell, TerrainCell::stone()));
+        }
+
+        let removed = HashSet::from([removed_cell]);
+        let changed = particles.detach_terrain_components_after_cell_removal(
+            &mut terrain,
+            &mut objects,
+            &removed,
+        );
+        assert!(changed);
+        for &cell in &detached_cells {
+            assert!(matches!(
+                terrain.get_loaded_cell_or_empty(cell),
+                TerrainCell::Empty
+            ));
+        }
+        assert_eq!(objects.objects().len(), 1);
+        assert_eq!(objects.objects()[0].particle_indices.len(), detached_cells.len());
+    }
+
+    #[test]
+    fn single_cell_object_is_auto_fractured_on_postprocess() {
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        let indices = particles.spawn_material_particles_from_cells(
+            &[IVec2::new(0, 4)],
+            ParticleMaterial::SandSolid,
+            Vec2::ZERO,
+        );
+        let mut objects = ObjectWorld::default();
+        let _ = objects
+            .create_object(
+                indices,
+                particles.positions(),
+                particles.masses(),
+                OBJECT_SHAPE_STIFFNESS_ALPHA,
+                OBJECT_SHAPE_ITERS,
+            )
+            .expect("object should be created");
+
+        particles.postprocess_objects_after_topology_edit(&mut objects);
+
+        assert!(objects.objects().is_empty());
+        assert!(
+            particles
+                .materials()
+                .iter()
+                .any(|&m| matches!(m, ParticleMaterial::SandGranular)),
+            "single-cell object should be converted to granular particles"
         );
     }
 }

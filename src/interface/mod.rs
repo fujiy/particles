@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
@@ -8,6 +8,7 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::{Ime, PrimaryWindow};
 
 use crate::physics::cell_to_world_center;
+use crate::physics::material::terrain_fracture_particle;
 use crate::physics::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectWorld};
 use crate::physics::particle::{
     PARTICLE_SPEED_LIMIT_MPS, ParticleMaterial, ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M,
@@ -51,6 +52,7 @@ const DRAG_VELOCITY_BRUSH_RADIUS_M: f32 = 0.55;
 const DRAG_VELOCITY_GAIN: f32 = 0.9;
 const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
 const TOOL_DELETE_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
+const TOOL_BREAK_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
 const STONE_STROKE_NEIGHBOR_OFFSETS: [IVec2; 4] = [
     IVec2::new(1, 0),
     IVec2::new(-1, 0),
@@ -121,7 +123,7 @@ const MATERIAL_PALETTE_SOIL: [[u8; 4]; 4] = [
     [147, 115, 88, 255],
 ];
 
-const WORLD_TOOLBAR_TOOLS: [WorldTool; 8] = [
+const WORLD_TOOLBAR_TOOLS: [WorldTool; 9] = [
     WorldTool::WaterLiquid,
     WorldTool::StoneSolid,
     WorldTool::StoneGranular,
@@ -129,6 +131,7 @@ const WORLD_TOOLBAR_TOOLS: [WorldTool; 8] = [
     WorldTool::SoilGranular,
     WorldTool::SandSolid,
     WorldTool::SandGranular,
+    WorldTool::Break,
     WorldTool::Delete,
 ];
 
@@ -183,6 +186,7 @@ enum WorldTool {
     SoilGranular,
     SandSolid,
     SandGranular,
+    Break,
     Delete,
 }
 
@@ -196,6 +200,7 @@ impl WorldTool {
             Self::SoilGranular => "Soil Granular",
             Self::SandSolid => "Sand Solid",
             Self::SandGranular => "Sand Granular",
+            Self::Break => "Break",
             Self::Delete => "Delete",
         }
     }
@@ -209,6 +214,7 @@ impl WorldTool {
             Self::SoilGranular => Some(ParticleMaterial::SoilGranular),
             Self::SandSolid => Some(ParticleMaterial::SandSolid),
             Self::SandGranular => Some(ParticleMaterial::SandGranular),
+            Self::Break => None,
             Self::Delete => None,
         }
     }
@@ -266,6 +272,7 @@ struct WorldToolIconSet {
     soil_granular: Handle<Image>,
     sand_solid: Handle<Image>,
     sand_granular: Handle<Image>,
+    break_icon: Handle<Image>,
     delete: Handle<Image>,
 }
 
@@ -1081,6 +1088,8 @@ fn handle_world_interactions(
     } else if keyboard.just_pressed(KeyCode::Digit7) || keyboard.just_pressed(KeyCode::Numpad7) {
         select_world_tool(&mut interaction_state, Some(WorldTool::SandGranular));
     } else if keyboard.just_pressed(KeyCode::Digit8) || keyboard.just_pressed(KeyCode::Numpad8) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::Break));
+    } else if keyboard.just_pressed(KeyCode::Digit9) || keyboard.just_pressed(KeyCode::Numpad9) {
         select_world_tool(&mut interaction_state, Some(WorldTool::Delete));
     }
 
@@ -1128,12 +1137,8 @@ fn handle_world_interactions(
             );
             let mut spawn_cells = Vec::new();
             let mut last_cell = interaction_state.last_water_spawn_cell;
-            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                let cell = world_to_cell(point);
-                if !cell_in_fixed_world(cell) {
-                    return;
-                }
-                if last_cell != Some(cell) {
+            stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
+                if cell_in_fixed_world(cell) && last_cell != Some(cell) {
                     spawn_cells.push(cell);
                     last_cell = Some(cell);
                 }
@@ -1152,12 +1157,10 @@ fn handle_world_interactions(
             interaction_state.last_granular_spawn_cell = None;
             let terrain_material = tool.terrain_material().unwrap_or(TerrainMaterial::Stone);
             interaction_state.stone_stroke.active = true;
-            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                let cell = world_to_cell(point);
-                if !cell_in_fixed_world(cell) {
-                    return;
+            stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
+                if cell_in_fixed_world(cell) {
+                    interaction_state.stone_stroke.generated_cells.insert(cell);
                 }
-                interaction_state.stone_stroke.generated_cells.insert(cell);
             });
             terrain_changed |= update_stone_stroke_partition(
                 &mut interaction_state.stone_stroke,
@@ -1171,12 +1174,8 @@ fn handle_world_interactions(
             if let Some(material) = tool.material() {
                 let mut spawn_cells = Vec::new();
                 let mut last_cell = interaction_state.last_granular_spawn_cell;
-                stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                    let cell = world_to_cell(point);
-                    if !cell_in_fixed_world(cell) {
-                        return;
-                    }
-                    if last_cell != Some(cell) {
+                stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
+                    if cell_in_fixed_world(cell) && last_cell != Some(cell) {
                         spawn_cells.push(cell);
                         last_cell = Some(cell);
                     }
@@ -1197,19 +1196,66 @@ fn handle_world_interactions(
                 &mut particle_world,
                 &mut object_world,
             );
+            let mut had_particle_removal = false;
+            let mut removed_terrain_cells = HashSet::new();
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
                 let removal = particle_world
                     .remove_particles_in_radius_with_map(point, TOOL_DELETE_BRUSH_RADIUS_M);
                 if removal.removed_count > 0 {
+                    had_particle_removal = true;
                     object_world.apply_particle_remap(&removal.old_to_new, particle_world.masses());
                 }
-                terrain_changed |= paint_terrain_cells_in_radius(
+                removed_terrain_cells.extend(remove_terrain_cells_in_radius(
                     &mut terrain_world,
                     point,
                     TOOL_DELETE_BRUSH_RADIUS_M,
-                    TerrainCell::Empty,
-                );
+                ));
             });
+            terrain_changed |= !removed_terrain_cells.is_empty();
+            if !removed_terrain_cells.is_empty() {
+                terrain_changed |= particle_world.detach_terrain_components_after_cell_removal(
+                    &mut terrain_world,
+                    &mut object_world,
+                    &removed_terrain_cells,
+                );
+            }
+            if had_particle_removal {
+                particle_world.postprocess_objects_after_topology_edit(&mut object_world);
+            }
+        }
+        Some(WorldTool::Break) => {
+            interaction_state.last_water_spawn_cell = None;
+            interaction_state.last_granular_spawn_cell = None;
+            finalize_stone_stroke(
+                &mut interaction_state.stone_stroke,
+                selected_tool,
+                &mut particle_world,
+                &mut object_world,
+            );
+            let mut detached_particles = HashSet::new();
+            let mut removed_terrain_cells = HashSet::new();
+            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
+                let fractured =
+                    particle_world.fracture_solid_particles_in_radius(point, TOOL_BREAK_BRUSH_RADIUS_M);
+                detached_particles.extend(fractured);
+                removed_terrain_cells.extend(break_terrain_solids_in_radius(
+                    &mut terrain_world,
+                    &mut particle_world,
+                    point,
+                    TOOL_BREAK_BRUSH_RADIUS_M,
+                ));
+            });
+            terrain_changed |= !removed_terrain_cells.is_empty();
+            if !detached_particles.is_empty() {
+                particle_world.detach_and_postprocess_objects(&mut object_world, &detached_particles);
+            }
+            if !removed_terrain_cells.is_empty() {
+                terrain_changed |= particle_world.detach_terrain_components_after_cell_removal(
+                    &mut terrain_world,
+                    &mut object_world,
+                    &removed_terrain_cells,
+                );
+            }
         }
         Some(_) => {}
         None => {
@@ -1353,6 +1399,7 @@ fn finalize_stone_stroke(
                     OBJECT_SHAPE_STIFFNESS_ALPHA,
                     OBJECT_SHAPE_ITERS,
                 );
+                particle_world.postprocess_objects_after_topology_edit(object_world);
             }
         }
     }
@@ -1463,16 +1510,56 @@ fn stroke_points(from: Vec2, to: Vec2, spacing: f32, mut paint: impl FnMut(Vec2)
     }
 }
 
-fn paint_terrain_cells_in_radius(
+fn stroke_cells(from: Vec2, to: Vec2, spacing: f32, mut paint_cell: impl FnMut(IVec2)) {
+    let mut previous_cell = None;
+    stroke_points(from, to, spacing, |point| {
+        let current_cell = world_to_cell(point);
+        if let Some(prev_cell) = previous_cell {
+            append_4_connected_segment(prev_cell, current_cell, |cell| paint_cell(cell));
+        } else {
+            paint_cell(current_cell);
+        }
+        previous_cell = Some(current_cell);
+    });
+}
+
+fn append_4_connected_segment(from: IVec2, to: IVec2, mut emit: impl FnMut(IVec2)) {
+    let mut current = from;
+    emit(current);
+    while current != to {
+        let dx = to.x - current.x;
+        let dy = to.y - current.y;
+        if dx.abs() >= dy.abs() {
+            if dx != 0 {
+                current.x += dx.signum();
+                emit(current);
+            }
+            if dy != 0 {
+                current.y += dy.signum();
+                emit(current);
+            }
+        } else {
+            if dy != 0 {
+                current.y += dy.signum();
+                emit(current);
+            }
+            if dx != 0 {
+                current.x += dx.signum();
+                emit(current);
+            }
+        }
+    }
+}
+
+fn remove_terrain_cells_in_radius(
     terrain_world: &mut TerrainWorld,
     center: Vec2,
     radius: f32,
-    cell_value: TerrainCell,
-) -> bool {
+) -> HashSet<IVec2> {
     let min_cell = world_to_cell(center - Vec2::splat(radius));
     let max_cell = world_to_cell(center + Vec2::splat(radius));
     let radius2 = radius * radius;
-    let mut changed = false;
+    let mut removed = HashSet::new();
 
     for y in min_cell.y..=max_cell.y {
         for x in min_cell.x..=max_cell.x {
@@ -1483,11 +1570,56 @@ fn paint_terrain_cells_in_radius(
             if cell_to_world_center(cell).distance_squared(center) > radius2 {
                 continue;
             }
-            changed |= terrain_world.set_cell(cell, cell_value);
+            if terrain_world.set_cell(cell, TerrainCell::Empty) {
+                removed.insert(cell);
+            }
         }
     }
 
-    changed
+    removed
+}
+
+fn break_terrain_solids_in_radius(
+    terrain_world: &mut TerrainWorld,
+    particle_world: &mut ParticleWorld,
+    center: Vec2,
+    radius: f32,
+) -> HashSet<IVec2> {
+    let min_cell = world_to_cell(center - Vec2::splat(radius));
+    let max_cell = world_to_cell(center + Vec2::splat(radius));
+    let radius2 = radius * radius;
+    let mut removed = HashSet::new();
+    let mut spawn_cells_by_material = HashMap::<ParticleMaterial, Vec<IVec2>>::new();
+
+    for y in min_cell.y..=max_cell.y {
+        for x in min_cell.x..=max_cell.x {
+            let cell = IVec2::new(x, y);
+            if !cell_in_fixed_world(cell) {
+                continue;
+            }
+            if cell_to_world_center(cell).distance_squared(center) > radius2 {
+                continue;
+            }
+            let TerrainCell::Solid { material, .. } = terrain_world.get_loaded_cell_or_empty(cell) else {
+                continue;
+            };
+            let Some(target_particle) = terrain_fracture_particle(material) else {
+                continue;
+            };
+            if terrain_world.set_cell(cell, TerrainCell::Empty) {
+                removed.insert(cell);
+                spawn_cells_by_material
+                    .entry(target_particle)
+                    .or_default()
+                    .push(cell);
+            }
+        }
+    }
+
+    for (material, cells) in spawn_cells_by_material {
+        let _ = particle_world.spawn_material_particles_from_cells(&cells, material, Vec2::ZERO);
+    }
+    removed
 }
 
 fn cell_in_fixed_world(cell: IVec2) -> bool {
@@ -1585,6 +1717,7 @@ impl WorldToolIconSet {
             WorldTool::SoilGranular => self.soil_granular.clone(),
             WorldTool::SandSolid => self.sand_solid.clone(),
             WorldTool::SandGranular => self.sand_granular.clone(),
+            WorldTool::Break => self.break_icon.clone(),
             WorldTool::Delete => self.delete.clone(),
         }
     }
@@ -1626,6 +1759,7 @@ fn create_world_tool_icon_set(images: &mut Assets<Image>) -> WorldToolIconSet {
         &MATERIAL_PATTERN_GRANULAR,
         0x9133_257e,
     ));
+    let break_icon = images.add(build_break_icon_image());
     let delete = images.add(build_delete_icon_image());
     WorldToolIconSet {
         water_liquid,
@@ -1635,6 +1769,7 @@ fn create_world_tool_icon_set(images: &mut Assets<Image>) -> WorldToolIconSet {
         soil_granular,
         sand_solid,
         sand_granular,
+        break_icon,
         delete,
     }
 }
@@ -1712,6 +1847,42 @@ fn build_delete_icon_image() -> Image {
         }
     }
 
+    let mut image = Image::new_fill(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.data = Some(pixels);
+    image
+}
+
+fn build_break_icon_image() -> Image {
+    let width = TOOLBAR_ICON_SIZE_PX;
+    let height = TOOLBAR_ICON_SIZE_PX;
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let amber = [246u8, 170u8, 38u8, 255u8];
+    let dark = [115u8, 63u8, 8u8, 255u8];
+    for y in 0..height {
+        for x in 0..width {
+            let idx = ((y * width + x) * 4) as usize;
+            let border = x < 2 || y < 2 || x >= width - 2 || y >= height - 2;
+            if border {
+                pixels[idx..idx + 4].copy_from_slice(&dark);
+                continue;
+            }
+            let diagonal = (x as i32 - y as i32).abs() <= 1
+                || ((width - 1 - x) as i32 - y as i32).abs() <= 1;
+            if diagonal {
+                pixels[idx..idx + 4].copy_from_slice(&amber);
+            }
+        }
+    }
     let mut image = Image::new_fill(
         Extent3d {
             width,
