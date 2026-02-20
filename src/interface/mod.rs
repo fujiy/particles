@@ -1,7 +1,9 @@
 use std::collections::{HashSet, VecDeque};
 
+use bevy::asset::RenderAssetUsages;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::window::PrimaryWindow;
 
 use crate::physics::cell_to_world_center;
@@ -21,8 +23,18 @@ const BUTTON_BG_OFF: Color = Color::srgba(0.17, 0.18, 0.22, 0.95);
 const BUTTON_BG_ON: Color = Color::srgba(0.16, 0.30, 0.46, 0.95);
 const BUTTON_BG_HOVER: Color = Color::srgba(0.24, 0.25, 0.30, 0.98);
 const BUTTON_BG_PRESS: Color = Color::srgba(0.38, 0.40, 0.48, 0.98);
+const BUTTON_BORDER_OFF: Color = Color::srgba(0.08, 0.10, 0.14, 1.0);
+const BUTTON_BORDER_ON: Color = Color::srgba(0.80, 0.92, 1.00, 1.0);
 const TOOLBAR_BOTTOM_PX: f32 = 12.0;
 const TOOLBAR_BG_COLOR: Color = Color::srgba(0.05, 0.06, 0.09, 0.88);
+const TOOLBAR_ICON_SIZE_PX: u32 = 32;
+const TOOLBAR_ICON_GRID_SIZE: usize = 8;
+const TOOLBAR_ICON_DOT_PX: u32 = TOOLBAR_ICON_SIZE_PX / TOOLBAR_ICON_GRID_SIZE as u32;
+const TOOLBAR_BUTTON_SIZE_PX: f32 = 44.0;
+const TOOLTIP_BG_COLOR: Color = Color::srgba(0.04, 0.05, 0.08, 0.96);
+const TOOLTIP_CURSOR_OFFSET_X: f32 = 14.0;
+const TOOLTIP_CURSOR_OFFSET_Y: f32 = 20.0;
+const TOOLTIP_GLOBAL_Z_INDEX: i32 = 10_000;
 const DRAG_VELOCITY_BRUSH_RADIUS_M: f32 = 0.55;
 const DRAG_VELOCITY_GAIN: f32 = 0.9;
 const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
@@ -33,6 +45,63 @@ const STONE_STROKE_NEIGHBOR_OFFSETS: [IVec2; 4] = [
     IVec2::new(-1, 0),
     IVec2::new(0, 1),
     IVec2::new(0, -1),
+];
+type MaterialPattern8 = [[bool; TOOLBAR_ICON_GRID_SIZE]; TOOLBAR_ICON_GRID_SIZE];
+
+const MATERIAL_PATTERN_LIQUID: MaterialPattern8 = [
+    [false, false, false, false, false, false, false, false],
+    [false, true, true, false, false, false, false, false],
+    [true, true, true, true, true, false, false, true],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+];
+
+const MATERIAL_PATTERN_SOLID: MaterialPattern8 = [
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
+];
+
+#[allow(dead_code)]
+const MATERIAL_PATTERN_POWDER: MaterialPattern8 = [
+    [false, true, false, true, false, true, false, true],
+    [true, false, true, false, true, false, true, false],
+    [false, true, false, true, false, true, false, true],
+    [true, false, true, false, true, false, true, false],
+    [false, true, false, true, false, true, false, true],
+    [true, false, true, false, true, false, true, false],
+    [false, true, false, true, false, true, false, true],
+    [true, false, true, false, true, false, true, false],
+];
+
+const MATERIAL_PALETTE_LIQUID: [[u8; 4]; 4] = [
+    [42, 120, 202, 235],
+    [52, 136, 218, 240],
+    [65, 152, 228, 245],
+    [78, 167, 238, 250],
+];
+
+const MATERIAL_PALETTE_SOLID: [[u8; 4]; 4] = [
+    [70, 67, 63, 255],
+    [83, 79, 74, 255],
+    [95, 90, 84, 255],
+    [108, 103, 96, 255],
+];
+
+#[allow(dead_code)]
+const MATERIAL_PALETTE_POWDER: [[u8; 4]; 4] = [
+    [172, 149, 111, 255],
+    [185, 162, 124, 255],
+    [198, 175, 136, 255],
+    [210, 188, 148, 255],
 ];
 
 pub struct InterfacePlugin;
@@ -52,7 +121,11 @@ impl Plugin for InterfacePlugin {
             )
             .add_systems(
                 Update,
-                (update_world_tool_button_visuals, update_simulation_hud)
+                (
+                    update_world_tool_button_visuals,
+                    update_world_tool_tooltip,
+                    update_simulation_hud,
+                )
                     .chain()
                     .in_set(SimUpdateSet::Ui),
             );
@@ -62,7 +135,7 @@ impl Plugin for InterfacePlugin {
 #[derive(Component)]
 struct SimulationHudText;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum WorldTool {
     Water,
     Stone,
@@ -99,12 +172,23 @@ struct WorldToolButton {
     tool: WorldTool,
 }
 
-#[derive(Component, Clone, Copy)]
-struct WorldToolButtonLabel {
-    tool: WorldTool,
+#[derive(Component)]
+struct WorldToolTooltip;
+
+#[derive(Component)]
+struct WorldToolTooltipText;
+
+#[derive(Resource, Clone)]
+struct WorldToolIconSet {
+    water: Handle<Image>,
+    stone: Handle<Image>,
+    delete: Handle<Image>,
 }
 
-fn setup_simulation_ui(mut commands: Commands) {
+fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    let icon_set = create_world_tool_icon_set(&mut images);
+    commands.insert_resource(icon_set.clone());
+
     commands
         .spawn((
             Node {
@@ -150,22 +234,52 @@ fn setup_simulation_ui(mut commands: Commands) {
                             .spawn((
                                 Button,
                                 Node {
-                                    padding: UiRect::axes(px(10.0), px(6.0)),
+                                    width: px(TOOLBAR_BUTTON_SIZE_PX),
+                                    height: px(TOOLBAR_BUTTON_SIZE_PX),
+                                    align_items: AlignItems::Center,
+                                    justify_content: JustifyContent::Center,
+                                    border: UiRect::all(px(2.0)),
                                     ..default()
                                 },
                                 BackgroundColor(BUTTON_BG_OFF),
+                                BorderColor::all(BUTTON_BORDER_OFF),
                                 WorldToolButton { tool },
                             ))
                             .with_children(|button| {
                                 button.spawn((
-                                    Text::new(tool.label()),
-                                    TextFont::from_font_size(14.0),
-                                    TextColor(Color::WHITE),
-                                    WorldToolButtonLabel { tool },
+                                    ImageNode::new(icon_set.icon_for(tool)),
+                                    Node {
+                                        width: px(TOOLBAR_ICON_SIZE_PX as f32),
+                                        height: px(TOOLBAR_ICON_SIZE_PX as f32),
+                                        ..default()
+                                    },
                                 ));
                             });
                     }
                 });
+        });
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                display: Display::None,
+                left: px(0.0),
+                top: px(0.0),
+                padding: UiRect::axes(px(8.0), px(4.0)),
+                ..default()
+            },
+            BackgroundColor(TOOLTIP_BG_COLOR),
+            GlobalZIndex(TOOLTIP_GLOBAL_Z_INDEX),
+            WorldToolTooltip,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new(""),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::WHITE),
+                WorldToolTooltipText,
+            ));
         });
 }
 
@@ -178,36 +292,62 @@ fn handle_world_tool_button_interaction(
 ) {
     for (interaction, button) in &mut interactions {
         if *interaction == Interaction::Pressed {
-            interaction_state.selected_tool = Some(button.tool);
-            interaction_state.last_drag_world = None;
-            interaction_state.water_spawn_carry_m = 0.0;
-            interaction_state.stone_stroke = StoneStrokeState::default();
+            select_world_tool(&mut interaction_state, Some(button.tool));
         }
     }
 }
 
 fn update_world_tool_button_visuals(
     interaction_state: Res<WorldInteractionState>,
-    mut buttons: Query<(&Interaction, &WorldToolButton, &mut BackgroundColor)>,
-    mut labels: Query<(&WorldToolButtonLabel, &mut Text)>,
+    mut buttons: Query<(
+        &Interaction,
+        &WorldToolButton,
+        &mut BackgroundColor,
+        &mut BorderColor,
+    )>,
 ) {
-    for (interaction, button, mut bg) in &mut buttons {
+    for (interaction, button, mut bg, mut border_color) in &mut buttons {
+        let selected = interaction_state.selected_tool == Some(button.tool);
         *bg = match *interaction {
             Interaction::Pressed => BUTTON_BG_PRESS.into(),
             Interaction::Hovered => BUTTON_BG_HOVER.into(),
-            Interaction::None => {
-                toggle_button_bg(interaction_state.selected_tool == Some(button.tool))
-            }
+            Interaction::None => toggle_button_bg(selected),
+        };
+        *border_color = if selected {
+            BorderColor::all(BUTTON_BORDER_ON)
+        } else {
+            BorderColor::all(BUTTON_BORDER_OFF)
         };
     }
+}
 
-    for (label, mut text) in &mut labels {
-        if interaction_state.selected_tool == Some(label.tool) {
-            text.0 = format!("{} [Selected]", label.tool.label());
-        } else {
-            text.0 = label.tool.label().to_string();
-        }
-    }
+fn update_world_tool_tooltip(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    buttons: Query<(&Interaction, &WorldToolButton), With<Button>>,
+    mut tooltip: Single<&mut Node, With<WorldToolTooltip>>,
+    mut tooltip_text: Single<&mut Text, With<WorldToolTooltipText>>,
+) {
+    let hovered_tool = buttons.iter().find_map(|(interaction, button)| {
+        (*interaction == Interaction::Hovered).then_some(button.tool)
+    });
+    let Some(tool) = hovered_tool else {
+        tooltip.display = Display::None;
+        return;
+    };
+
+    let Some(window) = windows.iter().next() else {
+        tooltip.display = Display::None;
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        tooltip.display = Display::None;
+        return;
+    };
+
+    tooltip.display = Display::Flex;
+    tooltip.left = px(cursor.x + TOOLTIP_CURSOR_OFFSET_X);
+    tooltip.top = px(cursor.y + TOOLTIP_CURSOR_OFFSET_Y);
+    tooltip_text.0 = tool.label().to_string();
 }
 
 fn handle_world_interactions(
@@ -222,11 +362,16 @@ fn handle_world_interactions(
     mut terrain_world: ResMut<TerrainWorld>,
     mut object_world: ResMut<ObjectWorld>,
 ) {
+    if keyboard.just_pressed(KeyCode::Digit1) || keyboard.just_pressed(KeyCode::Numpad1) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::Water));
+    } else if keyboard.just_pressed(KeyCode::Digit2) || keyboard.just_pressed(KeyCode::Numpad2) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::Stone));
+    } else if keyboard.just_pressed(KeyCode::Digit3) || keyboard.just_pressed(KeyCode::Numpad3) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::Delete));
+    }
+
     if keyboard.just_pressed(KeyCode::Escape) {
-        interaction_state.selected_tool = None;
-        interaction_state.last_drag_world = None;
-        interaction_state.water_spawn_carry_m = 0.0;
-        interaction_state.stone_stroke = StoneStrokeState::default();
+        select_world_tool(&mut interaction_state, None);
     }
 
     let left_pressed = mouse_buttons.pressed(MouseButton::Left);
@@ -559,4 +704,128 @@ fn toggle_button_bg(enabled: bool) -> BackgroundColor {
     } else {
         BUTTON_BG_OFF.into()
     }
+}
+
+fn select_world_tool(state: &mut WorldInteractionState, next_tool: Option<WorldTool>) {
+    state.selected_tool = next_tool;
+    state.last_drag_world = None;
+    state.water_spawn_carry_m = 0.0;
+    state.stone_stroke = StoneStrokeState::default();
+}
+
+impl WorldToolIconSet {
+    fn icon_for(&self, tool: WorldTool) -> Handle<Image> {
+        match tool {
+            WorldTool::Water => self.water.clone(),
+            WorldTool::Stone => self.stone.clone(),
+            WorldTool::Delete => self.delete.clone(),
+        }
+    }
+}
+
+fn create_world_tool_icon_set(images: &mut Assets<Image>) -> WorldToolIconSet {
+    let water = images.add(build_material_icon_image(
+        MATERIAL_PALETTE_LIQUID,
+        &MATERIAL_PATTERN_LIQUID,
+        0x4e23_1f91,
+    ));
+    let stone = images.add(build_material_icon_image(
+        MATERIAL_PALETTE_SOLID,
+        &MATERIAL_PATTERN_SOLID,
+        0x8a52_d9b7,
+    ));
+    let delete = images.add(build_delete_icon_image());
+    WorldToolIconSet {
+        water,
+        stone,
+        delete,
+    }
+}
+
+fn build_material_icon_image(
+    palette: [[u8; 4]; 4],
+    pattern: &MaterialPattern8,
+    seed: u32,
+) -> Image {
+    let width = TOOLBAR_ICON_SIZE_PX;
+    let height = TOOLBAR_ICON_SIZE_PX;
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    for (gy, row) in pattern.iter().enumerate() {
+        for (gx, enabled) in row.iter().copied().enumerate() {
+            if !enabled {
+                continue;
+            }
+            let palette_index = material_icon_palette_index(gx as u32, gy as u32, seed);
+            let color = palette[palette_index];
+            let start_x = gx as u32 * TOOLBAR_ICON_DOT_PX;
+            let start_y = gy as u32 * TOOLBAR_ICON_DOT_PX;
+            for py in start_y..(start_y + TOOLBAR_ICON_DOT_PX) {
+                for px in start_x..(start_x + TOOLBAR_ICON_DOT_PX) {
+                    if px >= width || py >= height {
+                        continue;
+                    }
+                    let idx = ((py * width + px) * 4) as usize;
+                    pixels[idx..idx + 4].copy_from_slice(&color);
+                }
+            }
+        }
+    }
+
+    let mut image = Image::new_fill(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.data = Some(pixels);
+    image
+}
+
+fn material_icon_palette_index(x: u32, y: u32, seed: u32) -> usize {
+    let mut state = x.wrapping_mul(0x45d9f3b);
+    state ^= y.wrapping_mul(0x27d4eb2d);
+    state ^= seed;
+    state ^= state >> 16;
+    state = state.wrapping_mul(0x7feb_352d);
+    state ^= state >> 15;
+    state = state.wrapping_mul(0x846c_a68b);
+    state ^= state >> 16;
+    (state & 0b11) as usize
+}
+
+fn build_delete_icon_image() -> Image {
+    let width = TOOLBAR_ICON_SIZE_PX;
+    let height = TOOLBAR_ICON_SIZE_PX;
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let red = [220u8, 52u8, 52u8, 255u8];
+    let thickness = 3i32;
+    for y in 0..height as i32 {
+        for x in 0..width as i32 {
+            let d1 = (x - y).abs();
+            let d2 = ((width as i32 - 1 - x) - y).abs();
+            if d1 <= thickness || d2 <= thickness {
+                let idx = (((y as u32) * width + (x as u32)) * 4) as usize;
+                pixels[idx..idx + 4].copy_from_slice(&red);
+            }
+        }
+    }
+
+    let mut image = Image::new_fill(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.data = Some(pixels);
+    image
 }

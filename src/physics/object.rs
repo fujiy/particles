@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use bevy::log::tracing;
 use bevy::prelude::*;
 
-use super::particle::PARTICLE_RADIUS_M;
 use super::terrain::{
     CELL_SIZE_M, CHUNK_WORLD_SIZE_M, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
     WORLD_MIN_CHUNK_Y,
@@ -19,8 +18,6 @@ pub const OBJECT_BROADPHASE_CELL_SIZE_M: f32 = CELL_SIZE_M * 4.0;
 pub const OBJECT_SDF_MAX_DISTANCE_M: f32 = CELL_SIZE_M * 2.5;
 pub const OBJECT_SDF_MAX_SPLATS_PER_CELL: usize = 4;
 pub const OBJECT_SDF_MAX_CONTACTS_PER_QUERY: usize = 4;
-pub const OBJECT_BOUNDARY_PUSH_RADIUS_M: f32 = PARTICLE_RADIUS_M;
-pub const OBJECT_REPULSION_STIFFNESS: f32 = 0.70;
 
 const SDF_INF: f32 = 1.0e9;
 const SDF_DIAGONAL_COST: f32 = std::f32::consts::SQRT_2;

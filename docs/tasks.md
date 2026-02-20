@@ -1,10 +1,14 @@
 # Tasks
 
 ## Todo
-- [ ] Tracyで前後比較を実施し、`density_constraint_pass` の短縮率を記録
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] ツールバーtooltipを最前面表示へ変更（`GlobalZIndex` を付与）
+- [x] 粒子物性を `physics/material.rs` に集約（`ParticleMaterial` / 半径 / 質量 / 接触パラメータ）
+- [x] 岩同士の接触応答を調整（低反発・高摩擦の速度応答を追加）
+- [x] 地形境界の密度拘束にゴースト寄与を追加（`density_lambda` と `compute_delta` の両方で境界近傍圧力を反映）
+- [x] 地形 `boundary_push` をフェイルセーフ寄りに調整（水粒子は侵入時の押し戻し係数を1.0）
 - [x] `physics::compute_delta` を自前並列化（1粒子1書き込み + ワークバッファ方式）
 - [x] `density_lambda` を自前並列化（スレッドローカルscratch利用）
 - [x] `density_lambda` / `compute_delta` で近傍gather結果を再利用し、同一反復内の重複探索を削減
