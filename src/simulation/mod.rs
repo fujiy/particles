@@ -1,12 +1,15 @@
+mod object;
 mod particle;
 mod render;
 mod terrain;
 
+use std::collections::{HashSet, VecDeque};
 use std::time::Instant;
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectWorld};
 use particle::{
     PARTICLE_RADIUS_M, PARTICLE_SPACING_M, PARTICLE_SPEED_LIMIT_MPS, ParticleWorld,
     TERRAIN_BOUNDARY_RADIUS_M, WATER_KERNEL_RADIUS_M, nominal_particle_draw_radius_m,
@@ -39,6 +42,12 @@ const DRAG_VELOCITY_GAIN: f32 = 0.9;
 const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
 const TOOL_WATER_SPAWN_SPACING_M: f32 = PARTICLE_SPACING_M;
 const TOOL_DELETE_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
+const STONE_STROKE_NEIGHBOR_OFFSETS: [IVec2; 4] = [
+    IVec2::new(1, 0),
+    IVec2::new(-1, 0),
+    IVec2::new(0, 1),
+    IVec2::new(0, -1),
+];
 
 pub struct SimulationPlugin;
 
@@ -46,6 +55,7 @@ impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainWorld>()
             .init_resource::<ParticleWorld>()
+            .init_resource::<ObjectWorld>()
             .init_resource::<SimulationState>()
             .init_resource::<DebugOverlayState>()
             .init_resource::<GridOverlayState>()
@@ -132,6 +142,14 @@ struct WorldInteractionState {
     selected_tool: Option<WorldTool>,
     last_drag_world: Option<Vec2>,
     water_spawn_carry_m: f32,
+    stone_stroke: StoneStrokeState,
+}
+
+#[derive(Debug, Default)]
+struct StoneStrokeState {
+    active: bool,
+    generated_cells: HashSet<IVec2>,
+    candidate_cells: HashSet<IVec2>,
 }
 
 #[derive(Resource, Debug, Default)]
@@ -172,16 +190,17 @@ fn step_water_particles(
     sim_state: Res<SimulationState>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
+    mut object_world: ResMut<ObjectWorld>,
     mut perf_metrics: ResMut<SimulationPerfMetrics>,
 ) {
     let running = sim_state.running;
     if running {
         terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let start = Instant::now();
-        particle_world.step_if_running(&terrain_world, running);
+        particle_world.step_if_running(&terrain_world, &mut object_world, running);
         perf_metrics.physics_time_this_frame_secs += start.elapsed().as_secs_f64();
     } else {
-        particle_world.step_if_running(&terrain_world, running);
+        particle_world.step_if_running(&terrain_world, &mut object_world, running);
     }
 }
 
@@ -204,6 +223,7 @@ fn apply_sim_reset(
     mut sim_state: ResMut<SimulationState>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
+    mut object_world: ResMut<ObjectWorld>,
 ) {
     if reset_reader.read().next().is_none() {
         return;
@@ -212,6 +232,7 @@ fn apply_sim_reset(
     terrain_world.reset_fixed_world();
     terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
     particle_world.reset_to_initial();
+    object_world.clear();
     sim_state.running = false;
 }
 
@@ -382,6 +403,7 @@ fn handle_world_tool_button_interaction(
             interaction_state.selected_tool = Some(button.tool);
             interaction_state.last_drag_world = None;
             interaction_state.water_spawn_carry_m = 0.0;
+            interaction_state.stone_stroke = StoneStrokeState::default();
         }
     }
 }
@@ -420,40 +442,35 @@ fn handle_world_interactions(
     mut interaction_state: ResMut<WorldInteractionState>,
     mut particle_world: ResMut<ParticleWorld>,
     mut terrain_world: ResMut<TerrainWorld>,
+    mut object_world: ResMut<ObjectWorld>,
 ) {
     if keyboard.just_pressed(KeyCode::Escape) {
         interaction_state.selected_tool = None;
         interaction_state.last_drag_world = None;
         interaction_state.water_spawn_carry_m = 0.0;
+        interaction_state.stone_stroke = StoneStrokeState::default();
     }
 
-    if !mouse_buttons.pressed(MouseButton::Left) {
-        interaction_state.last_drag_world = None;
-        interaction_state.water_spawn_carry_m = 0.0;
-        return;
-    }
-
+    let left_pressed = mouse_buttons.pressed(MouseButton::Left);
     let alt_pressed = keyboard.pressed(KeyCode::AltLeft) || keyboard.pressed(KeyCode::AltRight);
-    if alt_pressed || mouse_buttons.pressed(MouseButton::Middle) {
-        interaction_state.last_drag_world = None;
-        interaction_state.water_spawn_carry_m = 0.0;
-        return;
-    }
-
-    if ui_buttons
+    let blocked_by_pan = alt_pressed || mouse_buttons.pressed(MouseButton::Middle);
+    let blocked_by_ui = ui_buttons
         .iter()
-        .any(|interaction| *interaction != Interaction::None)
-    {
+        .any(|interaction| *interaction != Interaction::None);
+    let cursor_world = cursor_world_position(&windows, &camera_query);
+
+    if !left_pressed || blocked_by_pan || blocked_by_ui || cursor_world.is_none() {
+        finalize_stone_stroke(
+            &mut interaction_state.stone_stroke,
+            &mut particle_world,
+            &mut object_world,
+        );
         interaction_state.last_drag_world = None;
         interaction_state.water_spawn_carry_m = 0.0;
         return;
     }
 
-    let Some(cursor_world) = cursor_world_position(&windows, &camera_query) else {
-        interaction_state.last_drag_world = None;
-        interaction_state.water_spawn_carry_m = 0.0;
-        return;
-    };
+    let cursor_world = cursor_world.unwrap_or(Vec2::ZERO);
 
     let previous_world = interaction_state.last_drag_world.unwrap_or(cursor_world);
     let dt = time.delta_secs().max(1e-4);
@@ -465,6 +482,11 @@ fn handle_world_interactions(
 
     match interaction_state.selected_tool {
         Some(WorldTool::Water) => {
+            finalize_stone_stroke(
+                &mut interaction_state.stone_stroke,
+                &mut particle_world,
+                &mut object_world,
+            );
             particle_world.spawn_water_particles_along_segment(
                 previous_world,
                 cursor_world,
@@ -474,17 +496,31 @@ fn handle_world_interactions(
             );
         }
         Some(WorldTool::Stone) => {
+            interaction_state.stone_stroke.active = true;
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                terrain_changed |= paint_single_terrain_cell(
-                    &mut terrain_world,
-                    world_to_cell(point),
-                    TerrainCell::rock(),
-                );
+                let cell = world_to_cell(point);
+                if !cell_in_fixed_world(cell) {
+                    return;
+                }
+                interaction_state.stone_stroke.generated_cells.insert(cell);
             });
+            terrain_changed |= update_stone_stroke_partition(
+                &mut interaction_state.stone_stroke,
+                &mut terrain_world,
+            );
         }
         Some(WorldTool::Delete) => {
+            finalize_stone_stroke(
+                &mut interaction_state.stone_stroke,
+                &mut particle_world,
+                &mut object_world,
+            );
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                particle_world.remove_particles_in_radius(point, TOOL_DELETE_BRUSH_RADIUS_M);
+                let removal = particle_world
+                    .remove_particles_in_radius_with_map(point, TOOL_DELETE_BRUSH_RADIUS_M);
+                if removal.removed_count > 0 {
+                    object_world.apply_particle_remap(&removal.old_to_new, particle_world.masses());
+                }
                 terrain_changed |= paint_terrain_cells_in_radius(
                     &mut terrain_world,
                     point,
@@ -494,6 +530,11 @@ fn handle_world_interactions(
             });
         }
         None => {
+            finalize_stone_stroke(
+                &mut interaction_state.stone_stroke,
+                &mut particle_world,
+                &mut object_world,
+            );
             interaction_state.water_spawn_carry_m = 0.0;
             let velocity_delta = stroke_velocity * DRAG_VELOCITY_GAIN;
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
@@ -512,6 +553,114 @@ fn handle_world_interactions(
     }
 
     interaction_state.last_drag_world = Some(cursor_world);
+}
+
+fn update_stone_stroke_partition(
+    stroke: &mut StoneStrokeState,
+    terrain_world: &mut TerrainWorld,
+) -> bool {
+    if stroke.generated_cells.is_empty() {
+        stroke.candidate_cells.clear();
+        return false;
+    }
+
+    let terrain_connected = collect_terrain_connected_stroke_cells(stroke, terrain_world);
+    let mut terrain_changed = false;
+    for &cell in &terrain_connected {
+        terrain_changed |= terrain_world.set_cell(cell, TerrainCell::rock());
+    }
+
+    stroke.candidate_cells.clear();
+    for &cell in &stroke.generated_cells {
+        if !terrain_connected.contains(&cell) {
+            stroke.candidate_cells.insert(cell);
+        }
+    }
+    terrain_changed
+}
+
+fn collect_terrain_connected_stroke_cells(
+    stroke: &StoneStrokeState,
+    terrain_world: &TerrainWorld,
+) -> HashSet<IVec2> {
+    let mut connected = HashSet::new();
+    let mut queue = VecDeque::new();
+
+    for &cell in &stroke.generated_cells {
+        if is_stroke_cell_connected_to_frozen_terrain(cell, stroke, terrain_world) {
+            connected.insert(cell);
+            queue.push_back(cell);
+        }
+    }
+
+    while let Some(cell) = queue.pop_front() {
+        for offset in STONE_STROKE_NEIGHBOR_OFFSETS {
+            let next = cell + offset;
+            if !stroke.generated_cells.contains(&next) || connected.contains(&next) {
+                continue;
+            }
+            connected.insert(next);
+            queue.push_back(next);
+        }
+    }
+
+    connected
+}
+
+fn is_stroke_cell_connected_to_frozen_terrain(
+    cell: IVec2,
+    stroke: &StoneStrokeState,
+    terrain_world: &TerrainWorld,
+) -> bool {
+    if matches!(
+        terrain_world.get_loaded_cell_or_empty(cell),
+        TerrainCell::Solid { .. }
+    ) {
+        return true;
+    }
+
+    for offset in STONE_STROKE_NEIGHBOR_OFFSETS {
+        let neighbor = cell + offset;
+        if stroke.generated_cells.contains(&neighbor) {
+            continue;
+        }
+        if matches!(
+            terrain_world.get_loaded_cell_or_empty(neighbor),
+            TerrainCell::Solid { .. }
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+fn finalize_stone_stroke(
+    stroke: &mut StoneStrokeState,
+    particle_world: &mut ParticleWorld,
+    object_world: &mut ObjectWorld,
+) {
+    if !stroke.active {
+        stroke.generated_cells.clear();
+        stroke.candidate_cells.clear();
+        return;
+    }
+
+    if !stroke.candidate_cells.is_empty() {
+        let mut cells: Vec<_> = stroke.candidate_cells.iter().copied().collect();
+        cells.sort_by_key(|cell| (cell.y, cell.x));
+        let particle_indices = particle_world.spawn_stone_particles_from_cells(&cells, Vec2::ZERO);
+        let _ = object_world.create_object(
+            particle_indices,
+            particle_world.positions(),
+            particle_world.masses(),
+            OBJECT_SHAPE_STIFFNESS_ALPHA,
+            OBJECT_SHAPE_ITERS,
+        );
+    }
+
+    stroke.active = false;
+    stroke.generated_cells.clear();
+    stroke.candidate_cells.clear();
 }
 
 fn update_grid_overlay_button_label(
@@ -616,14 +765,23 @@ fn update_simulation_hud(
         } else {
             "Paused"
         };
+        let water_count = particles
+            .materials()
+            .iter()
+            .filter(|&&m| matches!(m, particle::ParticleMaterial::Water))
+            .count();
+        let stone_count = particles
+            .materials()
+            .iter()
+            .filter(|&&m| matches!(m, particle::ParticleMaterial::Stone))
+            .count();
         let potential_str = if potential.is_finite() {
             format!("{potential:.1}")
         } else {
             "INF".to_string()
         };
         text.0 = format!(
-            "FPS: {fps:.1}\nPotential Max FPS: {potential_str}\nSim: {sim_status}\nWater Particles: {}",
-            particles.particle_count()
+            "FPS: {fps:.1}\nPotential Max FPS: {potential_str}\nSim: {sim_status}\nWater Particles: {water_count}\nStone Particles: {stone_count}"
         );
     }
 }
@@ -649,13 +807,13 @@ fn draw_particle_debug_overlay(
             )
             .resolution(DEBUG_OVERLAY_CIRCLE_RESOLUTION);
     }
-    for pos in particle_world.positions() {
+    for (index, pos) in particle_world.positions().iter().enumerate() {
+        let color = match particle_world.materials()[index] {
+            particle::ParticleMaterial::Water => Color::srgba(0.10, 0.80, 0.95, 0.85),
+            particle::ParticleMaterial::Stone => Color::srgba(0.63, 0.50, 0.34, 0.85),
+        };
         gizmos
-            .circle_2d(
-                *pos,
-                water_overlay_radius,
-                Color::srgba(0.10, 0.80, 0.95, 0.85),
-            )
+            .circle_2d(*pos, water_overlay_radius, color)
             .resolution(DEBUG_OVERLAY_CIRCLE_RESOLUTION);
     }
 }
@@ -715,17 +873,6 @@ fn paint_terrain_cells_in_radius(
     }
 
     changed
-}
-
-fn paint_single_terrain_cell(
-    terrain_world: &mut TerrainWorld,
-    cell: IVec2,
-    cell_value: TerrainCell,
-) -> bool {
-    if !cell_in_fixed_world(cell) {
-        return false;
-    }
-    terrain_world.set_cell(cell, cell_value)
 }
 
 fn cell_in_fixed_world(cell: IVec2) -> bool {

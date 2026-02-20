@@ -5,7 +5,8 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::particle::{
-    ParticleWorld, REST_DENSITY, TERRAIN_BOUNDARY_RADIUS_M, nominal_particle_draw_radius_m,
+    ParticleMaterial, ParticleWorld, REST_DENSITY, STONE_PARTICLE_RADIUS_M,
+    TERRAIN_BOUNDARY_RADIUS_M, nominal_particle_draw_radius_m,
 };
 use super::terrain::{
     CELL_PIXEL_SIZE, CELL_SIZE_M, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_WORLD_SIZE_M, TerrainCell,
@@ -41,6 +42,7 @@ const WATER_DOT_SMOOTH_WIDTH: f32 = 1.0;
 const WATER_BLUR_RADIUS_DOTS: i32 = 2;
 const WATER_DOT_SCALE: f32 = CELL_PIXEL_SIZE as f32 / CELL_SIZE_M;
 const WATER_RENDER_Z: f32 = 6.0;
+const STONE_DOT_ALPHA: u8 = 255;
 
 pub fn bootstrap_terrain_chunks(mut terrain_world: ResMut<TerrainWorld>) {
     terrain_world.reset_fixed_world();
@@ -143,6 +145,12 @@ pub fn sync_water_dots_to_render(
     let dot_threshold = REST_DENSITY * WATER_DOT_THRESHOLD_REST_DENSITY_RATIO;
 
     for (particle_index, &pos) in particles.positions().iter().enumerate() {
+        if !matches!(
+            particles.materials()[particle_index],
+            ParticleMaterial::Water
+        ) {
+            continue;
+        }
         let particle_mass = particles.masses()[particle_index];
         let px_center = world_to_water_pixel(pos);
         for py in (px_center.y - draw_radius_px)..=(px_center.y + draw_radius_px) {
@@ -204,6 +212,43 @@ pub fn sync_water_dots_to_render(
             color[3] = ((color[3] as f32) * coverage).round().clamp(0.0, 255.0) as u8;
             let offset = idx * 4;
             pixels[offset..offset + 4].copy_from_slice(&color);
+        }
+    }
+
+    let stone_radius_px = (STONE_PARTICLE_RADIUS_M * WATER_DOT_SCALE).ceil() as i32;
+    let stone_radius_px2 = (stone_radius_px * stone_radius_px) as f32;
+    for (particle_index, &pos) in particles.positions().iter().enumerate() {
+        if !matches!(
+            particles.materials()[particle_index],
+            ParticleMaterial::Stone
+        ) {
+            continue;
+        }
+        let center_px = world_to_water_pixel(pos);
+        for py in (center_px.y - stone_radius_px)..=(center_px.y + stone_radius_px) {
+            if py < 0 || py >= WATER_IMAGE_HEIGHT as i32 {
+                continue;
+            }
+            for px in (center_px.x - stone_radius_px)..=(center_px.x + stone_radius_px) {
+                if px < 0 || px >= WATER_IMAGE_WIDTH as i32 {
+                    continue;
+                }
+                let dx = (px - center_px.x) as f32;
+                let dy = (py - center_px.y) as f32;
+                if dx * dx + dy * dy > stone_radius_px2 {
+                    continue;
+                }
+                let idx = water_density_index(px, py);
+                let offset = idx * 4;
+                let palette = [
+                    [70, 67, 63, STONE_DOT_ALPHA],
+                    [83, 79, 74, STONE_DOT_ALPHA],
+                    [95, 90, 84, STONE_DOT_ALPHA],
+                    [108, 103, 96, STONE_DOT_ALPHA],
+                ];
+                let pidx = deterministic_palette_index(px, py);
+                pixels[offset..offset + 4].copy_from_slice(&palette[pidx]);
+            }
         }
     }
 

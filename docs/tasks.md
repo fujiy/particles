@@ -5,6 +5,16 @@
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] `ObjectWorld` を追加し、`ObjectId` / `particle_indices` / `rest_local` / `mass_sum` / `shape_stiffness_alpha` / `shape_iters` を管理
+- [x] Stoneドラッグの1ストローク追跡を実装（開始・更新・終了イベントの収集）
+- [x] Stoneドラッグ中の生成セルを分類（`Frozen` 地形に重なる/接続するセルは地形、その他は物体候補）
+- [x] マウスリリース時に物体候補セルから粒子集合を生成し、1ストローク=1オブジェクトとして登録
+- [x] 物体作成時に `rest_local` をCOM基準で初期化（`sum(m_i * q_i)=0`）
+- [x] `FixedUpdate` のsubstepへ形状マッチング投影を統合（2D極分解で `R` を計算）
+- [x] 形状マッチング反復回数 `shape_iters` と剛性 `shape_stiffness_alpha` の調整パラメータを導入
+- [x] 速度更新を形状マッチング後に整合させ、過大速度をクランプ
+- [x] 物体候補セルが空の場合はオブジェクトを作らず、地形生成のみ行う分岐を実装
+- [x] 受け入れ確認を実施（ほぼ剛体挙動、Stoneドラッグ地形判定、1ストローク1オブジェクト）
 - [x] Design Feedback反映: 水-岩干渉仕様を「岩SPH寄与なし + SDF `boundary_push`」へ更新（`design.md` §12.1/§12.5）
 - [x] Design Feedback反映: 新規定数 `TERRAIN_SDF_SAMPLES_PER_CELL` / `TERRAIN_SDF_PUSH_RADIUS_M` / `TERRAIN_REPULSION_STIFFNESS` を仕様へ追加（`design.md` §12.2）
 - [x] Design Feedback反映: 水描画仕様に「岩セル上の水ドット抑制・岩優先表示」を追加（`design.md` §8.2）

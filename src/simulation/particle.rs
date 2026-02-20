@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use super::terrain::{CELL_SIZE_M, TerrainWorld};
+use super::object::ObjectWorld;
+use super::terrain::{CELL_SIZE_M, TerrainWorld, cell_to_world_center};
 
 pub const GRAVITY_MPS2: Vec2 = Vec2::new(0.0, -9.81);
 pub const FIXED_DT: f32 = 1.0 / 60.0;
@@ -16,6 +17,8 @@ pub const XSPH_VISCOSITY: f32 = 0.01;
 pub const H_WATER_OVER_DX: f32 = 2.0;
 pub const WATER_KERNEL_RADIUS_M: f32 = PARTICLE_SPACING_M * H_WATER_OVER_DX;
 pub const WATER_PARTICLE_MASS: f32 = REST_DENSITY * PARTICLE_SPACING_M * PARTICLE_SPACING_M;
+pub const STONE_PARTICLE_MASS: f32 = REST_DENSITY * CELL_SIZE_M * CELL_SIZE_M;
+pub const STONE_PARTICLE_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
 pub const TERRAIN_BOUNDARY_RADIUS_M: f32 = PARTICLE_RADIUS_M + CELL_SIZE_M * 0.5;
 pub const TERRAIN_SDF_PUSH_RADIUS_M: f32 = PARTICLE_RADIUS_M;
 pub const TERRAIN_REPULSION_STIFFNESS: f32 = 0.55;
@@ -32,6 +35,13 @@ pub fn nominal_particle_draw_radius_m() -> f32 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParticleMaterial {
     Water,
+    Stone,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParticleRemovalResult {
+    pub removed_count: usize,
+    pub old_to_new: Vec<Option<usize>>,
 }
 
 #[derive(Debug, Default)]
@@ -123,6 +133,10 @@ impl ParticleWorld {
         &self.mass
     }
 
+    pub fn materials(&self) -> &[ParticleMaterial] {
+        &self.material
+    }
+
     pub fn add_velocity_in_radius(
         &mut self,
         center: Vec2,
@@ -178,35 +192,113 @@ impl ParticleWorld {
         spawn_count
     }
 
-    pub fn remove_particles_in_radius(&mut self, center: Vec2, radius: f32) -> usize {
+    pub fn spawn_stone_particles_from_cells(
+        &mut self,
+        cells: &[IVec2],
+        initial_velocity: Vec2,
+    ) -> Vec<usize> {
+        let mut indices = Vec::with_capacity(cells.len());
+        for &cell in cells {
+            let position = cell_to_world_center(cell);
+            let index = self.pos.len();
+            self.pos.push(position);
+            self.prev_pos.push(position);
+            self.vel.push(initial_velocity);
+            self.mass.push(STONE_PARTICLE_MASS);
+            self.material.push(ParticleMaterial::Stone);
+            indices.push(index);
+        }
+        self.resize_work_buffers();
+        indices
+    }
+
+    pub fn remove_particles_in_radius_with_map(
+        &mut self,
+        center: Vec2,
+        radius: f32,
+    ) -> ParticleRemovalResult {
+        let old_count = self.particle_count();
         let radius2 = radius * radius;
-        let mut removed = 0;
-        for i in (0..self.particle_count()).rev() {
-            if self.pos[i].distance_squared(center) > radius2 {
+        let mut keep = vec![true; old_count];
+        let mut removed_count = 0;
+        for (index, position) in self.pos.iter().enumerate() {
+            if position.distance_squared(center) <= radius2 {
+                keep[index] = false;
+                removed_count += 1;
+            }
+        }
+
+        if removed_count == 0 {
+            return ParticleRemovalResult {
+                removed_count,
+                old_to_new: (0..old_count).map(Some).collect(),
+            };
+        }
+
+        let new_count = old_count - removed_count;
+        let mut old_to_new = vec![None; old_count];
+        let mut next = 0usize;
+        for old_index in 0..old_count {
+            if !keep[old_index] {
                 continue;
             }
-            self.swap_remove_particle(i);
-            removed += 1;
+            old_to_new[old_index] = Some(next);
+            next += 1;
         }
 
+        let mut new_pos = Vec::with_capacity(new_count);
+        let mut new_prev_pos = Vec::with_capacity(new_count);
+        let mut new_vel = Vec::with_capacity(new_count);
+        let mut new_mass = Vec::with_capacity(new_count);
+        let mut new_material = Vec::with_capacity(new_count);
+        for old_index in 0..old_count {
+            if !keep[old_index] {
+                continue;
+            }
+            new_pos.push(self.pos[old_index]);
+            new_prev_pos.push(self.prev_pos[old_index]);
+            new_vel.push(self.vel[old_index]);
+            new_mass.push(self.mass[old_index]);
+            new_material.push(self.material[old_index]);
+        }
+
+        self.pos = new_pos;
+        self.prev_pos = new_prev_pos;
+        self.vel = new_vel;
+        self.mass = new_mass;
+        self.material = new_material;
         self.resize_work_buffers();
-        removed
-    }
 
-    pub fn step_if_running(&mut self, terrain: &TerrainWorld, running: bool) {
-        if running {
-            self.step_substeps(terrain);
+        ParticleRemovalResult {
+            removed_count,
+            old_to_new,
         }
     }
 
-    pub fn step_substeps(&mut self, terrain: &TerrainWorld) {
+    pub fn step_if_running(
+        &mut self,
+        terrain: &TerrainWorld,
+        object_world: &mut ObjectWorld,
+        running: bool,
+    ) {
+        if running {
+            self.step_substeps(terrain, object_world);
+        }
+    }
+
+    pub fn step_substeps(&mut self, terrain: &TerrainWorld, object_world: &mut ObjectWorld) {
         let dt_sub = FIXED_DT / SUBSTEPS as f32;
         for _ in 0..SUBSTEPS {
-            self.step_single_substep(terrain, dt_sub);
+            self.step_single_substep(terrain, object_world, dt_sub);
         }
     }
 
-    fn step_single_substep(&mut self, terrain: &TerrainWorld, dt_sub: f32) {
+    fn step_single_substep(
+        &mut self,
+        terrain: &TerrainWorld,
+        object_world: &mut ObjectWorld,
+        dt_sub: f32,
+    ) {
         for i in 0..self.particle_count() {
             self.prev_pos[i] = self.pos[i];
             self.vel[i] += GRAVITY_MPS2 * dt_sub;
@@ -217,6 +309,7 @@ impl ParticleWorld {
         for _ in 0..SOLVER_ITERS {
             self.solve_density_constraints(terrain);
         }
+        self.solve_shape_matching_constraints(object_world);
 
         for i in 0..self.particle_count() {
             self.vel[i] = (self.pos[i] - self.prev_pos[i]) / dt_sub;
@@ -234,6 +327,11 @@ impl ParticleWorld {
         let h_ww = WATER_KERNEL_RADIUS_M;
 
         for i in 0..self.particle_count() {
+            if !is_water_particle(self.material[i]) {
+                self.density[i] = REST_DENSITY;
+                self.lambda[i] = 0.0;
+                continue;
+            }
             self.neighbor_grid.gather(self.pos[i], &mut neighbors);
 
             let mut rho = 0.0;
@@ -241,6 +339,9 @@ impl ParticleWorld {
             let mut grad_sum_sq = 0.0;
 
             for &j in &neighbors {
+                if !is_water_particle(self.material[j]) {
+                    continue;
+                }
                 let r = self.pos[i] - self.pos[j];
                 let r2 = r.length_squared();
                 if r2 >= h_ww * h_ww {
@@ -266,30 +367,46 @@ impl ParticleWorld {
         }
 
         for i in 0..self.particle_count() {
-            self.neighbor_grid.gather(self.pos[i], &mut neighbors);
+            let is_water = is_water_particle(self.material[i]);
+            if is_water {
+                self.neighbor_grid.gather(self.pos[i], &mut neighbors);
+            } else {
+                neighbors.clear();
+            }
 
             let mut delta = Vec2::ZERO;
             let mut boundary_push = Vec2::ZERO;
-            for &j in &neighbors {
-                if i == j {
-                    continue;
+            if is_water {
+                for &j in &neighbors {
+                    if i == j || !is_water_particle(self.material[j]) {
+                        continue;
+                    }
+                    let r = self.pos[i] - self.pos[j];
+                    if r.length_squared() >= h_ww * h_ww {
+                        continue;
+                    }
+                    delta += (self.lambda[i] + self.lambda[j]) * kernel_spiky_grad(r, h_ww);
                 }
-                let r = self.pos[i] - self.pos[j];
-                if r.length_squared() >= h_ww * h_ww {
-                    continue;
-                }
-                delta += (self.lambda[i] + self.lambda[j]) * kernel_spiky_grad(r, h_ww);
             }
 
             if let Some((signed_distance, normal)) =
                 terrain.sample_signed_distance_and_normal(self.pos[i])
             {
-                let penetration = TERRAIN_SDF_PUSH_RADIUS_M - signed_distance;
+                let push_radius = if is_water {
+                    TERRAIN_SDF_PUSH_RADIUS_M
+                } else {
+                    STONE_PARTICLE_RADIUS_M
+                };
+                let penetration = push_radius - signed_distance;
                 if penetration > 0.0 {
                     boundary_push += normal * penetration * TERRAIN_REPULSION_STIFFNESS;
                 }
             }
-            self.delta_pos[i] = delta / REST_DENSITY + boundary_push;
+            self.delta_pos[i] = if is_water {
+                delta / REST_DENSITY + boundary_push
+            } else {
+                boundary_push
+            };
         }
 
         for i in 0..self.particle_count() {
@@ -302,11 +419,15 @@ impl ParticleWorld {
         self.viscosity_work.clone_from(&self.vel);
 
         for i in 0..self.particle_count() {
+            if !is_water_particle(self.material[i]) {
+                self.viscosity_work[i] = self.vel[i];
+                continue;
+            }
             self.neighbor_grid.gather(self.pos[i], &mut neighbors);
 
             let mut correction = Vec2::ZERO;
             for &j in &neighbors {
-                if i == j {
+                if i == j || !is_water_particle(self.material[j]) {
                     continue;
                 }
                 let r = self.pos[i] - self.pos[j];
@@ -319,24 +440,74 @@ impl ParticleWorld {
         self.vel.clone_from(&self.viscosity_work);
     }
 
+    fn solve_shape_matching_constraints(&mut self, object_world: &mut ObjectWorld) {
+        for object in object_world.objects_mut() {
+            if object.particle_indices.is_empty() || object.rest_local.is_empty() {
+                continue;
+            }
+            let alpha = object.shape_stiffness_alpha.clamp(0.0, 1.0);
+            if alpha <= 0.0 {
+                continue;
+            }
+
+            let shape_iters = object.shape_iters.max(1);
+            for _ in 0..shape_iters {
+                let mut mass_sum = 0.0;
+                let mut com = Vec2::ZERO;
+                for &index in &object.particle_indices {
+                    if index >= self.particle_count() {
+                        continue;
+                    }
+                    let mass = self.mass[index];
+                    mass_sum += mass;
+                    com += self.pos[index] * mass;
+                }
+                if mass_sum <= 1e-6 {
+                    continue;
+                }
+                com /= mass_sum;
+                object.mass_sum = mass_sum;
+
+                let mut a00 = 0.0;
+                let mut a01 = 0.0;
+                let mut a10 = 0.0;
+                let mut a11 = 0.0;
+                for (slot, &index) in object.particle_indices.iter().enumerate() {
+                    if index >= self.particle_count() || slot >= object.rest_local.len() {
+                        continue;
+                    }
+                    let mass = self.mass[index];
+                    let p = self.pos[index] - com;
+                    let q = object.rest_local[slot];
+                    a00 += mass * p.x * q.x;
+                    a01 += mass * p.x * q.y;
+                    a10 += mass * p.y * q.x;
+                    a11 += mass * p.y * q.y;
+                }
+
+                let theta = (a10 - a01).atan2(a00 + a11);
+                let cos_t = theta.cos();
+                let sin_t = theta.sin();
+                for (slot, &index) in object.particle_indices.iter().enumerate() {
+                    if index >= self.particle_count() || slot >= object.rest_local.len() {
+                        continue;
+                    }
+                    let q = object.rest_local[slot];
+                    let rotated = Vec2::new(cos_t * q.x - sin_t * q.y, sin_t * q.x + cos_t * q.y);
+                    let goal = com + rotated;
+                    let current = self.pos[index];
+                    self.pos[index] = current + (goal - current) * alpha;
+                }
+            }
+        }
+    }
+
     fn push_water_particle(&mut self, position: Vec2, velocity: Vec2) {
         self.pos.push(position);
         self.prev_pos.push(position);
         self.vel.push(velocity);
         self.mass.push(default_particle_mass());
         self.material.push(ParticleMaterial::Water);
-    }
-
-    fn swap_remove_particle(&mut self, index: usize) {
-        self.pos.swap_remove(index);
-        self.prev_pos.swap_remove(index);
-        self.vel.swap_remove(index);
-        self.mass.swap_remove(index);
-        self.material.swap_remove(index);
-        self.density.swap_remove(index);
-        self.lambda.swap_remove(index);
-        self.delta_pos.swap_remove(index);
-        self.viscosity_work.swap_remove(index);
     }
 
     fn resize_work_buffers(&mut self) {
@@ -396,9 +567,14 @@ fn kernel_spiky_grad(r: Vec2, support_radius: f32) -> Vec2 {
     r * (coeff * (support_radius - len).powi(2) / len)
 }
 
+fn is_water_particle(material: ParticleMaterial) -> bool {
+    matches!(material, ParticleMaterial::Water)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::simulation::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA};
     use crate::simulation::terrain::{CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MIN_CHUNK_X};
 
     #[test]
@@ -407,11 +583,12 @@ mod tests {
         terrain.reset_fixed_world();
         terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let mut particles = ParticleWorld::default();
+        let mut object_world = ObjectWorld::default();
         let before_avg_y = particles.positions().iter().map(|p| p.y).sum::<f32>()
             / particles.positions().len() as f32;
 
         for _ in 0..10 {
-            particles.step_if_running(&terrain, true);
+            particles.step_if_running(&terrain, &mut object_world, true);
         }
         let after_avg_y = particles.positions().iter().map(|p| p.y).sum::<f32>()
             / particles.positions().len() as f32;
@@ -441,10 +618,11 @@ mod tests {
         without_terrain.mass = with_terrain.mass.clone();
         without_terrain.material = with_terrain.material.clone();
         without_terrain.resize_work_buffers();
+        let mut object_world = ObjectWorld::default();
 
         for _ in 0..12 {
-            with_terrain.step_if_running(&terrain_static, true);
-            without_terrain.step_if_running(&terrain_empty, true);
+            with_terrain.step_if_running(&terrain_static, &mut object_world, true);
+            without_terrain.step_if_running(&terrain_empty, &mut object_world, true);
         }
 
         let y_with = with_terrain.pos[0].y;
@@ -467,9 +645,10 @@ mod tests {
         particles.mass = vec![default_particle_mass()];
         particles.material = vec![ParticleMaterial::Water];
         particles.resize_work_buffers();
+        let mut object_world = ObjectWorld::default();
 
         for _ in 0..12 {
-            particles.step_if_running(&terrain, true);
+            particles.step_if_running(&terrain, &mut object_world, true);
         }
 
         let p = particles.pos[0];
@@ -486,9 +665,10 @@ mod tests {
         terrain.reset_fixed_world();
         terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let mut particles = ParticleWorld::default();
+        let mut object_world = ObjectWorld::default();
         let before = particles.pos.clone();
 
-        particles.step_if_running(&terrain, false);
+        particles.step_if_running(&terrain, &mut object_world, false);
 
         assert_eq!(before, particles.pos);
     }
@@ -499,10 +679,11 @@ mod tests {
         terrain.reset_fixed_world();
         terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let mut particles = ParticleWorld::default();
+        let mut object_world = ObjectWorld::default();
         let initial_pos = particles.pos.clone();
         let initial_vel = particles.vel.clone();
 
-        particles.step_if_running(&terrain, true);
+        particles.step_if_running(&terrain, &mut object_world, true);
         particles.reset_to_initial();
 
         assert_eq!(particles.pos, initial_pos);
@@ -524,9 +705,10 @@ mod tests {
         }
         particles.prev_pos.clone_from(&particles.pos);
         particles.vel.fill(Vec2::ZERO);
+        let mut object_world = ObjectWorld::default();
 
         for _ in 0..30 {
-            particles.step_if_running(&terrain, true);
+            particles.step_if_running(&terrain, &mut object_world, true);
         }
 
         for pos in &particles.pos {
@@ -536,5 +718,44 @@ mod tests {
             assert!(vel.is_finite());
             assert!(vel.length() <= PARTICLE_SPEED_LIMIT_MPS + 1e-4);
         }
+    }
+
+    #[test]
+    fn shape_matching_keeps_stone_object_cohesive() {
+        let terrain = TerrainWorld::default();
+        let mut particles = ParticleWorld::default();
+        particles.pos.clear();
+        particles.prev_pos.clear();
+        particles.vel.clear();
+        particles.mass.clear();
+        particles.material.clear();
+        particles.density.clear();
+        particles.lambda.clear();
+        particles.delta_pos.clear();
+        particles.viscosity_work.clear();
+        particles.resize_work_buffers();
+
+        let cells = [IVec2::new(0, 6), IVec2::new(1, 6), IVec2::new(2, 6)];
+        let indices = particles.spawn_stone_particles_from_cells(&cells, Vec2::ZERO);
+        let initial_span = particles.pos[indices[2]].x - particles.pos[indices[0]].x;
+
+        let mut objects = ObjectWorld::default();
+        let _ = objects.create_object(
+            indices,
+            particles.positions(),
+            particles.masses(),
+            OBJECT_SHAPE_STIFFNESS_ALPHA,
+            OBJECT_SHAPE_ITERS,
+        );
+
+        for _ in 0..30 {
+            particles.step_if_running(&terrain, &mut objects, true);
+        }
+
+        let span = particles.pos[2].x - particles.pos[0].x;
+        assert!(
+            (span - initial_span).abs() < 0.05,
+            "shape matching drifted too much: initial={initial_span}, current={span}"
+        );
     }
 }
