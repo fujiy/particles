@@ -1,3 +1,4 @@
+pub mod connectivity;
 pub mod material;
 pub mod object;
 pub mod particle;

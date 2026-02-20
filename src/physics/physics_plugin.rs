@@ -94,7 +94,8 @@ fn step_water_particles(
         }
         {
             let _span = tracing::info_span!("physics::terrain_fracture_commit").entered();
-            if particle_world.apply_pending_terrain_fractures(&mut terrain_world) {
+            if particle_world.apply_pending_terrain_fractures(&mut terrain_world, &mut object_world)
+            {
                 terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
             }
         }
