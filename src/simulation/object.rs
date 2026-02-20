@@ -2,7 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
-use super::terrain::CELL_SIZE_M;
+use super::particle::PARTICLE_RADIUS_M;
+use super::terrain::{
+    CELL_SIZE_M, CHUNK_WORLD_SIZE_M, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
+    WORLD_MIN_CHUNK_Y,
+};
 
 pub type ObjectId = u32;
 
@@ -12,7 +16,9 @@ pub const OBJECT_LOCAL_SDF_SAMPLES_PER_CELL: i32 = 2;
 pub const OBJECT_PHYSICS_SDF_CELL_SIZE_M: f32 = CELL_SIZE_M * 0.5;
 pub const OBJECT_BROADPHASE_CELL_SIZE_M: f32 = CELL_SIZE_M * 4.0;
 pub const OBJECT_SDF_MAX_DISTANCE_M: f32 = CELL_SIZE_M * 2.5;
-pub const OBJECT_BOUNDARY_PUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.35;
+pub const OBJECT_SDF_MAX_SPLATS_PER_CELL: usize = 4;
+pub const OBJECT_SDF_MAX_CONTACTS_PER_QUERY: usize = 4;
+pub const OBJECT_BOUNDARY_PUSH_RADIUS_M: f32 = PARTICLE_RADIUS_M;
 pub const OBJECT_REPULSION_STIFFNESS: f32 = 0.70;
 
 const SDF_INF: f32 = 1.0e9;
@@ -135,6 +141,7 @@ pub struct ObjectData {
     pub shape_stiffness_alpha: f32,
     pub shape_iters: usize,
     pub shape_dirty: bool,
+    pub physics_dirty: bool,
     pub local_sdf: ObjectLocalSdf,
     pub pose_center: Vec2,
     pub pose_theta: f32,
@@ -149,60 +156,110 @@ pub struct ObjectData {
 pub struct ObjectPhysicsSdfSample {
     pub distance_m: f32,
     pub normal_world: Vec2,
-    pub object_id: ObjectId,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ObjectSampleCell {
+    count: u8,
+    ids: [ObjectId; OBJECT_SDF_MAX_SPLATS_PER_CELL],
+}
+
+impl Default for ObjectSampleCell {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            ids: [0; OBJECT_SDF_MAX_SPLATS_PER_CELL],
+        }
+    }
 }
 
 #[derive(Resource, Debug)]
 pub struct ObjectPhysicsField {
     sample_cell_size_m: f32,
+    sample_grid_min: IVec2,
+    sample_grid_size: UVec2,
+    sample_cells: Vec<ObjectSampleCell>,
+    sample_visit_marks: Vec<bool>,
+    sample_visit_list: Vec<usize>,
     broadphase_cell_size_m: f32,
+    broadphase_grid_min: IVec2,
+    broadphase_grid_size: UVec2,
+    broadphase_cells: Vec<Vec<ObjectId>>,
     max_distance_m: f32,
-    samples: HashMap<IVec2, ObjectPhysicsSdfSample>,
-    broadphase_buckets: HashMap<IVec2, Vec<ObjectId>>,
 }
 
 impl Default for ObjectPhysicsField {
     fn default() -> Self {
+        let sample_cell_size_m = OBJECT_PHYSICS_SDF_CELL_SIZE_M;
+        let broadphase_cell_size_m = OBJECT_BROADPHASE_CELL_SIZE_M;
+        let max_distance_m = OBJECT_SDF_MAX_DISTANCE_M;
+        let sample_padding = max_distance_m + sample_cell_size_m * 2.0;
+        let broadphase_padding = max_distance_m + broadphase_cell_size_m * 2.0;
+        let (sample_grid_min, sample_grid_size) =
+            build_grid_layout(sample_cell_size_m, sample_padding);
+        let (broadphase_grid_min, broadphase_grid_size) =
+            build_grid_layout(broadphase_cell_size_m, broadphase_padding);
+        let sample_len = grid_len(sample_grid_size);
+        let broadphase_len = grid_len(broadphase_grid_size);
+
         Self {
-            sample_cell_size_m: OBJECT_PHYSICS_SDF_CELL_SIZE_M,
-            broadphase_cell_size_m: OBJECT_BROADPHASE_CELL_SIZE_M,
-            max_distance_m: OBJECT_SDF_MAX_DISTANCE_M,
-            samples: HashMap::new(),
-            broadphase_buckets: HashMap::new(),
+            sample_cell_size_m,
+            sample_grid_min,
+            sample_grid_size,
+            sample_cells: vec![ObjectSampleCell::default(); sample_len],
+            sample_visit_marks: vec![false; sample_len],
+            sample_visit_list: Vec::new(),
+            broadphase_cell_size_m,
+            broadphase_grid_min,
+            broadphase_grid_size,
+            broadphase_cells: vec![Vec::new(); broadphase_len],
+            max_distance_m,
         }
     }
 }
 
 impl ObjectPhysicsField {
     pub fn clear(&mut self) {
-        self.samples.clear();
-        self.broadphase_buckets.clear();
+        for sample_cell in &mut self.sample_cells {
+            sample_cell.count = 0;
+        }
+        self.sample_visit_marks.fill(false);
+        self.sample_visit_list.clear();
+        for bucket in &mut self.broadphase_cells {
+            bucket.clear();
+        }
     }
 
-    pub fn sample_signed_distance_and_normal(
-        &self,
-        world_pos: Vec2,
-    ) -> Option<(f32, Vec2, ObjectId)> {
+    pub fn gather_candidate_object_ids(&self, world_pos: Vec2, out: &mut Vec<ObjectId>) {
+        out.clear();
         let center = sample_grid_cell(world_pos, self.sample_cell_size_m);
-        let mut best: Option<ObjectPhysicsSdfSample> = None;
         for y in (center.y - 1)..=(center.y + 1) {
             for x in (center.x - 1)..=(center.x + 1) {
-                let Some(sample) = self.samples.get(&IVec2::new(x, y)) else {
+                let cell = IVec2::new(x, y);
+                let Some(index) =
+                    grid_cell_index(cell, self.sample_grid_min, self.sample_grid_size)
+                else {
                     continue;
                 };
-                if best
-                    .map(|current| sample.distance_m < current.distance_m)
-                    .unwrap_or(true)
-                {
-                    best = Some(*sample);
+                let sample_cell = &self.sample_cells[index];
+                for slot in 0..sample_cell.count as usize {
+                    let object_id = sample_cell.ids[slot];
+                    if out.contains(&object_id) {
+                        continue;
+                    }
+                    out.push(object_id);
+                    if out.len() >= OBJECT_SDF_MAX_CONTACTS_PER_QUERY {
+                        return;
+                    }
                 }
             }
         }
-        best.map(|sample| (sample.distance_m, sample.normal_world, sample.object_id))
     }
 
     fn rebuild_broadphase(&mut self, objects: &[ObjectData]) {
-        self.broadphase_buckets.clear();
+        for bucket in &mut self.broadphase_cells {
+            bucket.clear();
+        }
         for object in objects {
             if !object.pose_initialized {
                 continue;
@@ -210,12 +267,23 @@ impl ObjectPhysicsField {
             let expanded = object.aabb_world.expanded(self.max_distance_m);
             let min_cell = broadphase_grid_cell(expanded.min, self.broadphase_cell_size_m);
             let max_cell = broadphase_grid_cell(expanded.max, self.broadphase_cell_size_m);
+            let Some((min_cell, max_cell)) = clamp_grid_range(
+                min_cell,
+                max_cell,
+                self.broadphase_grid_min,
+                self.broadphase_grid_size,
+            ) else {
+                continue;
+            };
             for y in min_cell.y..=max_cell.y {
                 for x in min_cell.x..=max_cell.x {
-                    self.broadphase_buckets
-                        .entry(IVec2::new(x, y))
-                        .or_default()
-                        .push(object.id);
+                    let cell = IVec2::new(x, y);
+                    let Some(index) =
+                        grid_cell_index(cell, self.broadphase_grid_min, self.broadphase_grid_size)
+                    else {
+                        continue;
+                    };
+                    self.broadphase_cells[index].push(object.id);
                 }
             }
         }
@@ -228,7 +296,7 @@ impl ObjectPhysicsField {
 
         let object_by_id: HashMap<ObjectId, &ObjectData> =
             objects.iter().map(|object| (object.id, object)).collect();
-        let mut affected_sample_cells = HashSet::new();
+        self.sample_visit_list.clear();
         for &object_id in dirty_ids {
             let Some(object) = object_by_id.get(&object_id) else {
                 continue;
@@ -239,19 +307,41 @@ impl ObjectPhysicsField {
                 .expanded(self.max_distance_m + self.sample_cell_size_m);
             let min_cell = sample_grid_cell(union.min, self.sample_cell_size_m);
             let max_cell = sample_grid_cell(union.max, self.sample_cell_size_m);
+            let Some((min_cell, max_cell)) = clamp_grid_range(
+                min_cell,
+                max_cell,
+                self.sample_grid_min,
+                self.sample_grid_size,
+            ) else {
+                continue;
+            };
             for y in min_cell.y..=max_cell.y {
                 for x in min_cell.x..=max_cell.x {
-                    affected_sample_cells.insert(IVec2::new(x, y));
+                    let cell = IVec2::new(x, y);
+                    let Some(index) =
+                        grid_cell_index(cell, self.sample_grid_min, self.sample_grid_size)
+                    else {
+                        continue;
+                    };
+                    if self.sample_visit_marks[index] {
+                        continue;
+                    }
+                    self.sample_visit_marks[index] = true;
+                    self.sample_visit_list.push(index);
                 }
             }
         }
 
-        for cell in affected_sample_cells {
+        let mut candidates = Vec::new();
+        let mut ordered_candidates = Vec::new();
+        for &sample_index in &self.sample_visit_list {
+            let cell =
+                grid_index_to_cell(sample_index, self.sample_grid_min, self.sample_grid_size);
             let world_pos = sample_cell_center(cell, self.sample_cell_size_m);
-            let candidates = self.collect_broadphase_candidates(world_pos);
+            self.collect_broadphase_candidates(world_pos, &mut candidates);
 
-            let mut best: Option<ObjectPhysicsSdfSample> = None;
-            for object_id in candidates {
+            ordered_candidates.clear();
+            for &object_id in &candidates {
                 let Some(object) = object_by_id.get(&object_id) else {
                     continue;
                 };
@@ -264,57 +354,60 @@ impl ObjectPhysicsField {
                 }
 
                 let local = world_to_local(world_pos, object.pose_center, object.pose_theta);
-                let Some((distance_m, normal_local)) =
-                    object.local_sdf.sample_distance_and_normal(local)
+                let Some(distance_m) = object.local_sdf.sample_distance(local) else {
+                    continue;
+                };
+                if distance_m <= self.max_distance_m {
+                    ordered_candidates.push((object.rest_local.len(), object_id));
+                }
+            }
+            ordered_candidates.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            ordered_candidates.truncate(OBJECT_SDF_MAX_SPLATS_PER_CELL);
+
+            let sample_cell = &mut self.sample_cells[sample_index];
+            sample_cell.count = 0;
+            for (slot, (_, object_id)) in ordered_candidates.iter().copied().enumerate() {
+                sample_cell.ids[slot] = object_id;
+                sample_cell.count += 1;
+            }
+        }
+
+        for &sample_index in &self.sample_visit_list {
+            self.sample_visit_marks[sample_index] = false;
+        }
+        self.sample_visit_list.clear();
+    }
+
+    fn collect_broadphase_candidates(&self, world_pos: Vec2, out: &mut Vec<ObjectId>) {
+        out.clear();
+        let center = broadphase_grid_cell(world_pos, self.broadphase_cell_size_m);
+        for y in (center.y - 1)..=(center.y + 1) {
+            for x in (center.x - 1)..=(center.x + 1) {
+                let cell = IVec2::new(x, y);
+                let Some(index) =
+                    grid_cell_index(cell, self.broadphase_grid_min, self.broadphase_grid_size)
                 else {
                     continue;
                 };
-                let normal_world = rotate_local_to_world(normal_local, object.pose_theta);
-                let candidate = ObjectPhysicsSdfSample {
-                    distance_m,
-                    normal_world: normal_world.normalize_or_zero(),
-                    object_id,
-                };
-                if best
-                    .map(|current| candidate.distance_m < current.distance_m)
-                    .unwrap_or(true)
-                {
-                    best = Some(candidate);
+                for &object_id in &self.broadphase_cells[index] {
+                    if out.contains(&object_id) {
+                        continue;
+                    }
+                    out.push(object_id);
                 }
             }
-
-            if let Some(best_sample) = best {
-                if best_sample.distance_m <= self.max_distance_m {
-                    self.samples.insert(cell, best_sample);
-                } else {
-                    self.samples.remove(&cell);
-                }
-            } else {
-                self.samples.remove(&cell);
-            }
         }
-    }
-
-    fn collect_broadphase_candidates(&self, world_pos: Vec2) -> Vec<ObjectId> {
-        let center = broadphase_grid_cell(world_pos, self.broadphase_cell_size_m);
-        let mut ids = HashSet::new();
-        for y in (center.y - 1)..=(center.y + 1) {
-            for x in (center.x - 1)..=(center.x + 1) {
-                let Some(bucket) = self.broadphase_buckets.get(&IVec2::new(x, y)) else {
-                    continue;
-                };
-                ids.extend(bucket.iter().copied());
-            }
-        }
-        ids.into_iter().collect()
     }
 
     fn tracked_object_ids(&self) -> HashSet<ObjectId> {
         let mut ids = HashSet::new();
-        for sample in self.samples.values() {
-            ids.insert(sample.object_id);
+        for sample_cell in &self.sample_cells {
+            for slot in 0..sample_cell.count as usize {
+                let object_id = sample_cell.ids[slot];
+                ids.insert(object_id);
+            }
         }
-        for bucket in self.broadphase_buckets.values() {
+        for bucket in &self.broadphase_cells {
             ids.extend(bucket.iter().copied());
         }
         ids
@@ -325,13 +418,17 @@ impl ObjectPhysicsField {
 pub struct ObjectWorld {
     next_id: ObjectId,
     objects: Vec<ObjectData>,
+    object_index_by_id: HashMap<ObjectId, usize>,
     reaction_impulses: HashMap<ObjectId, Vec2>,
+    particle_owner: Vec<Option<ObjectId>>,
 }
 
 impl ObjectWorld {
     pub fn clear(&mut self) {
         self.objects.clear();
+        self.object_index_by_id.clear();
         self.reaction_impulses.clear();
+        self.particle_owner.clear();
         self.next_id = 0;
     }
 
@@ -360,6 +457,30 @@ impl ObjectWorld {
             .get(&object_id)
             .copied()
             .unwrap_or(Vec2::ZERO)
+    }
+
+    pub fn object_of_particle(&self, particle_index: usize) -> Option<ObjectId> {
+        self.particle_owner.get(particle_index).copied().flatten()
+    }
+
+    pub fn evaluate_object_sdf(
+        &self,
+        object_id: ObjectId,
+        world_pos: Vec2,
+    ) -> Option<ObjectPhysicsSdfSample> {
+        let &object_index = self.object_index_by_id.get(&object_id)?;
+        let object = self.objects.get(object_index)?;
+        if !object.pose_initialized {
+            return None;
+        }
+        let local = world_to_local(world_pos, object.pose_center, object.pose_theta);
+        let (distance_m, normal_local) = object.local_sdf.sample_distance_and_normal(local)?;
+        let normal_world =
+            rotate_local_to_world(normal_local, object.pose_theta).normalize_or_zero();
+        Some(ObjectPhysicsSdfSample {
+            distance_m,
+            normal_world,
+        })
     }
 
     pub fn create_object(
@@ -403,6 +524,7 @@ impl ObjectWorld {
             shape_stiffness_alpha: shape_stiffness_alpha.clamp(0.0, 1.0),
             shape_iters: shape_iters.max(1),
             shape_dirty: true,
+            physics_dirty: true,
             local_sdf,
             pose_center: Vec2::ZERO,
             pose_theta: 0.0,
@@ -412,6 +534,7 @@ impl ObjectWorld {
             prev_aabb_world: Aabb2::default(),
             pose_initialized: false,
         });
+        self.rebuild_object_index_map();
         Some(id)
     }
 
@@ -450,8 +573,10 @@ impl ObjectWorld {
                 .sum::<f32>()
                 .max(1e-6);
             object.shape_dirty = true;
+            object.physics_dirty = true;
             true
         });
+        self.rebuild_object_index_map();
     }
 
     pub fn update_physics_field(
@@ -461,6 +586,8 @@ impl ObjectWorld {
         field: &mut ObjectPhysicsField,
     ) {
         self.clear_reaction_impulses();
+        self.rebuild_object_index_map();
+        self.rebuild_particle_owner_map(particle_pos.len());
         let mut dirty_ids = HashSet::new();
         let previous_ids = field.tracked_object_ids();
         for object in &mut self.objects {
@@ -491,7 +618,7 @@ impl ObjectWorld {
             object.aabb_world = aabb;
             let moved = object.pose_center.distance(object.prev_pose_center) > 1e-4
                 || shortest_angle_delta(object.pose_theta, object.prev_pose_theta).abs() > 1e-4;
-            if moved || object.shape_dirty {
+            if moved || object.physics_dirty {
                 dirty_ids.insert(object.id);
             }
         }
@@ -507,8 +634,27 @@ impl ObjectWorld {
         field.reproject_dirty_objects(&self.objects, &dirty_ids);
         for object in &mut self.objects {
             if dirty_ids.contains(&object.id) {
-                object.shape_dirty = false;
+                object.physics_dirty = false;
             }
+        }
+    }
+
+    fn rebuild_particle_owner_map(&mut self, particle_count: usize) {
+        self.particle_owner.clear();
+        self.particle_owner.resize(particle_count, None);
+        for object in &self.objects {
+            for &particle_index in &object.particle_indices {
+                if particle_index < particle_count {
+                    self.particle_owner[particle_index] = Some(object.id);
+                }
+            }
+        }
+    }
+
+    fn rebuild_object_index_map(&mut self) {
+        self.object_index_by_id.clear();
+        for (index, object) in self.objects.iter().enumerate() {
+            self.object_index_by_id.insert(object.id, index);
         }
     }
 }
@@ -710,6 +856,71 @@ fn recenter_rest_local(rest_local: &mut [Vec2], particle_indices: &[usize], part
     }
 }
 
+fn world_bounds_min() -> Vec2 {
+    Vec2::new(
+        WORLD_MIN_CHUNK_X as f32 * CHUNK_WORLD_SIZE_M,
+        WORLD_MIN_CHUNK_Y as f32 * CHUNK_WORLD_SIZE_M,
+    )
+}
+
+fn world_bounds_max() -> Vec2 {
+    Vec2::new(
+        (WORLD_MAX_CHUNK_X + 1) as f32 * CHUNK_WORLD_SIZE_M,
+        (WORLD_MAX_CHUNK_Y + 1) as f32 * CHUNK_WORLD_SIZE_M,
+    )
+}
+
+fn build_grid_layout(cell_size: f32, padding: f32) -> (IVec2, UVec2) {
+    let min_world = world_bounds_min() - Vec2::splat(padding);
+    let max_world = world_bounds_max() + Vec2::splat(padding);
+    let min_cell = sample_grid_cell(min_world, cell_size);
+    let max_cell = sample_grid_cell(max_world, cell_size);
+    let width = (max_cell.x - min_cell.x + 1).max(1) as u32;
+    let height = (max_cell.y - min_cell.y + 1).max(1) as u32;
+    (min_cell, UVec2::new(width, height))
+}
+
+fn grid_len(size: UVec2) -> usize {
+    size.x as usize * size.y as usize
+}
+
+fn grid_max_cell(min_cell: IVec2, size: UVec2) -> IVec2 {
+    min_cell + IVec2::new(size.x as i32 - 1, size.y as i32 - 1)
+}
+
+fn clamp_grid_range(
+    min_cell: IVec2,
+    max_cell: IVec2,
+    grid_min: IVec2,
+    grid_size: UVec2,
+) -> Option<(IVec2, IVec2)> {
+    let grid_max = grid_max_cell(grid_min, grid_size);
+    let clamped_min = IVec2::new(min_cell.x.max(grid_min.x), min_cell.y.max(grid_min.y));
+    let clamped_max = IVec2::new(max_cell.x.min(grid_max.x), max_cell.y.min(grid_max.y));
+    if clamped_min.x > clamped_max.x || clamped_min.y > clamped_max.y {
+        return None;
+    }
+    Some((clamped_min, clamped_max))
+}
+
+fn grid_cell_index(cell: IVec2, grid_min: IVec2, grid_size: UVec2) -> Option<usize> {
+    let local = cell - grid_min;
+    if local.x < 0 || local.y < 0 {
+        return None;
+    }
+    if local.x >= grid_size.x as i32 || local.y >= grid_size.y as i32 {
+        return None;
+    }
+    Some(local.y as usize * grid_size.x as usize + local.x as usize)
+}
+
+fn grid_index_to_cell(index: usize, grid_min: IVec2, grid_size: UVec2) -> IVec2 {
+    let width = grid_size.x as usize;
+    let x = index % width;
+    let y = index / width;
+    grid_min + IVec2::new(x as i32, y as i32)
+}
+
 fn sample_grid_cell(world_pos: Vec2, cell_size: f32) -> IVec2 {
     IVec2::new(
         (world_pos.x / cell_size).floor() as i32,
@@ -808,12 +1019,49 @@ mod tests {
         let mut field = ObjectPhysicsField::default();
         objects.update_physics_field(&positions, &masses, &mut field);
 
-        let Some((distance, _normal, sampled_id)) =
-            field.sample_signed_distance_and_normal(Vec2::ZERO)
-        else {
-            panic!("no sample returned for object center");
-        };
-        assert_eq!(sampled_id, object_id);
-        assert!(distance < 0.0);
+        let mut candidates = Vec::new();
+        field.gather_candidate_object_ids(Vec2::ZERO, &mut candidates);
+        assert!(
+            !candidates.is_empty(),
+            "no candidate returned for object center"
+        );
+        let nearest = candidates
+            .iter()
+            .filter_map(|&id| objects.evaluate_object_sdf(id, Vec2::ZERO))
+            .min_by(|a, b| {
+                a.distance_m
+                    .partial_cmp(&b.distance_m)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .unwrap_or(ObjectPhysicsSdfSample {
+                distance_m: f32::INFINITY,
+                normal_world: Vec2::ZERO,
+            });
+        assert!(candidates.contains(&object_id));
+        assert!(nearest.distance_m < 0.0);
+    }
+
+    #[test]
+    fn physics_field_keeps_multiple_object_splats_per_cell() {
+        let mut objects = ObjectWorld::default();
+        let positions = vec![Vec2::new(-0.2, 0.0), Vec2::new(0.2, 0.0)];
+        let masses = vec![1.0, 1.0];
+        objects
+            .create_object(vec![0], &positions, &masses, 0.9, 2)
+            .unwrap_or(0);
+        objects
+            .create_object(vec![1], &positions, &masses, 0.9, 2)
+            .unwrap_or(1);
+
+        let mut field = ObjectPhysicsField::default();
+        objects.update_physics_field(&positions, &masses, &mut field);
+
+        let mut candidates = Vec::new();
+        field.gather_candidate_object_ids(Vec2::ZERO, &mut candidates);
+        let unique_ids: HashSet<ObjectId> = candidates.iter().copied().collect();
+        assert!(
+            unique_ids.len() >= 2,
+            "expected at least two object splats near query point"
+        );
     }
 }

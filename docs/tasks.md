@@ -5,6 +5,7 @@
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] `ObjectPhysicsField` を `HashMap<IVec2, ...>` から固定世界サイズの配列ベース実装へ置き換え（セル->候補ObjectIdの固定長格納）
 - [x] 物体ごとのローカルSDF（距離場）を生成・保持するデータ構造を追加（`ObjectLocalSdf`）
 - [x] 動いた物体のみ、物理用SDFグリッド（疎セル）へ再投影するdirty更新を実装（削除時は再初期化）
 - [x] Broadphaseを実装: 物体AABBを空間グリッドに登録し、再投影範囲を局所化
@@ -95,4 +96,5 @@
 - [x] 描画時に岩セル上の水ドット生成/描画を抑制し、重なり時は岩ドットを優先表示
 
 ## Design Feedback (from Impl sessions)
-- (No open feedback items)
+- `ObjectPhysicsField` を疎 `HashMap` から固定世界サイズの配列グリッドへ変更したため、`design.md` の物理SDF管理方針（データ構造/更新方式）を更新したい（キャッシュ局所性重視の実装へ移行）。
+- 衝突判定は「physics gridに距離/法線を保持」から「physics gridは候補 `ObjectId` のみ保持し、最終的な `distance/normal` は各オブジェクトのローカルSDFを粒子位置で直接評価」へ変更したため、仕様記述の整合化が必要。

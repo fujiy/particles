@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use bevy::prelude::*;
 
 use super::object::{
-    OBJECT_BOUNDARY_PUSH_RADIUS_M, OBJECT_REPULSION_STIFFNESS, ObjectPhysicsField, ObjectWorld,
+    OBJECT_BOUNDARY_PUSH_RADIUS_M, OBJECT_REPULSION_STIFFNESS, ObjectId, ObjectPhysicsField,
+    ObjectWorld,
 };
 use super::terrain::{CELL_SIZE_M, TerrainWorld, cell_to_world_center};
 
@@ -88,6 +89,7 @@ pub struct ParticleWorld {
     initial_vel: Vec<Vec2>,
     neighbor_grid: NeighborGrid,
     viscosity_work: Vec<Vec2>,
+    object_contacts_work: Vec<ObjectId>,
 }
 
 impl Default for ParticleWorld {
@@ -107,6 +109,7 @@ impl Default for ParticleWorld {
             initial_vel,
             neighbor_grid: NeighborGrid::default(),
             viscosity_work: Vec::new(),
+            object_contacts_work: Vec::new(),
         };
         world.resize_work_buffers();
         world
@@ -308,6 +311,7 @@ impl ParticleWorld {
         object_world: &mut ObjectWorld,
         dt_sub: f32,
     ) {
+        object_world.clear_reaction_impulses();
         for i in 0..self.particle_count() {
             self.prev_pos[i] = self.pos[i];
             self.vel[i] += GRAVITY_MPS2 * dt_sub;
@@ -326,6 +330,7 @@ impl ParticleWorld {
         }
 
         self.apply_xsph_viscosity();
+        self.apply_object_reaction_impulses(object_world);
         for vel in &mut self.vel {
             *vel = vel.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
         }
@@ -419,30 +424,46 @@ impl ParticleWorld {
                 }
             }
             let mut object_push = Vec2::ZERO;
-            let mut pushed_object_id = None;
-            if is_water {
-                if let Some((signed_distance, normal, object_id)) =
-                    object_field.sample_signed_distance_and_normal(self.pos[i])
-                {
-                    let penetration = OBJECT_BOUNDARY_PUSH_RADIUS_M - signed_distance;
-                    if penetration > 0.0 {
-                        object_push = normal * penetration * OBJECT_REPULSION_STIFFNESS;
-                        pushed_object_id = Some(object_id);
+            let self_object = object_world.object_of_particle(i);
+            if is_water || self_object.is_some() {
+                object_field
+                    .gather_candidate_object_ids(self.pos[i], &mut self.object_contacts_work);
+                let push_radius = if is_water {
+                    OBJECT_BOUNDARY_PUSH_RADIUS_M
+                } else {
+                    STONE_PARTICLE_RADIUS_M
+                };
+
+                for &object_id in &self.object_contacts_work {
+                    if self_object == Some(object_id) {
+                        continue;
                     }
+                    let Some(sample) = object_world.evaluate_object_sdf(object_id, self.pos[i])
+                    else {
+                        continue;
+                    };
+                    let penetration = push_radius - sample.distance_m;
+                    if penetration <= 0.0 {
+                        continue;
+                    }
+                    let push = sample.normal_world * penetration * OBJECT_REPULSION_STIFFNESS;
+                    object_push += push;
+                    let reaction_impulse = -(self.mass[i] * push) * inv_dt;
+                    object_world.accumulate_reaction_impulse(object_id, reaction_impulse);
                 }
             }
+            let max_push = if is_water {
+                OBJECT_BOUNDARY_PUSH_RADIUS_M
+            } else {
+                STONE_PARTICLE_RADIUS_M
+            };
+            object_push = object_push.clamp_length_max(max_push);
 
             self.delta_pos[i] = if is_water {
                 delta / REST_DENSITY + boundary_push + object_push
             } else {
-                boundary_push
+                boundary_push + object_push
             };
-            if let Some(object_id) = pushed_object_id {
-                if object_push.length_squared() > 0.0 {
-                    let reaction_impulse = -(self.mass[i] * object_push) * inv_dt;
-                    object_world.accumulate_reaction_impulse(object_id, reaction_impulse);
-                }
-            }
         }
 
         for i in 0..self.particle_count() {
@@ -474,6 +495,29 @@ impl ParticleWorld {
         }
 
         self.vel.clone_from(&self.viscosity_work);
+    }
+
+    fn apply_object_reaction_impulses(&mut self, object_world: &ObjectWorld) {
+        for object in object_world.objects() {
+            let impulse = object_world.reaction_impulse_of(object.id);
+            if impulse.length_squared() <= 1e-12 {
+                continue;
+            }
+
+            let mass_sum = object
+                .particle_indices
+                .iter()
+                .filter_map(|&index| self.mass.get(index).copied())
+                .sum::<f32>()
+                .max(1e-6);
+            let dv = impulse / mass_sum;
+            for &index in &object.particle_indices {
+                if index >= self.particle_count() {
+                    continue;
+                }
+                self.vel[index] += dv;
+            }
+        }
     }
 
     fn solve_shape_matching_constraints(&mut self, object_world: &mut ObjectWorld) {
@@ -556,6 +600,7 @@ impl ParticleWorld {
         self.lambda.resize(count, 0.0);
         self.delta_pos.resize(count, Vec2::ZERO);
         self.viscosity_work.resize(count, Vec2::ZERO);
+        self.object_contacts_work.clear();
     }
 }
 
@@ -803,53 +848,90 @@ mod tests {
     }
 
     #[test]
-    fn object_sdf_push_accumulates_reaction_impulse() {
+    fn water_object_contact_pushes_object_motion() {
         let terrain = TerrainWorld::default();
-        let mut particles = ParticleWorld::default();
-        particles.pos.clear();
-        particles.prev_pos.clear();
-        particles.vel.clear();
-        particles.mass.clear();
-        particles.material.clear();
-        particles.density.clear();
-        particles.lambda.clear();
-        particles.delta_pos.clear();
-        particles.viscosity_work.clear();
-        particles.resize_work_buffers();
-
         let stone_cell = IVec2::new(0, 6);
-        let stone_indices = particles.spawn_stone_particles_from_cells(&[stone_cell], Vec2::ZERO);
         let water_pos = cell_to_world_center(stone_cell);
-        particles.pos.push(water_pos);
-        particles.prev_pos.push(water_pos);
-        particles.vel.push(Vec2::ZERO);
-        particles.mass.push(default_particle_mass());
-        particles.material.push(ParticleMaterial::Water);
-        particles.resize_work_buffers();
 
-        let mut object_world = ObjectWorld::default();
-        let object_id = object_world
+        let mut with_water = ParticleWorld::default();
+        with_water.pos.clear();
+        with_water.prev_pos.clear();
+        with_water.vel.clear();
+        with_water.mass.clear();
+        with_water.material.clear();
+        with_water.density.clear();
+        with_water.lambda.clear();
+        with_water.delta_pos.clear();
+        with_water.viscosity_work.clear();
+        with_water.resize_work_buffers();
+        let stone_indices = with_water.spawn_stone_particles_from_cells(&[stone_cell], Vec2::ZERO);
+        with_water.pos.push(water_pos);
+        with_water.prev_pos.push(water_pos);
+        with_water.vel.push(Vec2::ZERO);
+        with_water.mass.push(default_particle_mass());
+        with_water.material.push(ParticleMaterial::Water);
+        with_water.resize_work_buffers();
+
+        let mut with_water_objects = ObjectWorld::default();
+        let _ = with_water_objects
             .create_object(
                 stone_indices,
-                particles.positions(),
-                particles.masses(),
+                with_water.positions(),
+                with_water.masses(),
                 OBJECT_SHAPE_STIFFNESS_ALPHA,
                 OBJECT_SHAPE_ITERS,
             )
             .expect("object should be created");
-        let mut object_field = ObjectPhysicsField::default();
-        object_world.update_physics_field(
-            particles.positions(),
-            particles.masses(),
-            &mut object_field,
+        let mut with_water_field = ObjectPhysicsField::default();
+        with_water_objects.update_physics_field(
+            with_water.positions(),
+            with_water.masses(),
+            &mut with_water_field,
+        );
+        with_water.step_if_running(&terrain, &with_water_field, &mut with_water_objects, true);
+
+        let mut without_water = ParticleWorld::default();
+        without_water.pos.clear();
+        without_water.prev_pos.clear();
+        without_water.vel.clear();
+        without_water.mass.clear();
+        without_water.material.clear();
+        without_water.density.clear();
+        without_water.lambda.clear();
+        without_water.delta_pos.clear();
+        without_water.viscosity_work.clear();
+        without_water.resize_work_buffers();
+        let stone_indices_no_water =
+            without_water.spawn_stone_particles_from_cells(&[stone_cell], Vec2::ZERO);
+
+        let mut without_water_objects = ObjectWorld::default();
+        let _ = without_water_objects
+            .create_object(
+                stone_indices_no_water,
+                without_water.positions(),
+                without_water.masses(),
+                OBJECT_SHAPE_STIFFNESS_ALPHA,
+                OBJECT_SHAPE_ITERS,
+            )
+            .expect("object should be created");
+        let mut without_water_field = ObjectPhysicsField::default();
+        without_water_objects.update_physics_field(
+            without_water.positions(),
+            without_water.masses(),
+            &mut without_water_field,
+        );
+        without_water.step_if_running(
+            &terrain,
+            &without_water_field,
+            &mut without_water_objects,
+            true,
         );
 
-        particles.step_if_running(&terrain, &object_field, &mut object_world, true);
-
-        let impulse = object_world.reaction_impulse_of(object_id);
+        let with_vel = with_water.vel[0];
+        let without_vel = without_water.vel[0];
         assert!(
-            impulse.length_squared() > 0.0,
-            "expected non-zero reaction impulse from fluid/object push"
+            (with_vel - without_vel).length() > 1e-3,
+            "expected water contact to alter object velocity (with={with_vel:?}, without={without_vel:?})"
         );
     }
 }
