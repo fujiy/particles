@@ -5,7 +5,7 @@ use bevy::prelude::*;
 pub const CELL_SIZE_M: f32 = 0.25;
 pub const CHUNK_SIZE: usize = 32;
 pub const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
-pub const CELL_PIXEL_SIZE: u32 = 4;
+pub const CELL_PIXEL_SIZE: u32 = 8;
 pub const CHUNK_PIXEL_SIZE: u32 = (CHUNK_SIZE as u32) * CELL_PIXEL_SIZE;
 pub const CHUNK_WORLD_SIZE_M: f32 = (CHUNK_SIZE as f32) * CELL_SIZE_M;
 pub const DEFAULT_SOLID_HP: u16 = 1_000;
