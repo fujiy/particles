@@ -9,14 +9,14 @@ use std::time::Instant;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectWorld};
+use object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectData, ObjectWorld};
 use particle::{
     PARTICLE_RADIUS_M, PARTICLE_SPACING_M, PARTICLE_SPEED_LIMIT_MPS, ParticleWorld,
     TERRAIN_BOUNDARY_RADIUS_M, WATER_KERNEL_RADIUS_M, nominal_particle_draw_radius_m,
 };
 use render::{
-    TerrainRenderState, WaterRenderState, bootstrap_terrain_chunks,
-    sync_dirty_terrain_chunks_to_render, sync_water_dots_to_render,
+    ObjectRenderState, TerrainRenderState, WaterRenderState, bootstrap_terrain_chunks,
+    sync_dirty_terrain_chunks_to_render, sync_object_sprites_to_render, sync_water_dots_to_render,
 };
 pub use terrain::cell_to_world_center;
 use terrain::{
@@ -31,6 +31,7 @@ const BUTTON_BG_HOVER: Color = Color::srgba(0.24, 0.25, 0.30, 0.98);
 const BUTTON_BG_PRESS: Color = Color::srgba(0.38, 0.40, 0.48, 0.98);
 const GRID_NEIGHBOR_COLOR: Color = Color::srgba(0.27, 0.75, 0.98, 0.28);
 const GRID_CHUNK_COLOR: Color = Color::srgba(0.98, 0.78, 0.25, 0.75);
+const GRID_OBJECT_COLOR: Color = Color::srgba(0.92, 0.36, 0.12, 0.70);
 const GRID_BUTTON_BOTTOM_PX: f32 = 50.0;
 const DEBUG_BUTTON_BOTTOM_PX: f32 = 12.0;
 const TOOLBAR_BOTTOM_PX: f32 = 12.0;
@@ -63,6 +64,7 @@ impl Plugin for SimulationPlugin {
             .init_resource::<SimulationPerfMetrics>()
             .init_resource::<TerrainRenderState>()
             .init_resource::<WaterRenderState>()
+            .init_resource::<ObjectRenderState>()
             .add_message::<ResetSimulationRequest>()
             .add_systems(
                 Startup,
@@ -79,6 +81,7 @@ impl Plugin for SimulationPlugin {
                     handle_world_tool_button_interaction,
                     handle_world_interactions,
                     sync_dirty_terrain_chunks_to_render,
+                    sync_object_sprites_to_render,
                     sync_water_dots_to_render,
                     update_simulation_hud,
                     update_grid_overlay_button_label,
@@ -697,7 +700,12 @@ fn update_overlay_button_label(
     }
 }
 
-fn draw_grid_overlay(mut gizmos: Gizmos, overlay_state: Res<GridOverlayState>) {
+fn draw_grid_overlay(
+    mut gizmos: Gizmos,
+    overlay_state: Res<GridOverlayState>,
+    object_world: Res<ObjectWorld>,
+    particle_world: Res<ParticleWorld>,
+) {
     if !overlay_state.enabled {
         return;
     }
@@ -738,6 +746,81 @@ fn draw_grid_overlay(mut gizmos: Gizmos, overlay_state: Res<GridOverlayState>) {
         let y = chunk_y as f32 * CHUNK_WORLD_SIZE_M;
         gizmos.line_2d(Vec2::new(min_x, y), Vec2::new(max_x, y), GRID_CHUNK_COLOR);
     }
+
+    let particle_positions = particle_world.positions();
+    let particle_masses = particle_world.masses();
+    for object in object_world.objects() {
+        if let Some((center, theta)) =
+            object_pose_for_overlay(object, particle_positions, particle_masses)
+        {
+            draw_object_grid_cells(&mut gizmos, object, center, theta);
+        }
+    }
+}
+
+fn draw_object_grid_cells(gizmos: &mut Gizmos, object: &ObjectData, center: Vec2, theta: f32) {
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+    let half = CELL_SIZE_M * 0.5;
+
+    for local_center in &object.rest_local {
+        let corners = [
+            Vec2::new(local_center.x - half, local_center.y - half),
+            Vec2::new(local_center.x + half, local_center.y - half),
+            Vec2::new(local_center.x + half, local_center.y + half),
+            Vec2::new(local_center.x - half, local_center.y + half),
+        ];
+        let world = corners
+            .map(|p| center + Vec2::new(cos_t * p.x - sin_t * p.y, sin_t * p.x + cos_t * p.y));
+        gizmos.line_2d(world[0], world[1], GRID_OBJECT_COLOR);
+        gizmos.line_2d(world[1], world[2], GRID_OBJECT_COLOR);
+        gizmos.line_2d(world[2], world[3], GRID_OBJECT_COLOR);
+        gizmos.line_2d(world[3], world[0], GRID_OBJECT_COLOR);
+    }
+}
+
+fn object_pose_for_overlay(
+    object: &ObjectData,
+    positions: &[Vec2],
+    masses: &[f32],
+) -> Option<(Vec2, f32)> {
+    if object.particle_indices.is_empty() || object.rest_local.is_empty() {
+        return None;
+    }
+
+    let mut mass_sum = 0.0;
+    let mut center = Vec2::ZERO;
+    for &index in &object.particle_indices {
+        if index >= positions.len() || index >= masses.len() {
+            continue;
+        }
+        let mass = masses[index];
+        mass_sum += mass;
+        center += positions[index] * mass;
+    }
+    if mass_sum <= 1e-6 {
+        return None;
+    }
+    center /= mass_sum;
+
+    let mut a00 = 0.0;
+    let mut a01 = 0.0;
+    let mut a10 = 0.0;
+    let mut a11 = 0.0;
+    for (slot, &index) in object.particle_indices.iter().enumerate() {
+        if slot >= object.rest_local.len() || index >= positions.len() || index >= masses.len() {
+            continue;
+        }
+        let mass = masses[index];
+        let p = positions[index] - center;
+        let q = object.rest_local[slot];
+        a00 += mass * p.x * q.x;
+        a01 += mass * p.x * q.y;
+        a10 += mass * p.y * q.x;
+        a11 += mass * p.y * q.y;
+    }
+    let theta = (a10 - a01).atan2(a00 + a11);
+    Some((center, theta))
 }
 
 fn update_simulation_hud(

@@ -4,9 +4,10 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use super::object::{ObjectData, ObjectId, ObjectWorld};
 use super::particle::{
-    ParticleMaterial, ParticleWorld, REST_DENSITY, STONE_PARTICLE_RADIUS_M,
-    TERRAIN_BOUNDARY_RADIUS_M, nominal_particle_draw_radius_m,
+    ParticleMaterial, ParticleWorld, REST_DENSITY, TERRAIN_BOUNDARY_RADIUS_M,
+    nominal_particle_draw_radius_m,
 };
 use super::terrain::{
     CELL_PIXEL_SIZE, CELL_SIZE_M, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_WORLD_SIZE_M, TerrainCell,
@@ -28,9 +29,26 @@ pub struct WaterRenderState {
     blurred_density: Vec<f32>,
 }
 
+#[derive(Resource, Default)]
+pub struct ObjectRenderState {
+    object_sprites: HashMap<ObjectId, ObjectSprite>,
+}
+
 struct TerrainChunkSprite {
     entity: Entity,
     image: Handle<Image>,
+}
+
+struct ObjectSprite {
+    entity: Entity,
+    image: Handle<Image>,
+    world_size: Vec2,
+}
+
+#[derive(Component, Clone, Copy)]
+pub struct ObjectRenderHandle {
+    #[allow(dead_code)]
+    pub object_id: ObjectId,
 }
 
 const WORLD_CHUNK_WIDTH: u32 = (WORLD_MAX_CHUNK_X - WORLD_MIN_CHUNK_X + 1) as u32;
@@ -42,7 +60,9 @@ const WATER_DOT_SMOOTH_WIDTH: f32 = 1.0;
 const WATER_BLUR_RADIUS_DOTS: i32 = 2;
 const WATER_DOT_SCALE: f32 = CELL_PIXEL_SIZE as f32 / CELL_SIZE_M;
 const WATER_RENDER_Z: f32 = 6.0;
-const STONE_DOT_ALPHA: u8 = 255;
+const OBJECT_DOT_SCALE: f32 = CELL_PIXEL_SIZE as f32 / CELL_SIZE_M;
+const OBJECT_RENDER_Z: f32 = 7.0;
+const OBJECT_PADDING_PX: u32 = 2;
 
 pub fn bootstrap_terrain_chunks(mut terrain_world: ResMut<TerrainWorld>) {
     terrain_world.reset_fixed_world();
@@ -215,45 +235,82 @@ pub fn sync_water_dots_to_render(
         }
     }
 
-    let stone_radius_px = (STONE_PARTICLE_RADIUS_M * WATER_DOT_SCALE).ceil() as i32;
-    let stone_radius_px2 = (stone_radius_px * stone_radius_px) as f32;
-    for (particle_index, &pos) in particles.positions().iter().enumerate() {
-        if !matches!(
-            particles.materials()[particle_index],
-            ParticleMaterial::Stone
-        ) {
-            continue;
-        }
-        let center_px = world_to_water_pixel(pos);
-        for py in (center_px.y - stone_radius_px)..=(center_px.y + stone_radius_px) {
-            if py < 0 || py >= WATER_IMAGE_HEIGHT as i32 {
-                continue;
-            }
-            for px in (center_px.x - stone_radius_px)..=(center_px.x + stone_radius_px) {
-                if px < 0 || px >= WATER_IMAGE_WIDTH as i32 {
-                    continue;
-                }
-                let dx = (px - center_px.x) as f32;
-                let dy = (py - center_px.y) as f32;
-                if dx * dx + dy * dy > stone_radius_px2 {
-                    continue;
-                }
-                let idx = water_density_index(px, py);
-                let offset = idx * 4;
-                let palette = [
-                    [70, 67, 63, STONE_DOT_ALPHA],
-                    [83, 79, 74, STONE_DOT_ALPHA],
-                    [95, 90, 84, STONE_DOT_ALPHA],
-                    [108, 103, 96, STONE_DOT_ALPHA],
-                ];
-                let pidx = deterministic_palette_index(px, py);
-                pixels[offset..offset + 4].copy_from_slice(&palette[pidx]);
-            }
-        }
-    }
-
     if let Some(image) = images.get_mut(&image_handle) {
         image.data = Some(pixels);
+    }
+}
+
+pub fn sync_object_sprites_to_render(
+    mut commands: Commands,
+    mut object_world: ResMut<ObjectWorld>,
+    particles: Res<ParticleWorld>,
+    mut render_state: ResMut<ObjectRenderState>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let positions = particles.positions();
+    let masses = particles.masses();
+    let mut live_ids = Vec::new();
+
+    for object in object_world.objects_mut() {
+        let Some((center, theta)) = object_pose(object, positions, masses) else {
+            continue;
+        };
+        live_ids.push(object.id);
+
+        let transform = Transform::from_xyz(center.x, center.y, OBJECT_RENDER_Z)
+            .with_rotation(Quat::from_rotation_z(theta));
+        if let Some(entry) = render_state.object_sprites.get_mut(&object.id) {
+            if object.shape_dirty {
+                let (image, world_size) = rasterize_object_image(object);
+                if images.insert(entry.image.id(), image).is_err() {
+                    let (new_image, _) = rasterize_object_image(object);
+                    entry.image = images.add(new_image);
+                }
+                entry.world_size = world_size;
+                let mut sprite = Sprite::from_image(entry.image.clone());
+                sprite.custom_size = Some(entry.world_size);
+                commands.entity(entry.entity).insert(sprite);
+                object.shape_dirty = false;
+            }
+            commands.entity(entry.entity).insert(transform);
+            continue;
+        }
+
+        let (image, world_size) = rasterize_object_image(object);
+        let image_handle = images.add(image);
+        let mut sprite = Sprite::from_image(image_handle.clone());
+        sprite.custom_size = Some(world_size);
+        let entity = commands
+            .spawn((
+                sprite,
+                transform,
+                ObjectRenderHandle {
+                    object_id: object.id,
+                },
+            ))
+            .id();
+        render_state.object_sprites.insert(
+            object.id,
+            ObjectSprite {
+                entity,
+                image: image_handle,
+                world_size,
+            },
+        );
+        object.shape_dirty = false;
+    }
+
+    let stale_ids: Vec<_> = render_state
+        .object_sprites
+        .keys()
+        .copied()
+        .filter(|id| !live_ids.contains(id))
+        .collect();
+    for object_id in stale_ids {
+        if let Some(entry) = render_state.object_sprites.remove(&object_id) {
+            commands.entity(entry.entity).despawn();
+            images.remove(entry.image.id());
+        }
     }
 }
 
@@ -489,4 +546,119 @@ fn water_palette_color(x: i32, y: i32, density: f32, dot_threshold: f32) -> [u8;
     let base = deterministic_palette_index(x, y);
     let boost = if density > dot_threshold * 1.6 { 1 } else { 0 };
     palette[(base + boost).min(3)]
+}
+
+fn object_pose(object: &ObjectData, positions: &[Vec2], masses: &[f32]) -> Option<(Vec2, f32)> {
+    if object.particle_indices.is_empty() || object.rest_local.is_empty() {
+        return None;
+    }
+
+    let mut mass_sum = 0.0;
+    let mut center = Vec2::ZERO;
+    for &index in &object.particle_indices {
+        if index >= positions.len() || index >= masses.len() {
+            continue;
+        }
+        let mass = masses[index];
+        mass_sum += mass;
+        center += positions[index] * mass;
+    }
+    if mass_sum <= 1e-6 {
+        return None;
+    }
+    center /= mass_sum;
+
+    let mut a00 = 0.0;
+    let mut a01 = 0.0;
+    let mut a10 = 0.0;
+    let mut a11 = 0.0;
+    for (slot, &index) in object.particle_indices.iter().enumerate() {
+        if slot >= object.rest_local.len() || index >= positions.len() || index >= masses.len() {
+            continue;
+        }
+        let mass = masses[index];
+        let p = positions[index] - center;
+        let q = object.rest_local[slot];
+        a00 += mass * p.x * q.x;
+        a01 += mass * p.x * q.y;
+        a10 += mass * p.y * q.x;
+        a11 += mass * p.y * q.y;
+    }
+    let theta = (a10 - a01).atan2(a00 + a11);
+    Some((center, theta))
+}
+
+fn rasterize_object_image(object: &ObjectData) -> (Image, Vec2) {
+    let half_cell = CELL_SIZE_M * 0.5;
+    let mut extent = Vec2::splat(half_cell);
+    for q in &object.rest_local {
+        extent.x = extent.x.max(q.x.abs() + half_cell);
+        extent.y = extent.y.max(q.y.abs() + half_cell);
+    }
+
+    let world_size = extent * 2.0;
+    let width = ((world_size.x * OBJECT_DOT_SCALE).ceil() as u32 + OBJECT_PADDING_PX * 2).max(2);
+    let height = ((world_size.y * OBJECT_DOT_SCALE).ceil() as u32 + OBJECT_PADDING_PX * 2).max(2);
+    let mut pixels = vec![0_u8; (width * height * 4) as usize];
+    let pad = OBJECT_PADDING_PX as f32;
+    let palette = [
+        [70, 67, 63, 255],
+        [83, 79, 74, 255],
+        [95, 90, 84, 255],
+        [108, 103, 96, 255],
+    ];
+
+    for q in &object.rest_local {
+        let min_world = *q - Vec2::splat(half_cell);
+        let max_world = *q + Vec2::splat(half_cell);
+        let min_px = Vec2::new(
+            (min_world.x + extent.x) * OBJECT_DOT_SCALE + pad,
+            (min_world.y + extent.y) * OBJECT_DOT_SCALE + pad,
+        );
+        let max_px = Vec2::new(
+            (max_world.x + extent.x) * OBJECT_DOT_SCALE + pad,
+            (max_world.y + extent.y) * OBJECT_DOT_SCALE + pad,
+        );
+        let start_x = min_px.x.floor() as i32;
+        let end_x = max_px.x.ceil() as i32 - 1;
+        let start_y = min_px.y.floor() as i32;
+        let end_y = max_px.y.ceil() as i32 - 1;
+        let cell_index_x = (q.x / CELL_SIZE_M).round() as i32;
+        let cell_index_y = (q.y / CELL_SIZE_M).round() as i32;
+
+        for py in start_y..=end_y {
+            if py < 0 || py >= height as i32 {
+                continue;
+            }
+            for px in start_x..=end_x {
+                if px < 0 || px >= width as i32 {
+                    continue;
+                }
+                let iy = height as i32 - 1 - py;
+                let offset = ((iy as u32 * width + px as u32) * 4) as usize;
+                let pattern_x = cell_index_x * CELL_PIXEL_SIZE as i32 + (px - start_x);
+                let pattern_y = cell_index_y * CELL_PIXEL_SIZE as i32 + (py - start_y);
+                let palette_index = deterministic_palette_index(pattern_x, pattern_y);
+                pixels[offset..offset + 4].copy_from_slice(&palette[palette_index]);
+            }
+        }
+    }
+
+    let mut image = Image::new_fill(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.data = Some(pixels);
+    let texture_world_size = Vec2::new(
+        width as f32 / OBJECT_DOT_SCALE,
+        height as f32 / OBJECT_DOT_SCALE,
+    );
+    (image, texture_world_size)
 }

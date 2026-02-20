@@ -1,10 +1,19 @@
 # Tasks
 
 ## Todo
-- (No open tasks)
+- [ ] 物体ごとのローカルSDF（または距離場）を生成・保持するデータ構造を追加
+- [ ] 動いた物体のみ、物理用SDFグリッド（疎チャンク）へ再投影するdirty更新を実装
+- [ ] Broadphaseを実装: 物体AABBを空間グリッドに登録し、再投影範囲を局所化
+- [ ] 流体粒子の干渉判定を変更: 近傍オブジェクト探索ではなく、物理用SDFグリッド参照で `distance/normal` を取得
+- [ ] 流体-物体干渉の反作用集計を実装（最小距離寄与の `object_id` へインパルスを蓄積）
+- [ ] 受け入れ確認を実施（物体数増加時の性能、流体-物体干渉、描画追従の自然さ）
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] 人工物描画方針を実装: `1オブジェクト=1Entity`（`Transform` + 描画コンポーネント + `ObjectId/Handle`）
+- [x] 人工物のドット描画をオブジェクトローカル基準へ変更（移動・回転時にパターンが追従）
+- [x] 形状不変時は `Transform` 更新のみ、形状変更時のみテクスチャ再ラスタライズする更新フローを実装
+- [x] 自然物（流体）は従来どおり世界側テクスチャ投影で描画する経路を維持（人工物描画と分離）
 - [x] `ObjectWorld` を追加し、`ObjectId` / `particle_indices` / `rest_local` / `mass_sum` / `shape_stiffness_alpha` / `shape_iters` を管理
 - [x] Stoneドラッグの1ストローク追跡を実装（開始・更新・終了イベントの収集）
 - [x] Stoneドラッグ中の生成セルを分類（`Frozen` 地形に重なる/接続するセルは地形、その他は物体候補）
@@ -15,6 +24,7 @@
 - [x] 速度更新を形状マッチング後に整合させ、過大速度をクランプ
 - [x] 物体候補セルが空の場合はオブジェクトを作らず、地形生成のみ行う分岐を実装
 - [x] 受け入れ確認を実施（ほぼ剛体挙動、Stoneドラッグ地形判定、1ストローク1オブジェクト）
+- [x] Grid Overlay表示時に、オブジェクト（人工物）のセルグリッドを重ね描きする可視化を追加
 - [x] Design Feedback反映: 水-岩干渉仕様を「岩SPH寄与なし + SDF `boundary_push`」へ更新（`design.md` §12.1/§12.5）
 - [x] Design Feedback反映: 新規定数 `TERRAIN_SDF_SAMPLES_PER_CELL` / `TERRAIN_SDF_PUSH_RADIUS_M` / `TERRAIN_REPULSION_STIFFNESS` を仕様へ追加（`design.md` §12.2）
 - [x] Design Feedback反映: 水描画仕様に「岩セル上の水ドット抑制・岩優先表示」を追加（`design.md` §8.2）

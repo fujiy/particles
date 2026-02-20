@@ -14,6 +14,7 @@ pub struct ObjectData {
     pub mass_sum: f32,
     pub shape_stiffness_alpha: f32,
     pub shape_iters: usize,
+    pub shape_dirty: bool,
 }
 
 #[derive(Resource, Debug, Default)]
@@ -30,6 +31,10 @@ impl ObjectWorld {
 
     pub fn objects_mut(&mut self) -> &mut [ObjectData] {
         &mut self.objects
+    }
+
+    pub fn objects(&self) -> &[ObjectData] {
+        &self.objects
     }
 
     pub fn create_object(
@@ -71,6 +76,7 @@ impl ObjectWorld {
             mass_sum,
             shape_stiffness_alpha: shape_stiffness_alpha.clamp(0.0, 1.0),
             shape_iters: shape_iters.max(1),
+            shape_dirty: true,
         });
         Some(id)
     }
@@ -108,6 +114,7 @@ impl ObjectWorld {
                 .map(|&index| particle_mass[index])
                 .sum::<f32>()
                 .max(1e-6);
+            object.shape_dirty = true;
             true
         });
     }
