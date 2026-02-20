@@ -655,8 +655,8 @@ fn is_water_particle(material: ParticleMaterial) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::simulation::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA};
-    use crate::simulation::terrain::{CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MIN_CHUNK_X};
+    use crate::physics::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA};
+    use crate::physics::terrain::{CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MIN_CHUNK_X};
 
     #[test]
     fn particles_fall_under_gravity() {

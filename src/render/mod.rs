@@ -4,12 +4,13 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use super::object::{ObjectData, ObjectId, ObjectWorld};
-use super::particle::{
+use crate::physics::object::{ObjectData, ObjectId, ObjectWorld};
+use crate::physics::particle::{
     ParticleMaterial, ParticleWorld, REST_DENSITY, TERRAIN_BOUNDARY_RADIUS_M,
     nominal_particle_draw_radius_m,
 };
-use super::terrain::{
+use crate::physics::state::SimUpdateSet;
+use crate::physics::terrain::{
     CELL_PIXEL_SIZE, CELL_SIZE_M, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_WORLD_SIZE_M, TerrainCell,
     TerrainChunk, TerrainMaterial, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
     WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, world_to_cell,
@@ -63,6 +64,27 @@ const WATER_RENDER_Z: f32 = 6.0;
 const OBJECT_DOT_SCALE: f32 = CELL_PIXEL_SIZE as f32 / CELL_SIZE_M;
 const OBJECT_RENDER_Z: f32 = 7.0;
 const OBJECT_PADDING_PX: u32 = 2;
+
+pub struct RenderPlugin;
+
+impl Plugin for RenderPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<TerrainRenderState>()
+            .init_resource::<WaterRenderState>()
+            .init_resource::<ObjectRenderState>()
+            .add_systems(Startup, bootstrap_terrain_chunks)
+            .add_systems(
+                Update,
+                (
+                    sync_dirty_terrain_chunks_to_render,
+                    sync_object_sprites_to_render,
+                    sync_water_dots_to_render,
+                )
+                    .chain()
+                    .in_set(SimUpdateSet::Rendering),
+            );
+    }
+}
 
 pub fn bootstrap_terrain_chunks(mut terrain_world: ResMut<TerrainWorld>) {
     terrain_world.reset_fixed_world();

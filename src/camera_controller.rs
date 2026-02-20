@@ -1,4 +1,4 @@
-use crate::simulation::cell_to_world_center;
+use crate::physics::cell_to_world_center;
 use bevy::camera::ScalingMode;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;

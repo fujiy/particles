@@ -5,6 +5,14 @@
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] `SimulationPlugin` を廃止し、`main.rs` で `PhysicsPlugin` / `InterfacePlugin` / `OverlayPlugin` / `RenderPlugin` / `CameraControllerPlugin` を個別有効化
+- [x] `src/simulation/` を `src/physics/` へ改名し、物理本体モジュールの名前空間を `physics::*` に統一
+- [x] ディレクトリ構造を再編（`src/simulation` / `src/overlay` / `src/interface` / `src/render`）
+- [x] UI責務を `interface` モジュールへ改名・移設し、`InterfacePlugin` として分離
+- [x] Overlay/Render をそれぞれ独立Pluginとして別モジュール化し、`SimulationPlugin` は構成オーケストレーションに集約
+- [x] シミュレーション責務をPlugin分割（`PhysicsCorePlugin` / `UiPlugin` / `OverlayPlugin` / `RenderPlugin`）し、`SimulationPlugin` は構成管理に限定
+- [x] モジュール構造を再編（`state.rs` に共有Resource/SystemSet、各Pluginを個別モジュールへ分離）
+- [x] カメラ操作Plugin（`CameraControllerPlugin`）を独立維持し、`main.rs` から Simulation群と並列に登録する構成を維持
 - [x] `ObjectPhysicsField` を `HashMap<IVec2, ...>` から固定世界サイズの配列ベース実装へ置き換え（セル->候補ObjectIdの固定長格納）
 - [x] 物体ごとのローカルSDF（距離場）を生成・保持するデータ構造を追加（`ObjectLocalSdf`）
 - [x] 動いた物体のみ、物理用SDFグリッド（疎セル）へ再投影するdirty更新を実装（削除時は再初期化）
