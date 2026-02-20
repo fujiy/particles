@@ -1,9 +1,27 @@
 # Tasks
 
 ## Todo
+- [ ] マテリアル形態を導入（`SolidCell` / `GranularParticle`）し、`Rock` / `Gravel` / `Sand` / `Soil` を定義
+- [ ] マテリアルごとの `PARTICLES_PER_CELL` 定数を追加（同機構を水粒子サイズ調整にも適用）
+- [ ] 衝突インパルス閾値ベースの破壊判定を実装
+- [ ] オブジェクト内部応力（拘束反力/ひずみ）閾値ベースの破壊判定を実装
+- [ ] 固体セル破壊時のセル→粉体粒子変換を実装（平方格子配置）
+- [ ] `Rock(SolidCell) -> Gravel(GranularParticle)` 遷移を実装
+- [ ] `Sand` / `Soil` を同モデルで追加し、低強度パラメータで崩れやすさを調整
+- [ ] 粉体の接触＋摩擦モデルを実装（`mu_s`, `mu_k`, `e`, 必要なら転がり抵抗）
+- [ ] 粉体堆積の安息角を確認する検証シーン/テストを追加
+- [ ] v4では粉体→固体逆変換を無効に固定（実装しないことをコード上で保証）
+- [ ] マップ保存機能を実装（地形・粒子・オブジェクト・最小設定をスナップショット化）
+- [ ] マップ読込機能を実装（状態クリア後に `TerrainWorld` / `ParticleWorld` / `ObjectWorld` 再構築）
+- [ ] セーブデータのバージョニングを実装（`save_version` と互換不可時エラー）
+- [ ] セーブ/ロード後の整合性検証を実装（ID重複・参照不整合・境界外データ）
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] Design Feedback反映: `ObjectPhysicsField` 仕様を固定配列グリッド（候補 `ObjectId` 固定長保持）へ更新（`design.md` §13.7）
+- [x] Design Feedback反映: 衝突判定仕様を「候補IDはphysics grid、`distance/normal` はローカルSDF直接評価」へ更新（`design.md` §13.7）
+- [x] v4粉体・破壊遷移仕様を `design.md` に追加（マテリアル形態、破壊トリガ、セル→粒子変換）
+- [x] v5マップセーブ/ロード仕様を `design.md` に追加（保存対象、形式/互換、基本フロー）
 - [x] ツールバーtooltipを最前面表示へ変更（`GlobalZIndex` を付与）
 - [x] 粒子物性を `physics/material.rs` に集約（`ParticleMaterial` / 半径 / 質量 / 接触パラメータ）
 - [x] 岩同士の接触応答を調整（低反発・高摩擦の速度応答を追加）
@@ -121,5 +139,4 @@
 - [x] 描画時に岩セル上の水ドット生成/描画を抑制し、重なり時は岩ドットを優先表示
 
 ## Design Feedback (from Impl sessions)
-- `ObjectPhysicsField` を疎 `HashMap` から固定世界サイズの配列グリッドへ変更したため、`design.md` の物理SDF管理方針（データ構造/更新方式）を更新したい（キャッシュ局所性重視の実装へ移行）。
-- 衝突判定は「physics gridに距離/法線を保持」から「physics gridは候補 `ObjectId` のみ保持し、最終的な `distance/normal` は各オブジェクトのローカルSDFを粒子位置で直接評価」へ変更したため、仕様記述の整合化が必要。
+- (No open feedback items)
