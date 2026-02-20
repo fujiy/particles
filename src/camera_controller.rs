@@ -105,25 +105,27 @@ fn control_main_camera(
         orthographic.scale = new_scale;
     }
 
-    let mut keyboard_pan = Vec2::ZERO;
-    if keyboard.pressed(KeyCode::ArrowLeft) || keyboard.pressed(KeyCode::KeyA) {
-        keyboard_pan.x -= 1.0;
-    }
-    if keyboard.pressed(KeyCode::ArrowRight) || keyboard.pressed(KeyCode::KeyD) {
-        keyboard_pan.x += 1.0;
-    }
-    if keyboard.pressed(KeyCode::ArrowDown) || keyboard.pressed(KeyCode::KeyS) {
-        keyboard_pan.y -= 1.0;
-    }
-    if keyboard.pressed(KeyCode::ArrowUp) || keyboard.pressed(KeyCode::KeyW) {
-        keyboard_pan.y += 1.0;
-    }
-    if keyboard_pan.length_squared() > 0.0 {
-        let delta = keyboard_pan.normalize()
-            * controller.pan_speed_mps
-            * orthographic.scale
-            * time.delta_secs();
-        transform.translation += delta.extend(0.0);
+    if !window.ime_enabled {
+        let mut keyboard_pan = Vec2::ZERO;
+        if keyboard.pressed(KeyCode::ArrowLeft) || keyboard.pressed(KeyCode::KeyA) {
+            keyboard_pan.x -= 1.0;
+        }
+        if keyboard.pressed(KeyCode::ArrowRight) || keyboard.pressed(KeyCode::KeyD) {
+            keyboard_pan.x += 1.0;
+        }
+        if keyboard.pressed(KeyCode::ArrowDown) || keyboard.pressed(KeyCode::KeyS) {
+            keyboard_pan.y -= 1.0;
+        }
+        if keyboard.pressed(KeyCode::ArrowUp) || keyboard.pressed(KeyCode::KeyW) {
+            keyboard_pan.y += 1.0;
+        }
+        if keyboard_pan.length_squared() > 0.0 {
+            let delta = keyboard_pan.normalize()
+                * controller.pan_speed_mps
+                * orthographic.scale
+                * time.delta_secs();
+            transform.translation += delta.extend(0.0);
+        }
     }
 
     let alt_pressed = keyboard.pressed(KeyCode::AltLeft) || keyboard.pressed(KeyCode::AltRight);

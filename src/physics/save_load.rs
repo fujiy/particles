@@ -1,8 +1,10 @@
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
 
 use bevy::prelude::*;
+use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use super::material::{ParticleMaterial, TerrainMaterial};
@@ -15,7 +17,7 @@ use super::terrain::{
 };
 
 pub const SAVE_VERSION: u32 = 1;
-pub const DEFAULT_SAVE_PATH: &str = "saves/quick_save.json";
+pub const DEFAULT_QUICK_SAVE_SLOT: &str = "quick_save";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SaveSnapshot {
@@ -126,22 +128,72 @@ impl From<SaveParticleMaterial> for ParticleMaterial {
     }
 }
 
-pub fn save_to_default_path(
+pub fn save_root_dir() -> PathBuf {
+    if let Some(project_dirs) = ProjectDirs::from("com", "fujiy", "particles") {
+        return project_dirs.data_local_dir().join("saves");
+    }
+
+    PathBuf::from("saves")
+}
+
+pub fn list_save_slots() -> Result<Vec<String>, String> {
+    let root = save_root_dir();
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut slots = Vec::new();
+    let entries =
+        fs::read_dir(&root).map_err(|error| format!("failed to read save directory: {error}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("failed to read save entry: {error}"))?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if stem.is_empty() {
+            continue;
+        }
+        slots.push(stem.to_string());
+    }
+
+    slots.sort();
+    Ok(slots)
+}
+
+pub fn save_to_slot(
+    slot_name: &str,
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
     objects: &ObjectWorld,
     sim_state: &SimulationState,
-) -> Result<(), String> {
-    save_to_path(DEFAULT_SAVE_PATH, terrain, particles, objects, sim_state)
+) -> Result<PathBuf, String> {
+    let slot = sanitize_slot_name(slot_name)?;
+    let path = save_root_dir().join(format!("{slot}.json"));
+    save_to_path(path.to_string_lossy().as_ref(), terrain, particles, objects, sim_state)?;
+    Ok(path)
 }
 
-pub fn load_from_default_path(
+pub fn load_from_slot(
+    slot_name: &str,
     terrain: &mut TerrainWorld,
     particles: &mut ParticleWorld,
     objects: &mut ObjectWorld,
     sim_state: &mut SimulationState,
-) -> Result<(), String> {
-    load_from_path(DEFAULT_SAVE_PATH, terrain, particles, objects, sim_state)
+) -> Result<PathBuf, String> {
+    let slot = sanitize_slot_name(slot_name)?;
+    let path = save_root_dir().join(format!("{slot}.json"));
+    load_from_path(
+        path.to_string_lossy().as_ref(),
+        terrain,
+        particles,
+        objects,
+        sim_state,
+    )?;
+    Ok(path)
 }
 
 pub fn save_to_path(
@@ -190,6 +242,32 @@ pub fn save_to_path(
     }
     fs::write(save_path, json).map_err(|error| format!("failed to write save file: {error}"))?;
     Ok(())
+}
+
+fn sanitize_slot_name(slot_name: &str) -> Result<String, String> {
+    let trimmed = slot_name.trim();
+    if trimmed.is_empty() {
+        return Err("save name is empty".to_string());
+    }
+    let mut sanitized = String::with_capacity(trimmed.len().min(96));
+    for ch in trimmed.chars() {
+        if ch.is_control() {
+            continue;
+        }
+        let mapped = match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => ch,
+        };
+        sanitized.push(mapped);
+        if sanitized.chars().count() >= 96 {
+            break;
+        }
+    }
+    let sanitized = sanitized.trim().trim_matches('.').to_string();
+    if sanitized.is_empty() {
+        return Err("save name contains no valid characters".to_string());
+    }
+    Ok(sanitized)
 }
 
 pub fn load_from_path(

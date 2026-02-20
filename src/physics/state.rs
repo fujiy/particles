@@ -15,10 +15,14 @@ pub struct SimulationPerfMetrics {
 pub struct ResetSimulationRequest;
 
 #[derive(Message)]
-pub struct SaveMapRequest;
+pub struct SaveMapRequest {
+    pub slot_name: String,
+}
 
 #[derive(Message)]
-pub struct LoadMapRequest;
+pub struct LoadMapRequest {
+    pub slot_name: String,
+}
 
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
 pub enum SimFixedSet {

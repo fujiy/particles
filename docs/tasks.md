@@ -1,7 +1,6 @@
 # Tasks
 
 ## Todo
-- [ ] 粉体堆積の安息角を確認する検証シーン/テストを追加
 
 ## Done
 - (Keep completed tasks here; do not delete history)

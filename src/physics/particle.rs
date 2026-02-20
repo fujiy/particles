@@ -9,7 +9,10 @@ use super::material::{
     solid_break_properties, terrain_break_collision_impulse_threshold, terrain_fracture_particle,
 };
 use super::object::{ObjectId, ObjectPhysicsField, ObjectWorld};
-use super::terrain::{CELL_SIZE_M, TerrainCell, TerrainWorld, cell_to_world_center, world_to_cell};
+use super::terrain::{
+    CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
+    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, cell_to_world_center, world_to_cell,
+};
 
 pub const GRAVITY_MPS2: Vec2 = Vec2::new(0.0, -9.81);
 pub const FIXED_DT: f32 = 1.0 / 60.0;
@@ -22,6 +25,9 @@ pub const TERRAIN_GHOST_DENSITY_SCALE: f32 = 1.0;
 pub const TERRAIN_GHOST_DELTA_SCALE: f32 = 1.0;
 pub const PARALLEL_PARTICLE_THRESHOLD: usize = 512;
 pub const PARTICLE_CONTACT_PUSH_FACTOR: f32 = 0.5;
+const PARTICLE_ESCAPE_MARGIN_X_CELLS: i32 = CHUNK_SIZE_I32;
+const PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS: i32 = CHUNK_SIZE_I32;
+const PARTICLE_ESCAPE_MARGIN_TOP_CELLS: i32 = CHUNK_SIZE_I32 * 8;
 
 const INITIAL_WATER_ORIGIN_M: Vec2 = Vec2::new(-1.6, 2.0);
 const INITIAL_WATER_COLS: usize = 50;
@@ -485,6 +491,10 @@ impl ParticleWorld {
                 self.vel[i] += GRAVITY_MPS2 * dt_sub;
                 self.pos[i] += self.vel[i] * dt_sub;
             }
+        }
+        {
+            let _span = tracing::info_span!("physics::cull_escaped_particles").entered();
+            self.cull_escaped_particles(object_world);
         }
 
         {
@@ -1088,32 +1098,8 @@ impl ParticleWorld {
         self.pending_object_fractures.clear();
         self.pending_terrain_fractures.clear();
 
-        for object in object_world.objects() {
-            let Some(&particle_index) = object.particle_indices.first() else {
-                continue;
-            };
-            if particle_index >= self.particle_count() {
-                continue;
-            }
-            let source_material = self.material[particle_index];
-            let Some(break_props) = solid_break_properties(source_material) else {
-                continue;
-            };
-
-            let collision_impulse = object_world.reaction_impulse_of(object.id).length();
-            let strain = self
-                .object_peak_strain
-                .get(&object.id)
-                .copied()
-                .unwrap_or(0.0);
-            if collision_impulse >= break_props.break_collision_impulse_threshold
-                || strain >= break_props.break_strain_threshold
-            {
-                self.pending_object_fractures.insert(object.id);
-            }
-        }
-
         let mut terrain_impulse = HashMap::<IVec2, f32>::new();
+        let mut object_terrain_impulse = HashMap::<ObjectId, f32>::new();
         for i in 0..self.particle_count() {
             let particle_material = self.material[i];
             let props = particle_properties(particle_material);
@@ -1126,9 +1112,16 @@ impl ParticleWorld {
             if penetration <= 0.0 {
                 continue;
             }
-            let impulse = self.mass[i] * self.vel[i].dot(normal).abs();
+            let dt_sub = FIXED_DT / SUBSTEPS as f32;
+            let step_normal_speed =
+                (self.pos[i] - self.prev_pos[i]).dot(normal).abs() / dt_sub.max(1e-6);
+            let normal_speed = self.vel[i].dot(normal).abs().max(step_normal_speed);
+            let impulse = self.mass[i] * normal_speed;
             if impulse <= 1e-6 {
                 continue;
+            }
+            if let Some(object_id) = object_world.object_of_particle(i) {
+                *object_terrain_impulse.entry(object_id).or_insert(0.0) += impulse;
             }
             let Some(cell) =
                 resolve_terrain_contact_cell(self.pos[i], signed_distance, normal, terrain)
@@ -1137,6 +1130,34 @@ impl ParticleWorld {
             };
             let entry = terrain_impulse.entry(cell).or_insert(0.0);
             *entry = (*entry).max(impulse);
+        }
+
+        for object in object_world.objects() {
+            let Some(&particle_index) = object.particle_indices.first() else {
+                continue;
+            };
+            if particle_index >= self.particle_count() {
+                continue;
+            }
+            let source_material = self.material[particle_index];
+            let Some(break_props) = solid_break_properties(source_material) else {
+                continue;
+            };
+
+            let external_collision_impulse = object_world.reaction_impulse_of(object.id).length();
+            let terrain_collision_impulse =
+                object_terrain_impulse.get(&object.id).copied().unwrap_or(0.0);
+            let collision_impulse = external_collision_impulse + terrain_collision_impulse;
+            let strain = self
+                .object_peak_strain
+                .get(&object.id)
+                .copied()
+                .unwrap_or(0.0);
+            if collision_impulse >= break_props.break_collision_impulse_threshold
+                || strain >= break_props.break_strain_threshold
+            {
+                self.pending_object_fractures.insert(object.id);
+            }
         }
 
         for (cell, impulse) in terrain_impulse {
@@ -1338,6 +1359,77 @@ impl ParticleWorld {
                 out_indices.push(index);
             }
         }
+    }
+
+    fn cull_escaped_particles(&mut self, object_world: &mut ObjectWorld) {
+        if self.particle_count() == 0 {
+            return;
+        }
+
+        let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32 - PARTICLE_ESCAPE_MARGIN_X_CELLS;
+        let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1 + PARTICLE_ESCAPE_MARGIN_X_CELLS;
+        let min_cell_y =
+            WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32 - PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS;
+        let max_cell_y =
+            (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1 + PARTICLE_ESCAPE_MARGIN_TOP_CELLS;
+
+        let min_world = cell_to_world_center(IVec2::new(min_cell_x, min_cell_y))
+            - Vec2::splat(CELL_SIZE_M * 0.5);
+        let max_world = cell_to_world_center(IVec2::new(max_cell_x, max_cell_y))
+            + Vec2::splat(CELL_SIZE_M * 0.5);
+
+        let old_count = self.particle_count();
+        let mut keep = vec![true; old_count];
+        let mut removed_count = 0usize;
+        for (index, position) in self.pos.iter().enumerate() {
+            let out_of_bounds = !position.is_finite()
+                || position.x < min_world.x
+                || position.x > max_world.x
+                || position.y < min_world.y
+                || position.y > max_world.y;
+            if out_of_bounds {
+                keep[index] = false;
+                removed_count += 1;
+            }
+        }
+        if removed_count == 0 {
+            return;
+        }
+
+        let new_count = old_count - removed_count;
+        let mut old_to_new = vec![None; old_count];
+        let mut next = 0usize;
+        for old_index in 0..old_count {
+            if !keep[old_index] {
+                continue;
+            }
+            old_to_new[old_index] = Some(next);
+            next += 1;
+        }
+
+        let mut new_pos = Vec::with_capacity(new_count);
+        let mut new_prev_pos = Vec::with_capacity(new_count);
+        let mut new_vel = Vec::with_capacity(new_count);
+        let mut new_mass = Vec::with_capacity(new_count);
+        let mut new_material = Vec::with_capacity(new_count);
+        for old_index in 0..old_count {
+            if !keep[old_index] {
+                continue;
+            }
+            new_pos.push(self.pos[old_index]);
+            new_prev_pos.push(self.prev_pos[old_index]);
+            new_vel.push(self.vel[old_index]);
+            new_mass.push(self.mass[old_index]);
+            new_material.push(self.material[old_index]);
+        }
+
+        self.pos = new_pos;
+        self.prev_pos = new_prev_pos;
+        self.vel = new_vel;
+        self.mass = new_mass;
+        self.material = new_material;
+        object_world.apply_particle_remap(&old_to_new, self.masses());
+        self.resize_work_buffers();
     }
 
     fn resize_work_buffers(&mut self) {
@@ -1769,6 +1861,59 @@ mod tests {
         assert!(
             (with_vel - without_vel).length() > 1e-3,
             "expected water contact to alter object velocity (with={with_vel:?}, without={without_vel:?})"
+        );
+    }
+
+    #[test]
+    fn solid_object_breaks_on_terrain_impact() {
+        let mut terrain = TerrainWorld::default();
+        terrain.reset_fixed_world();
+        terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+
+        let mut particles = ParticleWorld::default();
+        particles.pos.clear();
+        particles.prev_pos.clear();
+        particles.vel.clear();
+        particles.mass.clear();
+        particles.material.clear();
+        particles.density.clear();
+        particles.lambda.clear();
+        particles.delta_pos.clear();
+        particles.viscosity_work.clear();
+        particles.resize_work_buffers();
+
+        let indices = particles.spawn_material_particles_from_cells(
+            &[IVec2::new(0, 1)],
+            ParticleMaterial::SandSolid,
+            Vec2::ZERO,
+        );
+        let index = indices[0];
+        particles.pos[index] = Vec2::new(0.0, 0.05);
+        particles.prev_pos[index] = particles.pos[index];
+        particles.vel[index] = Vec2::new(0.0, -10.0);
+
+        let mut objects = ObjectWorld::default();
+        let _ = objects
+            .create_object(
+                indices,
+                particles.positions(),
+                particles.masses(),
+                OBJECT_SHAPE_STIFFNESS_ALPHA,
+                OBJECT_SHAPE_ITERS,
+            )
+            .expect("object should be created");
+        let mut object_field = ObjectPhysicsField::default();
+        objects.update_physics_field(particles.positions(), particles.masses(), &mut object_field);
+
+        particles.step_if_running(&terrain, &object_field, &mut objects, true);
+
+        assert!(objects.objects().is_empty(), "object should fracture on terrain impact");
+        assert!(
+            particles
+                .materials()
+                .iter()
+                .all(|&m| !matches!(m, ParticleMaterial::SandSolid)),
+            "fractured particles should no longer remain solid"
         );
     }
 }

@@ -121,11 +121,15 @@ fn handle_sim_controls(
     }
 
     if keyboard.just_pressed(KeyCode::F5) {
-        save_writer.write(SaveMapRequest);
+        save_writer.write(SaveMapRequest {
+            slot_name: save_load::DEFAULT_QUICK_SAVE_SLOT.to_string(),
+        });
     }
 
     if keyboard.just_pressed(KeyCode::F9) {
-        load_writer.write(LoadMapRequest);
+        load_writer.write(LoadMapRequest {
+            slot_name: save_load::DEFAULT_QUICK_SAVE_SLOT.to_string(),
+        });
     }
 }
 
@@ -158,28 +162,30 @@ fn apply_save_load_requests(
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
 ) {
-    if save_reader.read().next().is_some() {
-        match save_load::save_to_default_path(
+    for request in save_reader.read() {
+        match save_load::save_to_slot(
+            &request.slot_name,
             &terrain_world,
             &particle_world,
             &object_world,
             &sim_state,
         ) {
-            Ok(()) => tracing::info!("saved map to {}", save_load::DEFAULT_SAVE_PATH),
+            Ok(path) => tracing::info!("saved map to {}", path.display()),
             Err(error) => tracing::error!("failed to save map: {error}"),
         }
     }
 
-    if load_reader.read().next().is_some() {
-        match save_load::load_from_default_path(
+    for request in load_reader.read() {
+        match save_load::load_from_slot(
+            &request.slot_name,
             &mut terrain_world,
             &mut particle_world,
             &mut object_world,
             &mut sim_state,
         ) {
-            Ok(()) => {
+            Ok(path) => {
                 object_field.clear();
-                tracing::info!("loaded map from {}", save_load::DEFAULT_SAVE_PATH);
+                tracing::info!("loaded map from {}", path.display());
             }
             Err(error) => tracing::error!("failed to load map: {error}"),
         }

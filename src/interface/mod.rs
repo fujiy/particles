@@ -2,17 +2,20 @@ use std::collections::{HashSet, VecDeque};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
-use bevy::window::PrimaryWindow;
+use bevy::window::{Ime, PrimaryWindow};
 
 use crate::physics::cell_to_world_center;
 use crate::physics::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectWorld};
 use crate::physics::particle::{
-    PARTICLE_SPACING_M, PARTICLE_SPEED_LIMIT_MPS, ParticleMaterial, ParticleWorld,
-    TERRAIN_BOUNDARY_RADIUS_M,
+    PARTICLE_SPEED_LIMIT_MPS, ParticleMaterial, ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M,
 };
-use crate::physics::state::{SimUpdateSet, SimulationPerfMetrics, SimulationState};
+use crate::physics::save_load;
+use crate::physics::state::{
+    LoadMapRequest, SaveMapRequest, SimUpdateSet, SimulationPerfMetrics, SimulationState,
+};
 use crate::physics::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, WORLD_MAX_CHUNK_X,
     WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, world_to_cell,
@@ -35,10 +38,18 @@ const TOOLTIP_BG_COLOR: Color = Color::srgba(0.04, 0.05, 0.08, 0.96);
 const TOOLTIP_CURSOR_OFFSET_X: f32 = 14.0;
 const TOOLTIP_CURSOR_OFFSET_Y: f32 = 20.0;
 const TOOLTIP_GLOBAL_Z_INDEX: i32 = 10_000;
+const SAVE_LOAD_BAR_TOP_PX: f32 = 10.0;
+const SAVE_LOAD_BAR_RIGHT_PX: f32 = 10.0;
+const SAVE_LOAD_BUTTON_WIDTH_PX: f32 = 84.0;
+const SAVE_LOAD_BUTTON_HEIGHT_PX: f32 = 34.0;
+const DIALOG_BG_COLOR: Color = Color::srgba(0.06, 0.07, 0.10, 0.97);
+const DIALOG_WIDTH_PX: f32 = 380.0;
+const DIALOG_NAME_INPUT_HEIGHT_PX: f32 = 34.0;
+const DIALOG_SLOT_LIST_MAX_HEIGHT_PX: f32 = 240.0;
+const DIALOG_SLOT_BUTTON_HEIGHT_PX: f32 = 30.0;
 const DRAG_VELOCITY_BRUSH_RADIUS_M: f32 = 0.55;
 const DRAG_VELOCITY_GAIN: f32 = 0.9;
 const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
-const TOOL_WATER_SPAWN_SPACING_M: f32 = PARTICLE_SPACING_M;
 const TOOL_DELETE_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
 const STONE_STROKE_NEIGHBOR_OFFSETS: [IVec2; 4] = [
     IVec2::new(1, 0),
@@ -126,10 +137,17 @@ pub struct InterfacePlugin;
 impl Plugin for InterfacePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WorldInteractionState>()
+            .init_resource::<SaveLoadUiState>()
             .add_systems(Startup, setup_simulation_ui)
             .add_systems(
                 Update,
                 (
+                    handle_save_load_open_button_interaction,
+                    handle_save_load_name_input_button_interaction,
+                    handle_save_load_dialog_buttons,
+                    handle_save_load_slot_button_interaction,
+                    sync_save_load_ime_state,
+                    handle_save_load_text_input,
                     handle_world_tool_button_interaction,
                     handle_world_interactions,
                 )
@@ -140,6 +158,10 @@ impl Plugin for InterfacePlugin {
                 Update,
                 (
                     update_world_tool_button_visuals,
+                    update_save_load_open_button_visuals,
+                    update_save_load_name_input_button_visuals,
+                    update_save_load_slot_button_visuals,
+                    update_save_load_dialog,
                     update_world_tool_tooltip,
                     update_simulation_hud,
                 )
@@ -212,7 +234,8 @@ impl WorldTool {
 struct WorldInteractionState {
     selected_tool: Option<WorldTool>,
     last_drag_world: Option<Vec2>,
-    water_spawn_carry_m: f32,
+    last_water_spawn_cell: Option<IVec2>,
+    last_granular_spawn_cell: Option<IVec2>,
     stone_stroke: StoneStrokeState,
 }
 
@@ -246,6 +269,61 @@ struct WorldToolIconSet {
     delete: Handle<Image>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveLoadDialogMode {
+    Save,
+    Load,
+}
+
+#[derive(Resource, Debug, Default)]
+struct SaveLoadUiState {
+    mode: Option<SaveLoadDialogMode>,
+    slots: Vec<String>,
+    selected_slot: Option<String>,
+    input_name: String,
+    input_focused: bool,
+    ime_preedit: String,
+    status_message: String,
+    refresh_requested: bool,
+}
+
+#[derive(Component, Clone, Copy)]
+struct SaveLoadOpenButton {
+    mode: SaveLoadDialogMode,
+}
+
+#[derive(Component)]
+struct SaveLoadDialogRoot;
+
+#[derive(Component)]
+struct SaveLoadDialogTitleText;
+
+#[derive(Component)]
+struct SaveLoadDialogNameInputButton;
+
+#[derive(Component)]
+struct SaveLoadDialogNameInputText;
+
+#[derive(Component)]
+struct SaveLoadDialogStatusText;
+
+#[derive(Component)]
+struct SaveLoadDialogSlotList;
+
+#[derive(Component)]
+struct SaveLoadDialogConfirmButton;
+
+#[derive(Component)]
+struct SaveLoadDialogConfirmButtonText;
+
+#[derive(Component)]
+struct SaveLoadDialogCancelButton;
+
+#[derive(Component, Clone)]
+struct SaveLoadSlotButton {
+    slot_name: String,
+}
+
 fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let icon_set = create_world_tool_icon_set(&mut images);
     commands.insert_resource(icon_set.clone());
@@ -268,6 +346,64 @@ fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>
                 TextColor(Color::WHITE),
                 SimulationHudText,
             ));
+        });
+
+    commands
+        .spawn((Node {
+            position_type: PositionType::Absolute,
+            right: px(SAVE_LOAD_BAR_RIGHT_PX),
+            top: px(SAVE_LOAD_BAR_TOP_PX),
+            column_gap: px(8.0),
+            ..default()
+        },))
+        .with_children(|parent| {
+            parent.spawn((
+                Button,
+                Node {
+                    width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
+                    height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    border: UiRect::all(px(2.0)),
+                    ..default()
+                },
+                BackgroundColor(BUTTON_BG_OFF),
+                BorderColor::all(BUTTON_BORDER_OFF),
+                SaveLoadOpenButton {
+                    mode: SaveLoadDialogMode::Save,
+                },
+            ))
+            .with_children(|button| {
+                button.spawn((
+                    Text::new("Save"),
+                    TextFont::from_font_size(14.0),
+                    TextColor(Color::WHITE),
+                ));
+            });
+
+            parent.spawn((
+                Button,
+                Node {
+                    width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
+                    height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::Center,
+                    border: UiRect::all(px(2.0)),
+                    ..default()
+                },
+                BackgroundColor(BUTTON_BG_OFF),
+                BorderColor::all(BUTTON_BORDER_OFF),
+                SaveLoadOpenButton {
+                    mode: SaveLoadDialogMode::Load,
+                },
+            ))
+            .with_children(|button| {
+                button.spawn((
+                    Text::new("Load"),
+                    TextFont::from_font_size(14.0),
+                    TextColor(Color::WHITE),
+                ));
+            });
         });
 
     commands
@@ -342,6 +478,146 @@ fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>
                 WorldToolTooltipText,
             ));
         });
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(0.0),
+                right: px(0.0),
+                top: px(0.0),
+                bottom: px(0.0),
+                display: Display::None,
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.38)),
+            GlobalZIndex(TOOLTIP_GLOBAL_Z_INDEX - 1),
+            SaveLoadDialogRoot,
+        ))
+        .with_children(|parent| {
+            parent
+                .spawn((
+                    Node {
+                        width: px(DIALOG_WIDTH_PX),
+                        padding: UiRect::all(px(12.0)),
+                        row_gap: px(8.0),
+                        flex_direction: FlexDirection::Column,
+                        ..default()
+                    },
+                    BackgroundColor(DIALOG_BG_COLOR),
+                    BorderColor::all(BUTTON_BORDER_ON),
+                ))
+                .with_children(|dialog| {
+                    dialog.spawn((
+                        Text::new("Save"),
+                        TextFont::from_font_size(18.0),
+                        TextColor(Color::WHITE),
+                        SaveLoadDialogTitleText,
+                    ));
+                    dialog.spawn((
+                        Text::new("Save Name"),
+                        TextFont::from_font_size(14.0),
+                        TextColor(Color::srgba(0.9, 0.92, 0.97, 0.95)),
+                    ));
+                    dialog
+                        .spawn((
+                            Button,
+                            Node {
+                                width: percent(100.0),
+                                height: px(DIALOG_NAME_INPUT_HEIGHT_PX),
+                                align_items: AlignItems::Center,
+                                justify_content: JustifyContent::FlexStart,
+                                padding: UiRect::horizontal(px(8.0)),
+                                border: UiRect::all(px(2.0)),
+                                ..default()
+                            },
+                            BackgroundColor(BUTTON_BG_OFF),
+                            BorderColor::all(BUTTON_BORDER_OFF),
+                            SaveLoadDialogNameInputButton,
+                        ))
+                        .with_children(|button| {
+                            button.spawn((
+                                Text::new(""),
+                                TextFont::from_font_size(14.0),
+                                TextColor(Color::WHITE),
+                                SaveLoadDialogNameInputText,
+                            ));
+                        });
+                    dialog.spawn((
+                        Text::new(""),
+                        TextFont::from_font_size(13.0),
+                        TextColor(Color::srgba(0.90, 0.78, 0.52, 1.0)),
+                        SaveLoadDialogStatusText,
+                    ));
+                    dialog
+                        .spawn((
+                            Node {
+                                max_height: px(DIALOG_SLOT_LIST_MAX_HEIGHT_PX),
+                                flex_direction: FlexDirection::Column,
+                                row_gap: px(4.0),
+                                overflow: Overflow::clip_y(),
+                                ..default()
+                            },
+                            SaveLoadDialogSlotList,
+                        ))
+                        .with_children(|_| {});
+                    dialog
+                        .spawn((Node {
+                            justify_content: JustifyContent::FlexEnd,
+                            column_gap: px(8.0),
+                            ..default()
+                        },))
+                        .with_children(|actions| {
+                            actions
+                                .spawn((
+                                    Button,
+                                    Node {
+                                        width: px(96.0),
+                                        height: px(34.0),
+                                        align_items: AlignItems::Center,
+                                        justify_content: JustifyContent::Center,
+                                        border: UiRect::all(px(2.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(BUTTON_BG_OFF),
+                                    BorderColor::all(BUTTON_BORDER_OFF),
+                                    SaveLoadDialogCancelButton,
+                                ))
+                                .with_children(|button| {
+                                    button.spawn((
+                                        Text::new("Cancel"),
+                                        TextFont::from_font_size(14.0),
+                                        TextColor(Color::WHITE),
+                                    ));
+                                });
+                            actions
+                                .spawn((
+                                    Button,
+                                    Node {
+                                        width: px(96.0),
+                                        height: px(34.0),
+                                        align_items: AlignItems::Center,
+                                        justify_content: JustifyContent::Center,
+                                        border: UiRect::all(px(2.0)),
+                                        ..default()
+                                    },
+                                    BackgroundColor(BUTTON_BG_OFF),
+                                    BorderColor::all(BUTTON_BORDER_OFF),
+                                    SaveLoadDialogConfirmButton,
+                                ))
+                                .with_children(|button| {
+                                    button.spawn((
+                                        Text::new("Save"),
+                                        TextFont::from_font_size(14.0),
+                                        TextColor(Color::WHITE),
+                                        SaveLoadDialogConfirmButtonText,
+                                    ));
+                                });
+                        });
+                });
+        });
 }
 
 fn handle_world_tool_button_interaction(
@@ -354,6 +630,178 @@ fn handle_world_tool_button_interaction(
     for (interaction, button) in &mut interactions {
         if *interaction == Interaction::Pressed {
             select_world_tool(&mut interaction_state, Some(button.tool));
+        }
+    }
+}
+
+fn handle_save_load_open_button_interaction(
+    mut interactions: Query<
+        (&Interaction, &SaveLoadOpenButton),
+        (Changed<Interaction>, With<Button>),
+    >,
+    mut save_load_ui_state: ResMut<SaveLoadUiState>,
+) {
+    for (interaction, button) in &mut interactions {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        open_save_load_dialog(&mut save_load_ui_state, button.mode);
+    }
+}
+
+fn handle_save_load_name_input_button_interaction(
+    mut interactions: Query<
+        &Interaction,
+        (Changed<Interaction>, With<SaveLoadDialogNameInputButton>),
+    >,
+    mut save_load_ui_state: ResMut<SaveLoadUiState>,
+) {
+    if save_load_ui_state.mode != Some(SaveLoadDialogMode::Save) {
+        return;
+    }
+    for interaction in &mut interactions {
+        if *interaction == Interaction::Pressed {
+            save_load_ui_state.input_focused = true;
+        }
+    }
+}
+
+fn handle_save_load_dialog_buttons(
+    mut confirm_buttons: Query<
+        &Interaction,
+        (Changed<Interaction>, With<SaveLoadDialogConfirmButton>),
+    >,
+    mut cancel_buttons: Query<
+        &Interaction,
+        (Changed<Interaction>, With<SaveLoadDialogCancelButton>),
+    >,
+    mut save_load_ui_state: ResMut<SaveLoadUiState>,
+    mut save_writer: MessageWriter<SaveMapRequest>,
+    mut load_writer: MessageWriter<LoadMapRequest>,
+) {
+    for interaction in &mut cancel_buttons {
+        if *interaction == Interaction::Pressed {
+            close_save_load_dialog(&mut save_load_ui_state);
+            return;
+        }
+    }
+
+    for interaction in &mut confirm_buttons {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        match save_load_ui_state.mode {
+            Some(SaveLoadDialogMode::Save) => {
+                let slot_name = resolve_save_slot_name(&save_load_ui_state);
+                let Some(slot_name) = slot_name else {
+                    save_load_ui_state.status_message =
+                        "Enter a save name or choose an existing slot".to_string();
+                    return;
+                };
+                save_writer.write(SaveMapRequest { slot_name });
+                close_save_load_dialog(&mut save_load_ui_state);
+            }
+            Some(SaveLoadDialogMode::Load) => {
+                let Some(slot_name) = save_load_ui_state.selected_slot.clone() else {
+                    save_load_ui_state.status_message = "Select a save slot to load".to_string();
+                    return;
+                };
+                load_writer.write(LoadMapRequest { slot_name });
+                close_save_load_dialog(&mut save_load_ui_state);
+            }
+            None => {}
+        }
+    }
+}
+
+fn handle_save_load_slot_button_interaction(
+    mut interactions: Query<
+        (&Interaction, &SaveLoadSlotButton),
+        (Changed<Interaction>, With<Button>),
+    >,
+    mut save_load_ui_state: ResMut<SaveLoadUiState>,
+) {
+    for (interaction, button) in &mut interactions {
+        if *interaction != Interaction::Pressed {
+            continue;
+        }
+        save_load_ui_state.selected_slot = Some(button.slot_name.clone());
+        if matches!(save_load_ui_state.mode, Some(SaveLoadDialogMode::Save)) {
+            save_load_ui_state.input_name = button.slot_name.clone();
+            save_load_ui_state.input_focused = false;
+            save_load_ui_state.ime_preedit.clear();
+        } else {
+            save_load_ui_state.input_focused = false;
+        }
+        save_load_ui_state.status_message.clear();
+    }
+}
+
+fn handle_save_load_text_input(
+    mut keyboard_input_reader: MessageReader<KeyboardInput>,
+    mut ime_reader: MessageReader<Ime>,
+    mut save_load_ui_state: ResMut<SaveLoadUiState>,
+) {
+    let dialog_open = save_load_ui_state.mode.is_some();
+    let save_mode_focused =
+        save_load_ui_state.mode == Some(SaveLoadDialogMode::Save) && save_load_ui_state.input_focused;
+
+    for ime in ime_reader.read() {
+        if !save_mode_focused {
+            continue;
+        }
+        match ime {
+            Ime::Preedit { value, cursor, .. } if cursor.is_some() => {
+                save_load_ui_state.ime_preedit = value.clone();
+            }
+            Ime::Preedit { cursor, .. } if cursor.is_none() => {
+                save_load_ui_state.ime_preedit.clear();
+            }
+            Ime::Commit { value, .. } => {
+                append_printable_text(&mut save_load_ui_state.input_name, value);
+                save_load_ui_state.ime_preedit.clear();
+            }
+            _ => {}
+        }
+    }
+
+    for keyboard_input in keyboard_input_reader.read() {
+        if !keyboard_input.state.is_pressed() {
+            continue;
+        }
+        if !dialog_open {
+            continue;
+        }
+        if matches!(keyboard_input.logical_key, Key::Escape) {
+            close_save_load_dialog(&mut save_load_ui_state);
+            return;
+        }
+        if !save_mode_focused {
+            continue;
+        }
+        match (&keyboard_input.logical_key, &keyboard_input.text) {
+            (Key::Backspace, _) => {
+                save_load_ui_state.input_name.pop();
+                save_load_ui_state.ime_preedit.clear();
+            }
+            (_, Some(inserted_text)) => {
+                append_printable_text(&mut save_load_ui_state.input_name, inserted_text);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn sync_save_load_ime_state(
+    save_load_ui_state: Res<SaveLoadUiState>,
+    mut primary_window: Single<&mut Window, With<PrimaryWindow>>,
+) {
+    let enable_ime =
+        save_load_ui_state.mode == Some(SaveLoadDialogMode::Save) && save_load_ui_state.input_focused;
+    primary_window.ime_enabled = enable_ime;
+    if enable_ime {
+        if let Some(cursor) = primary_window.cursor_position() {
+            primary_window.ime_position = cursor;
         }
     }
 }
@@ -380,6 +828,186 @@ fn update_world_tool_button_visuals(
             BorderColor::all(BUTTON_BORDER_OFF)
         };
     }
+}
+
+fn update_save_load_open_button_visuals(
+    mut buttons: Query<
+        (
+            &Interaction,
+            &mut BackgroundColor,
+            &mut BorderColor,
+            &SaveLoadOpenButton,
+        ),
+        With<Button>,
+    >,
+    save_load_ui_state: Res<SaveLoadUiState>,
+) {
+    for (interaction, mut bg, mut border_color, button) in &mut buttons {
+        let selected = save_load_ui_state.mode == Some(button.mode);
+        *bg = match *interaction {
+            Interaction::Pressed => BUTTON_BG_PRESS.into(),
+            Interaction::Hovered => BUTTON_BG_HOVER.into(),
+            Interaction::None => toggle_button_bg(selected),
+        };
+        *border_color = if selected {
+            BorderColor::all(BUTTON_BORDER_ON)
+        } else {
+            BorderColor::all(BUTTON_BORDER_OFF)
+        };
+    }
+}
+
+fn update_save_load_name_input_button_visuals(
+    save_load_ui_state: Res<SaveLoadUiState>,
+    mut inputs: Query<
+        (&Interaction, &mut BackgroundColor, &mut BorderColor),
+        With<SaveLoadDialogNameInputButton>,
+    >,
+) {
+    for (interaction, mut bg, mut border_color) in &mut inputs {
+        let selected = save_load_ui_state.input_focused;
+        *bg = match *interaction {
+            Interaction::Pressed => BUTTON_BG_PRESS.into(),
+            Interaction::Hovered => BUTTON_BG_HOVER.into(),
+            Interaction::None => toggle_button_bg(selected),
+        };
+        *border_color = if selected {
+            BorderColor::all(BUTTON_BORDER_ON)
+        } else {
+            BorderColor::all(BUTTON_BORDER_OFF)
+        };
+    }
+}
+
+fn update_save_load_slot_button_visuals(
+    save_load_ui_state: Res<SaveLoadUiState>,
+    mut buttons: Query<
+        (
+            &Interaction,
+            &SaveLoadSlotButton,
+            &mut BackgroundColor,
+            &mut BorderColor,
+        ),
+        With<Button>,
+    >,
+) {
+    for (interaction, button, mut bg, mut border_color) in &mut buttons {
+        let selected = save_load_ui_state.selected_slot.as_deref() == Some(button.slot_name.as_str());
+        *bg = match *interaction {
+            Interaction::Pressed => BUTTON_BG_PRESS.into(),
+            Interaction::Hovered => BUTTON_BG_HOVER.into(),
+            Interaction::None => toggle_button_bg(selected),
+        };
+        *border_color = if selected {
+            BorderColor::all(BUTTON_BORDER_ON)
+        } else {
+            BorderColor::all(BUTTON_BORDER_OFF)
+        };
+    }
+}
+
+fn update_save_load_dialog(
+    mut commands: Commands,
+    mut root_node: Single<&mut Node, With<SaveLoadDialogRoot>>,
+    title_text_entity: Single<Entity, With<SaveLoadDialogTitleText>>,
+    name_input_text_entity: Single<Entity, With<SaveLoadDialogNameInputText>>,
+    status_text_entity: Single<Entity, With<SaveLoadDialogStatusText>>,
+    confirm_text_entity: Single<Entity, With<SaveLoadDialogConfirmButtonText>>,
+    slot_list_entity: Single<Entity, With<SaveLoadDialogSlotList>>,
+    mut text_query: Query<&mut Text>,
+    children_query: Query<&Children>,
+    save_load_ui_state: ResMut<SaveLoadUiState>,
+) {
+    let mut save_load_ui_state = save_load_ui_state;
+    let Some(mode) = save_load_ui_state.mode else {
+        root_node.display = Display::None;
+        return;
+    };
+
+    root_node.display = Display::Flex;
+    let mode_label = match mode {
+        SaveLoadDialogMode::Save => "Save",
+        SaveLoadDialogMode::Load => "Load",
+    };
+    let name_label = match mode {
+        SaveLoadDialogMode::Save => {
+            let mut value = if save_load_ui_state.input_name.is_empty() {
+                "Type save name".to_string()
+            } else {
+                save_load_ui_state.input_name.clone()
+            };
+            if !save_load_ui_state.ime_preedit.is_empty() {
+                value.push_str(&save_load_ui_state.ime_preedit);
+            }
+            value
+        }
+        SaveLoadDialogMode::Load => {
+            let selected = save_load_ui_state
+                .selected_slot
+                .as_deref()
+                .unwrap_or("(none)");
+            format!("Selected: {selected}")
+        }
+    };
+    let status_label = save_load_ui_state.status_message.clone();
+
+    if let Ok(mut title_text) = text_query.get_mut(*title_text_entity) {
+        title_text.0 = format!("{mode_label} World");
+    }
+    if let Ok(mut confirm_text) = text_query.get_mut(*confirm_text_entity) {
+        confirm_text.0 = mode_label.to_string();
+    }
+    if let Ok(mut name_text) = text_query.get_mut(*name_input_text_entity) {
+        name_text.0 = name_label;
+    }
+    if let Ok(mut status_text) = text_query.get_mut(*status_text_entity) {
+        status_text.0 = status_label;
+    }
+
+    if save_load_ui_state.refresh_requested {
+        match save_load::list_save_slots() {
+            Ok(slots) => {
+                save_load_ui_state.slots = slots;
+                save_load_ui_state.status_message.clear();
+            }
+            Err(error) => {
+                save_load_ui_state.slots.clear();
+                save_load_ui_state.status_message = error;
+            }
+        }
+        save_load_ui_state.refresh_requested = false;
+    }
+
+    clear_children_recursive(&mut commands, *slot_list_entity, &children_query);
+    commands.entity(*slot_list_entity).with_children(|parent| {
+        for slot_name in &save_load_ui_state.slots {
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: percent(100.0),
+                        height: px(DIALOG_SLOT_BUTTON_HEIGHT_PX),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::FlexStart,
+                        padding: UiRect::horizontal(px(8.0)),
+                        border: UiRect::all(px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_BG_OFF),
+                    BorderColor::all(BUTTON_BORDER_OFF),
+                    SaveLoadSlotButton {
+                        slot_name: slot_name.clone(),
+                    },
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        Text::new(slot_name.clone()),
+                        TextFont::from_font_size(13.0),
+                        TextColor(Color::WHITE),
+                    ));
+                });
+        }
+    });
 }
 
 fn update_world_tool_tooltip(
@@ -419,10 +1047,25 @@ fn handle_world_interactions(
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     ui_buttons: Query<&Interaction, With<Button>>,
     mut interaction_state: ResMut<WorldInteractionState>,
+    save_load_ui_state: Res<SaveLoadUiState>,
     mut particle_world: ResMut<ParticleWorld>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut object_world: ResMut<ObjectWorld>,
 ) {
+    if save_load_ui_state.mode.is_some() {
+        let selected_tool = interaction_state.selected_tool;
+        finalize_stone_stroke(
+            &mut interaction_state.stone_stroke,
+            selected_tool,
+            &mut particle_world,
+            &mut object_world,
+        );
+        interaction_state.last_drag_world = None;
+        interaction_state.last_water_spawn_cell = None;
+        interaction_state.last_granular_spawn_cell = None;
+        return;
+    }
+
     if keyboard.just_pressed(KeyCode::Digit1) || keyboard.just_pressed(KeyCode::Numpad1) {
         select_world_tool(&mut interaction_state, Some(WorldTool::WaterLiquid));
     } else if keyboard.just_pressed(KeyCode::Digit2) || keyboard.just_pressed(KeyCode::Numpad2) {
@@ -462,7 +1105,8 @@ fn handle_world_interactions(
             &mut object_world,
         );
         interaction_state.last_drag_world = None;
-        interaction_state.water_spawn_carry_m = 0.0;
+        interaction_state.last_water_spawn_cell = None;
+        interaction_state.last_granular_spawn_cell = None;
         return;
     }
 
@@ -472,27 +1116,40 @@ fn handle_world_interactions(
     let dt = time.delta_secs().max(1e-4);
     let stroke_velocity = (cursor_world - previous_world) / dt;
     let mut terrain_changed = false;
-    if selected_tool != Some(WorldTool::WaterLiquid) {
-        interaction_state.water_spawn_carry_m = 0.0;
-    }
 
     match selected_tool {
         Some(WorldTool::WaterLiquid) => {
+            interaction_state.last_granular_spawn_cell = None;
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
                 &mut particle_world,
                 &mut object_world,
             );
-            particle_world.spawn_water_particles_along_segment(
-                previous_world,
-                cursor_world,
-                TOOL_WATER_SPAWN_SPACING_M,
-                Vec2::ZERO,
-                &mut interaction_state.water_spawn_carry_m,
-            );
+            let mut spawn_cells = Vec::new();
+            let mut last_cell = interaction_state.last_water_spawn_cell;
+            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
+                let cell = world_to_cell(point);
+                if !cell_in_fixed_world(cell) {
+                    return;
+                }
+                if last_cell != Some(cell) {
+                    spawn_cells.push(cell);
+                    last_cell = Some(cell);
+                }
+            });
+            interaction_state.last_water_spawn_cell = last_cell;
+            if !spawn_cells.is_empty() {
+                let _ = particle_world.spawn_material_particles_from_cells(
+                    &spawn_cells,
+                    ParticleMaterial::WaterLiquid,
+                    Vec2::ZERO,
+                );
+            }
         }
         Some(tool) if tool.terrain_material().is_some() => {
+            interaction_state.last_water_spawn_cell = None;
+            interaction_state.last_granular_spawn_cell = None;
             let terrain_material = tool.terrain_material().unwrap_or(TerrainMaterial::Stone);
             interaction_state.stone_stroke.active = true;
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
@@ -509,27 +1166,31 @@ fn handle_world_interactions(
             );
         }
         Some(tool) if tool.is_granular() => {
+            interaction_state.last_water_spawn_cell = None;
             interaction_state.stone_stroke.active = true;
-            interaction_state.stone_stroke.candidate_cells.clear();
-            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                let cell = world_to_cell(point);
-                if !cell_in_fixed_world(cell) {
-                    return;
+            if let Some(material) = tool.material() {
+                let mut spawn_cells = Vec::new();
+                let mut last_cell = interaction_state.last_granular_spawn_cell;
+                stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
+                    let cell = world_to_cell(point);
+                    if !cell_in_fixed_world(cell) {
+                        return;
+                    }
+                    if last_cell != Some(cell) {
+                        spawn_cells.push(cell);
+                        last_cell = Some(cell);
+                    }
+                });
+                interaction_state.last_granular_spawn_cell = last_cell;
+                if !spawn_cells.is_empty() {
+                    let _ = particle_world
+                        .spawn_material_particles_from_cells(&spawn_cells, material, Vec2::ZERO);
                 }
-                interaction_state.stone_stroke.generated_cells.insert(cell);
-            });
-            let generated: Vec<_> = interaction_state
-                .stone_stroke
-                .generated_cells
-                .iter()
-                .copied()
-                .collect();
-            interaction_state
-                .stone_stroke
-                .candidate_cells
-                .extend(generated);
+            }
         }
         Some(WorldTool::Delete) => {
+            interaction_state.last_water_spawn_cell = None;
+            interaction_state.last_granular_spawn_cell = None;
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
@@ -552,13 +1213,14 @@ fn handle_world_interactions(
         }
         Some(_) => {}
         None => {
+            interaction_state.last_water_spawn_cell = None;
+            interaction_state.last_granular_spawn_cell = None;
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
                 &mut particle_world,
                 &mut object_world,
             );
-            interaction_state.water_spawn_carry_m = 0.0;
             let velocity_delta = stroke_velocity * DRAG_VELOCITY_GAIN;
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
                 particle_world.add_velocity_in_radius(
@@ -848,8 +1510,69 @@ fn toggle_button_bg(enabled: bool) -> BackgroundColor {
 fn select_world_tool(state: &mut WorldInteractionState, next_tool: Option<WorldTool>) {
     state.selected_tool = next_tool;
     state.last_drag_world = None;
-    state.water_spawn_carry_m = 0.0;
+    state.last_water_spawn_cell = None;
+    state.last_granular_spawn_cell = None;
     state.stone_stroke = StoneStrokeState::default();
+}
+
+fn open_save_load_dialog(state: &mut SaveLoadUiState, mode: SaveLoadDialogMode) {
+    state.mode = Some(mode);
+    state.status_message.clear();
+    state.refresh_requested = true;
+    state.ime_preedit.clear();
+    if matches!(mode, SaveLoadDialogMode::Save) {
+        state.input_name.clear();
+        state.input_focused = true;
+    } else {
+        state.input_focused = false;
+    }
+    state.selected_slot = None;
+}
+
+fn close_save_load_dialog(state: &mut SaveLoadUiState) {
+    state.mode = None;
+    state.input_focused = false;
+    state.ime_preedit.clear();
+    state.status_message.clear();
+    state.selected_slot = None;
+}
+
+fn resolve_save_slot_name(state: &SaveLoadUiState) -> Option<String> {
+    let typed = state.input_name.trim();
+    if !typed.is_empty() {
+        return Some(typed.to_string());
+    }
+    state.selected_slot.clone()
+}
+
+fn append_printable_text(dst: &mut String, text: &str) {
+    for chr in text.chars() {
+        if is_printable_char(chr) {
+            dst.push(chr);
+        }
+    }
+}
+
+fn is_printable_char(chr: char) -> bool {
+    let is_in_private_use_area = ('\u{e000}'..='\u{f8ff}').contains(&chr)
+        || ('\u{f0000}'..='\u{ffffd}').contains(&chr)
+        || ('\u{100000}'..='\u{10fffd}').contains(&chr);
+    !is_in_private_use_area && !chr.is_ascii_control()
+}
+
+fn clear_children_recursive(
+    commands: &mut Commands,
+    entity: Entity,
+    children_query: &Query<&Children>,
+) {
+    let Ok(children) = children_query.get(entity) else {
+        return;
+    };
+    let children: Vec<Entity> = children.iter().collect();
+    for child in children {
+        clear_children_recursive(commands, child, children_query);
+        commands.entity(child).despawn();
+    }
 }
 
 impl WorldToolIconSet {
