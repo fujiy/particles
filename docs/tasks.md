@@ -5,6 +5,11 @@
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] Tracyを `bevy/trace + LogPlugin(custom_layer)` 構成へ変更し、`bevy/trace_tracy` 依存を回避
+- [x] Tracy実行時のみ `dynamic_linking` を無効化できるfeature構成へ変更（通常実行は高速リンクを維持）
+- [x] Tracy実行時の起動不安定対策として、実行feature構成を見直し（通常実行とTracy実行の起動パスを分離）
+- [x] Bevy の Tracy プロファイリング設定を追加（`tracy` feature）し、物理ステップ各処理を `physics::*` スパンで計測可能化
+- [x] README に Tracy 実行手順を追加（通常実行 / `cargo watch` 監視実行）
 - [x] `SimulationPlugin` を廃止し、`main.rs` で `PhysicsPlugin` / `InterfacePlugin` / `OverlayPlugin` / `RenderPlugin` / `CameraControllerPlugin` を個別有効化
 - [x] `src/simulation/` を `src/physics/` へ改名し、物理本体モジュールの名前空間を `physics::*` に統一
 - [x] ディレクトリ構造を再編（`src/simulation` / `src/overlay` / `src/interface` / `src/render`）

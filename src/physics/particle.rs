@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use bevy::log::tracing;
 use bevy::prelude::*;
 
 use super::object::{
@@ -298,8 +299,10 @@ impl ParticleWorld {
         object_field: &ObjectPhysicsField,
         object_world: &mut ObjectWorld,
     ) {
+        let _span = tracing::info_span!("physics::step_substeps").entered();
         let dt_sub = FIXED_DT / SUBSTEPS as f32;
-        for _ in 0..SUBSTEPS {
+        for substep in 0..SUBSTEPS {
+            let _substep_span = tracing::info_span!("physics::substep", substep).entered();
             self.step_single_substep(terrain, object_field, object_world, dt_sub);
         }
     }
@@ -311,28 +314,54 @@ impl ParticleWorld {
         object_world: &mut ObjectWorld,
         dt_sub: f32,
     ) {
-        object_world.clear_reaction_impulses();
-        for i in 0..self.particle_count() {
-            self.prev_pos[i] = self.pos[i];
-            self.vel[i] += GRAVITY_MPS2 * dt_sub;
-            self.pos[i] += self.vel[i] * dt_sub;
+        {
+            let _span = tracing::info_span!("physics::clear_reaction_impulses").entered();
+            object_world.clear_reaction_impulses();
+        }
+        {
+            let _span = tracing::info_span!("physics::predict_positions").entered();
+            for i in 0..self.particle_count() {
+                self.prev_pos[i] = self.pos[i];
+                self.vel[i] += GRAVITY_MPS2 * dt_sub;
+                self.pos[i] += self.vel[i] * dt_sub;
+            }
         }
 
-        self.neighbor_grid.rebuild(&self.pos);
-        for _ in 0..SOLVER_ITERS {
+        {
+            let _span = tracing::info_span!("physics::rebuild_neighbor_grid").entered();
+            self.neighbor_grid.rebuild(&self.pos);
+        }
+        for iter in 0..SOLVER_ITERS {
+            let _iter_span =
+                tracing::info_span!("physics::solve_density_constraints", iter).entered();
             self.solve_density_constraints(terrain, object_field, object_world, dt_sub);
         }
-        self.solve_shape_matching_constraints(object_world);
-
-        for i in 0..self.particle_count() {
-            self.vel[i] = (self.pos[i] - self.prev_pos[i]) / dt_sub;
-            self.vel[i] = self.vel[i].clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
+        {
+            let _span = tracing::info_span!("physics::shape_matching").entered();
+            self.solve_shape_matching_constraints(object_world);
         }
 
-        self.apply_xsph_viscosity();
-        self.apply_object_reaction_impulses(object_world);
-        for vel in &mut self.vel {
-            *vel = vel.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
+        {
+            let _span = tracing::info_span!("physics::update_velocity").entered();
+            for i in 0..self.particle_count() {
+                self.vel[i] = (self.pos[i] - self.prev_pos[i]) / dt_sub;
+                self.vel[i] = self.vel[i].clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
+            }
+        }
+
+        {
+            let _span = tracing::info_span!("physics::xsph_viscosity").entered();
+            self.apply_xsph_viscosity();
+        }
+        {
+            let _span = tracing::info_span!("physics::apply_object_reaction").entered();
+            self.apply_object_reaction_impulses(object_world);
+        }
+        {
+            let _span = tracing::info_span!("physics::final_velocity_clamp").entered();
+            for vel in &mut self.vel {
+                *vel = vel.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
+            }
         }
     }
 
@@ -343,135 +372,146 @@ impl ParticleWorld {
         object_world: &mut ObjectWorld,
         dt_sub: f32,
     ) {
+        let _span = tracing::info_span!("physics::density_constraint_pass").entered();
         let mut neighbors = Vec::new();
         let h_ww = WATER_KERNEL_RADIUS_M;
         let inv_dt = 1.0 / dt_sub.max(1e-6);
 
-        for i in 0..self.particle_count() {
-            if !is_water_particle(self.material[i]) {
-                self.density[i] = REST_DENSITY;
-                self.lambda[i] = 0.0;
-                continue;
-            }
-            self.neighbor_grid.gather(self.pos[i], &mut neighbors);
-
-            let mut rho = 0.0;
-            let mut grad_i = Vec2::ZERO;
-            let mut grad_sum_sq = 0.0;
-
-            for &j in &neighbors {
-                if !is_water_particle(self.material[j]) {
+        {
+            let _span = tracing::info_span!("physics::density_lambda").entered();
+            for i in 0..self.particle_count() {
+                if !is_water_particle(self.material[i]) {
+                    self.density[i] = REST_DENSITY;
+                    self.lambda[i] = 0.0;
                     continue;
                 }
-                let r = self.pos[i] - self.pos[j];
-                let r2 = r.length_squared();
-                if r2 >= h_ww * h_ww {
-                    continue;
-                }
-
-                rho += self.mass[j] * kernel_poly6(r2, h_ww);
-
-                if i == j {
-                    continue;
-                }
-
-                let grad = (self.mass[j] / REST_DENSITY) * kernel_spiky_grad(r, h_ww);
-                grad_sum_sq += grad.length_squared();
-                grad_i += grad;
-            }
-
-            grad_sum_sq += grad_i.length_squared();
-            let c_i = rho / REST_DENSITY - 1.0;
-
-            self.density[i] = rho;
-            self.lambda[i] = -c_i / (grad_sum_sq + EPSILON_LAMBDA);
-        }
-
-        for i in 0..self.particle_count() {
-            let is_water = is_water_particle(self.material[i]);
-            if is_water {
                 self.neighbor_grid.gather(self.pos[i], &mut neighbors);
-            } else {
-                neighbors.clear();
-            }
 
-            let mut delta = Vec2::ZERO;
-            let mut boundary_push = Vec2::ZERO;
-            if is_water {
+                let mut rho = 0.0;
+                let mut grad_i = Vec2::ZERO;
+                let mut grad_sum_sq = 0.0;
+
                 for &j in &neighbors {
-                    if i == j || !is_water_particle(self.material[j]) {
+                    if !is_water_particle(self.material[j]) {
                         continue;
                     }
                     let r = self.pos[i] - self.pos[j];
-                    if r.length_squared() >= h_ww * h_ww {
+                    let r2 = r.length_squared();
+                    if r2 >= h_ww * h_ww {
                         continue;
                     }
-                    delta += (self.lambda[i] + self.lambda[j]) * kernel_spiky_grad(r, h_ww);
-                }
-            }
 
-            if let Some((signed_distance, normal)) =
-                terrain.sample_signed_distance_and_normal(self.pos[i])
-            {
-                let push_radius = if is_water {
-                    TERRAIN_SDF_PUSH_RADIUS_M
-                } else {
-                    STONE_PARTICLE_RADIUS_M
-                };
-                let penetration = push_radius - signed_distance;
-                if penetration > 0.0 {
-                    boundary_push += normal * penetration * TERRAIN_REPULSION_STIFFNESS;
+                    rho += self.mass[j] * kernel_poly6(r2, h_ww);
+
+                    if i == j {
+                        continue;
+                    }
+
+                    let grad = (self.mass[j] / REST_DENSITY) * kernel_spiky_grad(r, h_ww);
+                    grad_sum_sq += grad.length_squared();
+                    grad_i += grad;
                 }
+
+                grad_sum_sq += grad_i.length_squared();
+                let c_i = rho / REST_DENSITY - 1.0;
+
+                self.density[i] = rho;
+                self.lambda[i] = -c_i / (grad_sum_sq + EPSILON_LAMBDA);
             }
-            let mut object_push = Vec2::ZERO;
-            let self_object = object_world.object_of_particle(i);
-            if is_water || self_object.is_some() {
-                object_field
-                    .gather_candidate_object_ids(self.pos[i], &mut self.object_contacts_work);
-                let push_radius = if is_water {
+        }
+
+        {
+            let _span = tracing::info_span!("physics::compute_delta").entered();
+            for i in 0..self.particle_count() {
+                let is_water = is_water_particle(self.material[i]);
+                if is_water {
+                    self.neighbor_grid.gather(self.pos[i], &mut neighbors);
+                } else {
+                    neighbors.clear();
+                }
+
+                let mut delta = Vec2::ZERO;
+                let mut boundary_push = Vec2::ZERO;
+                if is_water {
+                    for &j in &neighbors {
+                        if i == j || !is_water_particle(self.material[j]) {
+                            continue;
+                        }
+                        let r = self.pos[i] - self.pos[j];
+                        if r.length_squared() >= h_ww * h_ww {
+                            continue;
+                        }
+                        delta += (self.lambda[i] + self.lambda[j]) * kernel_spiky_grad(r, h_ww);
+                    }
+                }
+
+                if let Some((signed_distance, normal)) =
+                    terrain.sample_signed_distance_and_normal(self.pos[i])
+                {
+                    let push_radius = if is_water {
+                        TERRAIN_SDF_PUSH_RADIUS_M
+                    } else {
+                        STONE_PARTICLE_RADIUS_M
+                    };
+                    let penetration = push_radius - signed_distance;
+                    if penetration > 0.0 {
+                        boundary_push += normal * penetration * TERRAIN_REPULSION_STIFFNESS;
+                    }
+                }
+                let mut object_push = Vec2::ZERO;
+                let self_object = object_world.object_of_particle(i);
+                if is_water || self_object.is_some() {
+                    object_field
+                        .gather_candidate_object_ids(self.pos[i], &mut self.object_contacts_work);
+                    let push_radius = if is_water {
+                        OBJECT_BOUNDARY_PUSH_RADIUS_M
+                    } else {
+                        STONE_PARTICLE_RADIUS_M
+                    };
+
+                    for &object_id in &self.object_contacts_work {
+                        if self_object == Some(object_id) {
+                            continue;
+                        }
+                        let Some(sample) = object_world.evaluate_object_sdf(object_id, self.pos[i])
+                        else {
+                            continue;
+                        };
+                        let penetration = push_radius - sample.distance_m;
+                        if penetration <= 0.0 {
+                            continue;
+                        }
+                        let push = sample.normal_world * penetration * OBJECT_REPULSION_STIFFNESS;
+                        object_push += push;
+                        let reaction_impulse = -(self.mass[i] * push) * inv_dt;
+                        object_world.accumulate_reaction_impulse(object_id, reaction_impulse);
+                    }
+                }
+                let max_push = if is_water {
                     OBJECT_BOUNDARY_PUSH_RADIUS_M
                 } else {
                     STONE_PARTICLE_RADIUS_M
                 };
+                object_push = object_push.clamp_length_max(max_push);
 
-                for &object_id in &self.object_contacts_work {
-                    if self_object == Some(object_id) {
-                        continue;
-                    }
-                    let Some(sample) = object_world.evaluate_object_sdf(object_id, self.pos[i])
-                    else {
-                        continue;
-                    };
-                    let penetration = push_radius - sample.distance_m;
-                    if penetration <= 0.0 {
-                        continue;
-                    }
-                    let push = sample.normal_world * penetration * OBJECT_REPULSION_STIFFNESS;
-                    object_push += push;
-                    let reaction_impulse = -(self.mass[i] * push) * inv_dt;
-                    object_world.accumulate_reaction_impulse(object_id, reaction_impulse);
-                }
+                self.delta_pos[i] = if is_water {
+                    delta / REST_DENSITY + boundary_push + object_push
+                } else {
+                    boundary_push + object_push
+                };
             }
-            let max_push = if is_water {
-                OBJECT_BOUNDARY_PUSH_RADIUS_M
-            } else {
-                STONE_PARTICLE_RADIUS_M
-            };
-            object_push = object_push.clamp_length_max(max_push);
-
-            self.delta_pos[i] = if is_water {
-                delta / REST_DENSITY + boundary_push + object_push
-            } else {
-                boundary_push + object_push
-            };
         }
 
-        for i in 0..self.particle_count() {
-            self.pos[i] += self.delta_pos[i];
+        {
+            let _span = tracing::info_span!("physics::apply_delta").entered();
+            for i in 0..self.particle_count() {
+                self.pos[i] += self.delta_pos[i];
+            }
         }
     }
 
     fn apply_xsph_viscosity(&mut self) {
+        let _span = tracing::info_span!("physics::xsph_pass").entered();
         let mut neighbors = Vec::new();
         self.viscosity_work.clone_from(&self.vel);
 
@@ -498,6 +538,7 @@ impl ParticleWorld {
     }
 
     fn apply_object_reaction_impulses(&mut self, object_world: &ObjectWorld) {
+        let _span = tracing::info_span!("physics::object_reaction_pass").entered();
         for object in object_world.objects() {
             let impulse = object_world.reaction_impulse_of(object.id);
             if impulse.length_squared() <= 1e-12 {
@@ -521,6 +562,7 @@ impl ParticleWorld {
     }
 
     fn solve_shape_matching_constraints(&mut self, object_world: &mut ObjectWorld) {
+        let _span = tracing::info_span!("physics::shape_matching_pass").entered();
         for object in object_world.objects_mut() {
             if object.particle_indices.is_empty() || object.rest_local.is_empty() {
                 continue;

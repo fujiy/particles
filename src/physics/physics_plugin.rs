@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use bevy::log::tracing;
 use bevy::prelude::*;
 
 use super::object::{ObjectPhysicsField, ObjectWorld};
@@ -58,18 +59,34 @@ fn step_water_particles(
     mut object_field: ResMut<ObjectPhysicsField>,
     mut perf_metrics: ResMut<SimulationPerfMetrics>,
 ) {
+    let _step_span = tracing::info_span!("physics::fixed_step").entered();
     let running = sim_state.running;
-    object_world.update_physics_field(
-        particle_world.positions(),
-        particle_world.masses(),
-        &mut object_field,
-    );
+    {
+        let _span = tracing::info_span!("physics::object_field_update").entered();
+        object_world.update_physics_field(
+            particle_world.positions(),
+            particle_world.masses(),
+            &mut object_field,
+        );
+    }
     if running {
-        terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+        {
+            let _span = tracing::info_span!("physics::terrain_rebuild_if_dirty").entered();
+            terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+        }
         let start = Instant::now();
-        particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, running);
+        {
+            let _span = tracing::info_span!("physics::particle_step").entered();
+            particle_world.step_if_running(
+                &terrain_world,
+                &object_field,
+                &mut object_world,
+                running,
+            );
+        }
         perf_metrics.physics_time_this_frame_secs += start.elapsed().as_secs_f64();
     } else {
+        let _span = tracing::info_span!("physics::particle_step").entered();
         particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, running);
     }
 }

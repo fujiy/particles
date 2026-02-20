@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use bevy::log::tracing;
 use bevy::prelude::*;
 
 use super::particle::PARTICLE_RADIUS_M;
@@ -257,6 +258,7 @@ impl ObjectPhysicsField {
     }
 
     fn rebuild_broadphase(&mut self, objects: &[ObjectData]) {
+        let _span = tracing::info_span!("physics::object_rebuild_broadphase").entered();
         for bucket in &mut self.broadphase_cells {
             bucket.clear();
         }
@@ -290,6 +292,7 @@ impl ObjectPhysicsField {
     }
 
     fn reproject_dirty_objects(&mut self, objects: &[ObjectData], dirty_ids: &HashSet<ObjectId>) {
+        let _span = tracing::info_span!("physics::object_reproject_dirty").entered();
         if dirty_ids.is_empty() {
             return;
         }
@@ -585,56 +588,79 @@ impl ObjectWorld {
         particle_mass: &[f32],
         field: &mut ObjectPhysicsField,
     ) {
+        let _span = tracing::info_span!("physics::update_object_physics_field").entered();
         self.clear_reaction_impulses();
-        self.rebuild_object_index_map();
-        self.rebuild_particle_owner_map(particle_pos.len());
+        {
+            let _span = tracing::info_span!("physics::object_rebuild_index").entered();
+            self.rebuild_object_index_map();
+        }
+        {
+            let _span = tracing::info_span!("physics::object_rebuild_owner_map").entered();
+            self.rebuild_particle_owner_map(particle_pos.len());
+        }
         let mut dirty_ids = HashSet::new();
-        let previous_ids = field.tracked_object_ids();
-        for object in &mut self.objects {
-            let Some((center, theta, mass_sum, aabb)) =
-                compute_object_pose_and_aabb(object, particle_pos, particle_mass)
-            else {
-                continue;
-            };
-            object.mass_sum = mass_sum;
+        let previous_ids = {
+            let _span = tracing::info_span!("physics::object_tracked_ids").entered();
+            field.tracked_object_ids()
+        };
+        {
+            let _span = tracing::info_span!("physics::object_pose_update").entered();
+            for object in &mut self.objects {
+                let Some((center, theta, mass_sum, aabb)) =
+                    compute_object_pose_and_aabb(object, particle_pos, particle_mass)
+                else {
+                    continue;
+                };
+                object.mass_sum = mass_sum;
 
-            if !object.pose_initialized {
+                if !object.pose_initialized {
+                    object.pose_center = center;
+                    object.pose_theta = theta;
+                    object.prev_pose_center = center;
+                    object.prev_pose_theta = theta;
+                    object.aabb_world = aabb;
+                    object.prev_aabb_world = aabb;
+                    object.pose_initialized = true;
+                    dirty_ids.insert(object.id);
+                    continue;
+                }
+
+                object.prev_pose_center = object.pose_center;
+                object.prev_pose_theta = object.pose_theta;
+                object.prev_aabb_world = object.aabb_world;
                 object.pose_center = center;
                 object.pose_theta = theta;
-                object.prev_pose_center = center;
-                object.prev_pose_theta = theta;
                 object.aabb_world = aabb;
-                object.prev_aabb_world = aabb;
-                object.pose_initialized = true;
-                dirty_ids.insert(object.id);
-                continue;
-            }
-
-            object.prev_pose_center = object.pose_center;
-            object.prev_pose_theta = object.pose_theta;
-            object.prev_aabb_world = object.aabb_world;
-            object.pose_center = center;
-            object.pose_theta = theta;
-            object.aabb_world = aabb;
-            let moved = object.pose_center.distance(object.prev_pose_center) > 1e-4
-                || shortest_angle_delta(object.pose_theta, object.prev_pose_theta).abs() > 1e-4;
-            if moved || object.physics_dirty {
-                dirty_ids.insert(object.id);
+                let moved = object.pose_center.distance(object.prev_pose_center) > 1e-4
+                    || shortest_angle_delta(object.pose_theta, object.prev_pose_theta).abs() > 1e-4;
+                if moved || object.physics_dirty {
+                    dirty_ids.insert(object.id);
+                }
             }
         }
 
         let current_ids: HashSet<ObjectId> = self.objects.iter().map(|object| object.id).collect();
         let has_removed_object = previous_ids.iter().any(|id| !current_ids.contains(id));
         if has_removed_object {
+            let _span = tracing::info_span!("physics::object_field_clear_for_removed").entered();
             field.clear();
             dirty_ids.extend(current_ids.iter().copied());
         }
 
-        field.rebuild_broadphase(&self.objects);
-        field.reproject_dirty_objects(&self.objects, &dirty_ids);
-        for object in &mut self.objects {
-            if dirty_ids.contains(&object.id) {
-                object.physics_dirty = false;
+        {
+            let _span = tracing::info_span!("physics::object_field_broadphase").entered();
+            field.rebuild_broadphase(&self.objects);
+        }
+        {
+            let _span = tracing::info_span!("physics::object_field_reproject").entered();
+            field.reproject_dirty_objects(&self.objects, &dirty_ids);
+        }
+        {
+            let _span = tracing::info_span!("physics::object_clear_dirty_flags").entered();
+            for object in &mut self.objects {
+                if dirty_ids.contains(&object.id) {
+                    object.physics_dirty = false;
+                }
             }
         }
     }
