@@ -9,7 +9,9 @@ use std::time::Instant;
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
-use object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectData, ObjectWorld};
+use object::{
+    OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectData, ObjectPhysicsField, ObjectWorld,
+};
 use particle::{
     PARTICLE_RADIUS_M, PARTICLE_SPACING_M, PARTICLE_SPEED_LIMIT_MPS, ParticleWorld,
     TERRAIN_BOUNDARY_RADIUS_M, WATER_KERNEL_RADIUS_M, nominal_particle_draw_radius_m,
@@ -57,6 +59,7 @@ impl Plugin for SimulationPlugin {
         app.init_resource::<TerrainWorld>()
             .init_resource::<ParticleWorld>()
             .init_resource::<ObjectWorld>()
+            .init_resource::<ObjectPhysicsField>()
             .init_resource::<SimulationState>()
             .init_resource::<DebugOverlayState>()
             .init_resource::<GridOverlayState>()
@@ -194,16 +197,22 @@ fn step_water_particles(
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
     mut object_world: ResMut<ObjectWorld>,
+    mut object_field: ResMut<ObjectPhysicsField>,
     mut perf_metrics: ResMut<SimulationPerfMetrics>,
 ) {
     let running = sim_state.running;
+    object_world.update_physics_field(
+        particle_world.positions(),
+        particle_world.masses(),
+        &mut object_field,
+    );
     if running {
         terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let start = Instant::now();
-        particle_world.step_if_running(&terrain_world, &mut object_world, running);
+        particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, running);
         perf_metrics.physics_time_this_frame_secs += start.elapsed().as_secs_f64();
     } else {
-        particle_world.step_if_running(&terrain_world, &mut object_world, running);
+        particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, running);
     }
 }
 
@@ -227,6 +236,7 @@ fn apply_sim_reset(
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
     mut object_world: ResMut<ObjectWorld>,
+    mut object_field: ResMut<ObjectPhysicsField>,
 ) {
     if reset_reader.read().next().is_none() {
         return;
@@ -236,6 +246,7 @@ fn apply_sim_reset(
     terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
     particle_world.reset_to_initial();
     object_world.clear();
+    object_field.clear();
     sim_state.running = false;
 }
 

@@ -2,7 +2,9 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-use super::object::ObjectWorld;
+use super::object::{
+    OBJECT_BOUNDARY_PUSH_RADIUS_M, OBJECT_REPULSION_STIFFNESS, ObjectPhysicsField, ObjectWorld,
+};
 use super::terrain::{CELL_SIZE_M, TerrainWorld, cell_to_world_center};
 
 pub const GRAVITY_MPS2: Vec2 = Vec2::new(0.0, -9.81);
@@ -278,24 +280,31 @@ impl ParticleWorld {
     pub fn step_if_running(
         &mut self,
         terrain: &TerrainWorld,
+        object_field: &ObjectPhysicsField,
         object_world: &mut ObjectWorld,
         running: bool,
     ) {
         if running {
-            self.step_substeps(terrain, object_world);
+            self.step_substeps(terrain, object_field, object_world);
         }
     }
 
-    pub fn step_substeps(&mut self, terrain: &TerrainWorld, object_world: &mut ObjectWorld) {
+    pub fn step_substeps(
+        &mut self,
+        terrain: &TerrainWorld,
+        object_field: &ObjectPhysicsField,
+        object_world: &mut ObjectWorld,
+    ) {
         let dt_sub = FIXED_DT / SUBSTEPS as f32;
         for _ in 0..SUBSTEPS {
-            self.step_single_substep(terrain, object_world, dt_sub);
+            self.step_single_substep(terrain, object_field, object_world, dt_sub);
         }
     }
 
     fn step_single_substep(
         &mut self,
         terrain: &TerrainWorld,
+        object_field: &ObjectPhysicsField,
         object_world: &mut ObjectWorld,
         dt_sub: f32,
     ) {
@@ -307,7 +316,7 @@ impl ParticleWorld {
 
         self.neighbor_grid.rebuild(&self.pos);
         for _ in 0..SOLVER_ITERS {
-            self.solve_density_constraints(terrain);
+            self.solve_density_constraints(terrain, object_field, object_world, dt_sub);
         }
         self.solve_shape_matching_constraints(object_world);
 
@@ -322,9 +331,16 @@ impl ParticleWorld {
         }
     }
 
-    fn solve_density_constraints(&mut self, terrain: &TerrainWorld) {
+    fn solve_density_constraints(
+        &mut self,
+        terrain: &TerrainWorld,
+        object_field: &ObjectPhysicsField,
+        object_world: &mut ObjectWorld,
+        dt_sub: f32,
+    ) {
         let mut neighbors = Vec::new();
         let h_ww = WATER_KERNEL_RADIUS_M;
+        let inv_dt = 1.0 / dt_sub.max(1e-6);
 
         for i in 0..self.particle_count() {
             if !is_water_particle(self.material[i]) {
@@ -402,11 +418,31 @@ impl ParticleWorld {
                     boundary_push += normal * penetration * TERRAIN_REPULSION_STIFFNESS;
                 }
             }
+            let mut object_push = Vec2::ZERO;
+            let mut pushed_object_id = None;
+            if is_water {
+                if let Some((signed_distance, normal, object_id)) =
+                    object_field.sample_signed_distance_and_normal(self.pos[i])
+                {
+                    let penetration = OBJECT_BOUNDARY_PUSH_RADIUS_M - signed_distance;
+                    if penetration > 0.0 {
+                        object_push = normal * penetration * OBJECT_REPULSION_STIFFNESS;
+                        pushed_object_id = Some(object_id);
+                    }
+                }
+            }
+
             self.delta_pos[i] = if is_water {
-                delta / REST_DENSITY + boundary_push
+                delta / REST_DENSITY + boundary_push + object_push
             } else {
                 boundary_push
             };
+            if let Some(object_id) = pushed_object_id {
+                if object_push.length_squared() > 0.0 {
+                    let reaction_impulse = -(self.mass[i] * object_push) * inv_dt;
+                    object_world.accumulate_reaction_impulse(object_id, reaction_impulse);
+                }
+            }
         }
 
         for i in 0..self.particle_count() {
@@ -584,11 +620,12 @@ mod tests {
         terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let mut particles = ParticleWorld::default();
         let mut object_world = ObjectWorld::default();
+        let object_field = ObjectPhysicsField::default();
         let before_avg_y = particles.positions().iter().map(|p| p.y).sum::<f32>()
             / particles.positions().len() as f32;
 
         for _ in 0..10 {
-            particles.step_if_running(&terrain, &mut object_world, true);
+            particles.step_if_running(&terrain, &object_field, &mut object_world, true);
         }
         let after_avg_y = particles.positions().iter().map(|p| p.y).sum::<f32>()
             / particles.positions().len() as f32;
@@ -619,10 +656,11 @@ mod tests {
         without_terrain.material = with_terrain.material.clone();
         without_terrain.resize_work_buffers();
         let mut object_world = ObjectWorld::default();
+        let object_field = ObjectPhysicsField::default();
 
         for _ in 0..12 {
-            with_terrain.step_if_running(&terrain_static, &mut object_world, true);
-            without_terrain.step_if_running(&terrain_empty, &mut object_world, true);
+            with_terrain.step_if_running(&terrain_static, &object_field, &mut object_world, true);
+            without_terrain.step_if_running(&terrain_empty, &object_field, &mut object_world, true);
         }
 
         let y_with = with_terrain.pos[0].y;
@@ -646,9 +684,10 @@ mod tests {
         particles.material = vec![ParticleMaterial::Water];
         particles.resize_work_buffers();
         let mut object_world = ObjectWorld::default();
+        let object_field = ObjectPhysicsField::default();
 
         for _ in 0..12 {
-            particles.step_if_running(&terrain, &mut object_world, true);
+            particles.step_if_running(&terrain, &object_field, &mut object_world, true);
         }
 
         let p = particles.pos[0];
@@ -666,9 +705,10 @@ mod tests {
         terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let mut particles = ParticleWorld::default();
         let mut object_world = ObjectWorld::default();
+        let object_field = ObjectPhysicsField::default();
         let before = particles.pos.clone();
 
-        particles.step_if_running(&terrain, &mut object_world, false);
+        particles.step_if_running(&terrain, &object_field, &mut object_world, false);
 
         assert_eq!(before, particles.pos);
     }
@@ -680,10 +720,11 @@ mod tests {
         terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let mut particles = ParticleWorld::default();
         let mut object_world = ObjectWorld::default();
+        let object_field = ObjectPhysicsField::default();
         let initial_pos = particles.pos.clone();
         let initial_vel = particles.vel.clone();
 
-        particles.step_if_running(&terrain, &mut object_world, true);
+        particles.step_if_running(&terrain, &object_field, &mut object_world, true);
         particles.reset_to_initial();
 
         assert_eq!(particles.pos, initial_pos);
@@ -706,9 +747,10 @@ mod tests {
         particles.prev_pos.clone_from(&particles.pos);
         particles.vel.fill(Vec2::ZERO);
         let mut object_world = ObjectWorld::default();
+        let object_field = ObjectPhysicsField::default();
 
         for _ in 0..30 {
-            particles.step_if_running(&terrain, &mut object_world, true);
+            particles.step_if_running(&terrain, &object_field, &mut object_world, true);
         }
 
         for pos in &particles.pos {
@@ -747,15 +789,67 @@ mod tests {
             OBJECT_SHAPE_STIFFNESS_ALPHA,
             OBJECT_SHAPE_ITERS,
         );
+        let object_field = ObjectPhysicsField::default();
 
         for _ in 0..30 {
-            particles.step_if_running(&terrain, &mut objects, true);
+            particles.step_if_running(&terrain, &object_field, &mut objects, true);
         }
 
         let span = particles.pos[2].x - particles.pos[0].x;
         assert!(
             (span - initial_span).abs() < 0.05,
             "shape matching drifted too much: initial={initial_span}, current={span}"
+        );
+    }
+
+    #[test]
+    fn object_sdf_push_accumulates_reaction_impulse() {
+        let terrain = TerrainWorld::default();
+        let mut particles = ParticleWorld::default();
+        particles.pos.clear();
+        particles.prev_pos.clear();
+        particles.vel.clear();
+        particles.mass.clear();
+        particles.material.clear();
+        particles.density.clear();
+        particles.lambda.clear();
+        particles.delta_pos.clear();
+        particles.viscosity_work.clear();
+        particles.resize_work_buffers();
+
+        let stone_cell = IVec2::new(0, 6);
+        let stone_indices = particles.spawn_stone_particles_from_cells(&[stone_cell], Vec2::ZERO);
+        let water_pos = cell_to_world_center(stone_cell);
+        particles.pos.push(water_pos);
+        particles.prev_pos.push(water_pos);
+        particles.vel.push(Vec2::ZERO);
+        particles.mass.push(default_particle_mass());
+        particles.material.push(ParticleMaterial::Water);
+        particles.resize_work_buffers();
+
+        let mut object_world = ObjectWorld::default();
+        let object_id = object_world
+            .create_object(
+                stone_indices,
+                particles.positions(),
+                particles.masses(),
+                OBJECT_SHAPE_STIFFNESS_ALPHA,
+                OBJECT_SHAPE_ITERS,
+            )
+            .expect("object should be created");
+        let mut object_field = ObjectPhysicsField::default();
+        object_world.update_physics_field(
+            particles.positions(),
+            particles.masses(),
+            &mut object_field,
+        );
+
+        particles.step_if_running(&terrain, &object_field, &mut object_world, true);
+
+        let impulse = object_world.reaction_impulse_of(object_id);
+        assert!(
+            impulse.length_squared() > 0.0,
+            "expected non-zero reaction impulse from fluid/object push"
         );
     }
 }
