@@ -1,10 +1,18 @@
 # Tasks
 
 ## Todo
-- [ ] (No open tasks)
+- [ ] Tracyで前後比較を実施し、`density_constraint_pass` の短縮率を記録
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] `physics::compute_delta` を自前並列化（1粒子1書き込み + ワークバッファ方式）
+- [x] `density_lambda` を自前並列化（スレッドローカルscratch利用）
+- [x] `density_lambda` / `compute_delta` で近傍gather結果を再利用し、同一反復内の重複探索を削減
+- [x] 近傍グリッドを連続メモリ表現へ最適化（`cell_start/end` 方式）
+- [x] 共有加算パスをスレッドローカル集計 + reduceへ統一（反作用インパルス等）
+- [x] 反復回数の適応化を導入（誤差閾値ベース、必要時のみ）
+- [x] 並列化後の挙動回帰を確認（既存テスト + 長時間実行で安定性確認）
+- [x] v3並列化方針を `design.md` に確定（Tracy優先順位 + CPU並列化順序 + GPU移行互換制約）
 - [x] Tracyを `bevy/trace + LogPlugin(custom_layer)` 構成へ変更し、`bevy/trace_tracy` 依存を回避
 - [x] Tracy実行時のみ `dynamic_linking` を無効化できるfeature構成へ変更（通常実行は高速リンクを維持）
 - [x] Tracy実行時の起動不安定対策として、実行feature構成を見直し（通常実行とTracy実行の起動パスを分離）

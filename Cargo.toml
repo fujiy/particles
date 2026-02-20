@@ -10,6 +10,7 @@ tracy = ["bevy/trace", "dep:tracing-tracy"]
 
 [dependencies]
 bevy = { version = "0.18", features = ["file_watcher"] }
+rayon = "1.11.0"
 tracing-tracy = { version = "0.11.4", default-features = false, features = ["enable", "ondemand", "broadcast"], optional = true }
 
 [profile.dev]

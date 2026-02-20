@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use bevy::log::tracing;
 use bevy::prelude::*;
+use rayon::prelude::*;
 
 use super::object::{
     OBJECT_BOUNDARY_PUSH_RADIUS_M, OBJECT_REPULSION_STIFFNESS, ObjectId, ObjectPhysicsField,
@@ -13,6 +14,8 @@ pub const GRAVITY_MPS2: Vec2 = Vec2::new(0.0, -9.81);
 pub const FIXED_DT: f32 = 1.0 / 60.0;
 pub const SUBSTEPS: usize = 2;
 pub const SOLVER_ITERS: usize = 6;
+pub const SOLVER_MIN_ITERS: usize = 2;
+pub const SOLVER_ERROR_TOLERANCE: f32 = 0.01;
 pub const PARTICLE_SPACING_M: f32 = 0.125;
 pub const PARTICLE_RADIUS_M: f32 = 0.06;
 pub const REST_DENSITY: f32 = 1000.0;
@@ -26,6 +29,7 @@ pub const STONE_PARTICLE_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
 pub const TERRAIN_BOUNDARY_RADIUS_M: f32 = PARTICLE_RADIUS_M + CELL_SIZE_M * 0.5;
 pub const TERRAIN_SDF_PUSH_RADIUS_M: f32 = PARTICLE_RADIUS_M;
 pub const TERRAIN_REPULSION_STIFFNESS: f32 = 0.55;
+pub const PARALLEL_PARTICLE_THRESHOLD: usize = 512;
 
 const INITIAL_WATER_ORIGIN_M: Vec2 = Vec2::new(-1.6, 2.0);
 const INITIAL_WATER_COLS: usize = 50;
@@ -50,15 +54,62 @@ pub struct ParticleRemovalResult {
 
 #[derive(Debug, Default)]
 struct NeighborGrid {
-    buckets: HashMap<IVec2, Vec<usize>>,
+    grid_min: IVec2,
+    grid_size: UVec2,
+    cell_starts: Vec<u32>,
+    sorted_indices: Vec<usize>,
 }
 
 impl NeighborGrid {
     fn rebuild(&mut self, positions: &[Vec2]) {
-        self.buckets.clear();
-        for (idx, position) in positions.iter().enumerate() {
-            let cell = particle_grid_cell(*position);
-            self.buckets.entry(cell).or_default().push(idx);
+        if positions.is_empty() {
+            self.grid_min = IVec2::ZERO;
+            self.grid_size = UVec2::ZERO;
+            self.cell_starts.clear();
+            self.sorted_indices.clear();
+            return;
+        }
+
+        let mut min_cell = IVec2::new(i32::MAX, i32::MAX);
+        let mut max_cell = IVec2::new(i32::MIN, i32::MIN);
+        for &position in positions {
+            let cell = particle_grid_cell(position);
+            min_cell.x = min_cell.x.min(cell.x);
+            min_cell.y = min_cell.y.min(cell.y);
+            max_cell.x = max_cell.x.max(cell.x);
+            max_cell.y = max_cell.y.max(cell.y);
+        }
+
+        let grid_w = (max_cell.x - min_cell.x + 1).max(1) as u32;
+        let grid_h = (max_cell.y - min_cell.y + 1).max(1) as u32;
+        let cell_count = (grid_w as usize) * (grid_h as usize);
+        self.grid_min = min_cell;
+        self.grid_size = UVec2::new(grid_w, grid_h);
+
+        let mut counts = vec![0u32; cell_count];
+        for position in positions.iter().copied() {
+            let Some(cell_index) = self.cell_index_of_world(position) else {
+                continue;
+            };
+            counts[cell_index] += 1;
+        }
+
+        self.cell_starts.clear();
+        self.cell_starts.resize(cell_count + 1, 0);
+        for i in 0..cell_count {
+            self.cell_starts[i + 1] = self.cell_starts[i] + counts[i];
+        }
+
+        self.sorted_indices.clear();
+        self.sorted_indices.resize(positions.len(), 0);
+        let mut write_heads = self.cell_starts[..cell_count].to_vec();
+        for (idx, &position) in positions.iter().enumerate() {
+            let Some(cell_index) = self.cell_index_of_world(position) else {
+                continue;
+            };
+            let head = write_heads[cell_index] as usize;
+            self.sorted_indices[head] = idx;
+            write_heads[cell_index] += 1;
         }
     }
 
@@ -67,12 +118,56 @@ impl NeighborGrid {
         let center = particle_grid_cell(position);
         for y in (center.y - 1)..=(center.y + 1) {
             for x in (center.x - 1)..=(center.x + 1) {
-                let Some(indices) = self.buckets.get(&IVec2::new(x, y)) else {
+                let Some(cell_index) = self.cell_index_of_cell(IVec2::new(x, y)) else {
                     continue;
                 };
-                out_neighbors.extend(indices.iter().copied());
+                let start = self.cell_starts[cell_index] as usize;
+                let end = self.cell_starts[cell_index + 1] as usize;
+                out_neighbors.extend_from_slice(&self.sorted_indices[start..end]);
             }
         }
+    }
+
+    fn cell_index_of_world(&self, world: Vec2) -> Option<usize> {
+        self.cell_index_of_cell(particle_grid_cell(world))
+    }
+
+    fn cell_index_of_cell(&self, cell: IVec2) -> Option<usize> {
+        if self.grid_size == UVec2::ZERO {
+            return None;
+        }
+        let local = cell - self.grid_min;
+        if local.x < 0 || local.y < 0 {
+            return None;
+        }
+        if local.x >= self.grid_size.x as i32 || local.y >= self.grid_size.y as i32 {
+            return None;
+        }
+        Some(local.y as usize * self.grid_size.x as usize + local.x as usize)
+    }
+}
+
+#[derive(Default)]
+struct ComputeDeltaThreadScratch {
+    object_contacts: Vec<ObjectId>,
+    reaction_impulses: HashMap<ObjectId, Vec2>,
+}
+
+impl ComputeDeltaThreadScratch {
+    fn merge_from(&mut self, other: Self) {
+        for (object_id, impulse) in other.reaction_impulses {
+            *self
+                .reaction_impulses
+                .entry(object_id)
+                .or_insert(Vec2::ZERO) += impulse;
+        }
+    }
+
+    fn accumulate_impulse(&mut self, object_id: ObjectId, impulse: Vec2) {
+        *self
+            .reaction_impulses
+            .entry(object_id)
+            .or_insert(Vec2::ZERO) += impulse;
     }
 }
 
@@ -89,8 +184,8 @@ pub struct ParticleWorld {
     initial_pos: Vec<Vec2>,
     initial_vel: Vec<Vec2>,
     neighbor_grid: NeighborGrid,
+    neighbor_cache: Vec<Vec<usize>>,
     viscosity_work: Vec<Vec2>,
-    object_contacts_work: Vec<ObjectId>,
 }
 
 impl Default for ParticleWorld {
@@ -109,8 +204,8 @@ impl Default for ParticleWorld {
             initial_pos,
             initial_vel,
             neighbor_grid: NeighborGrid::default(),
+            neighbor_cache: Vec::new(),
             viscosity_work: Vec::new(),
-            object_contacts_work: Vec::new(),
         };
         world.resize_work_buffers();
         world
@@ -334,7 +429,11 @@ impl ParticleWorld {
         for iter in 0..SOLVER_ITERS {
             let _iter_span =
                 tracing::info_span!("physics::solve_density_constraints", iter).entered();
-            self.solve_density_constraints(terrain, object_field, object_world, dt_sub);
+            let max_density_error =
+                self.solve_density_constraints(terrain, object_field, object_world, dt_sub);
+            if iter + 1 >= SOLVER_MIN_ITERS && max_density_error <= SOLVER_ERROR_TOLERANCE {
+                break;
+            }
         }
         {
             let _span = tracing::info_span!("physics::shape_matching").entered();
@@ -371,135 +470,36 @@ impl ParticleWorld {
         object_field: &ObjectPhysicsField,
         object_world: &mut ObjectWorld,
         dt_sub: f32,
-    ) {
+    ) -> f32 {
         let _span = tracing::info_span!("physics::density_constraint_pass").entered();
-        let mut neighbors = Vec::new();
         let h_ww = WATER_KERNEL_RADIUS_M;
         let inv_dt = 1.0 / dt_sub.max(1e-6);
+        let use_parallel = self.particle_count() >= PARALLEL_PARTICLE_THRESHOLD;
 
         {
-            let _span = tracing::info_span!("physics::density_lambda").entered();
-            for i in 0..self.particle_count() {
-                if !is_water_particle(self.material[i]) {
-                    self.density[i] = REST_DENSITY;
-                    self.lambda[i] = 0.0;
-                    continue;
-                }
-                self.neighbor_grid.gather(self.pos[i], &mut neighbors);
-
-                let mut rho = 0.0;
-                let mut grad_i = Vec2::ZERO;
-                let mut grad_sum_sq = 0.0;
-
-                for &j in &neighbors {
-                    if !is_water_particle(self.material[j]) {
-                        continue;
-                    }
-                    let r = self.pos[i] - self.pos[j];
-                    let r2 = r.length_squared();
-                    if r2 >= h_ww * h_ww {
-                        continue;
-                    }
-
-                    rho += self.mass[j] * kernel_poly6(r2, h_ww);
-
-                    if i == j {
-                        continue;
-                    }
-
-                    let grad = (self.mass[j] / REST_DENSITY) * kernel_spiky_grad(r, h_ww);
-                    grad_sum_sq += grad.length_squared();
-                    grad_i += grad;
-                }
-
-                grad_sum_sq += grad_i.length_squared();
-                let c_i = rho / REST_DENSITY - 1.0;
-
-                self.density[i] = rho;
-                self.lambda[i] = -c_i / (grad_sum_sq + EPSILON_LAMBDA);
-            }
+            let _span = tracing::info_span!("physics::rebuild_neighbor_cache").entered();
+            self.rebuild_neighbor_cache(use_parallel);
         }
 
-        {
-            let _span = tracing::info_span!("physics::compute_delta").entered();
-            for i in 0..self.particle_count() {
-                let is_water = is_water_particle(self.material[i]);
-                if is_water {
-                    self.neighbor_grid.gather(self.pos[i], &mut neighbors);
-                } else {
-                    neighbors.clear();
-                }
-
-                let mut delta = Vec2::ZERO;
-                let mut boundary_push = Vec2::ZERO;
-                if is_water {
-                    for &j in &neighbors {
-                        if i == j || !is_water_particle(self.material[j]) {
-                            continue;
-                        }
-                        let r = self.pos[i] - self.pos[j];
-                        if r.length_squared() >= h_ww * h_ww {
-                            continue;
-                        }
-                        delta += (self.lambda[i] + self.lambda[j]) * kernel_spiky_grad(r, h_ww);
-                    }
-                }
-
-                if let Some((signed_distance, normal)) =
-                    terrain.sample_signed_distance_and_normal(self.pos[i])
-                {
-                    let push_radius = if is_water {
-                        TERRAIN_SDF_PUSH_RADIUS_M
-                    } else {
-                        STONE_PARTICLE_RADIUS_M
-                    };
-                    let penetration = push_radius - signed_distance;
-                    if penetration > 0.0 {
-                        boundary_push += normal * penetration * TERRAIN_REPULSION_STIFFNESS;
-                    }
-                }
-                let mut object_push = Vec2::ZERO;
-                let self_object = object_world.object_of_particle(i);
-                if is_water || self_object.is_some() {
-                    object_field
-                        .gather_candidate_object_ids(self.pos[i], &mut self.object_contacts_work);
-                    let push_radius = if is_water {
-                        OBJECT_BOUNDARY_PUSH_RADIUS_M
-                    } else {
-                        STONE_PARTICLE_RADIUS_M
-                    };
-
-                    for &object_id in &self.object_contacts_work {
-                        if self_object == Some(object_id) {
-                            continue;
-                        }
-                        let Some(sample) = object_world.evaluate_object_sdf(object_id, self.pos[i])
-                        else {
-                            continue;
-                        };
-                        let penetration = push_radius - sample.distance_m;
-                        if penetration <= 0.0 {
-                            continue;
-                        }
-                        let push = sample.normal_world * penetration * OBJECT_REPULSION_STIFFNESS;
-                        object_push += push;
-                        let reaction_impulse = -(self.mass[i] * push) * inv_dt;
-                        object_world.accumulate_reaction_impulse(object_id, reaction_impulse);
-                    }
-                }
-                let max_push = if is_water {
-                    OBJECT_BOUNDARY_PUSH_RADIUS_M
-                } else {
-                    STONE_PARTICLE_RADIUS_M
-                };
-                object_push = object_push.clamp_length_max(max_push);
-
-                self.delta_pos[i] = if is_water {
-                    delta / REST_DENSITY + boundary_push + object_push
-                } else {
-                    boundary_push + object_push
-                };
+        let max_density_error = {
+            let _span = tracing::info_span!("physics::density_lambda").entered();
+            if use_parallel {
+                self.solve_density_lambda_parallel(h_ww)
+            } else {
+                self.solve_density_lambda_sequential(h_ww)
             }
+        };
+
+        let reaction_impulses = {
+            let _span = tracing::info_span!("physics::compute_delta").entered();
+            if use_parallel {
+                self.compute_delta_parallel(terrain, object_field, object_world, inv_dt, h_ww)
+            } else {
+                self.compute_delta_sequential(terrain, object_field, object_world, inv_dt, h_ww)
+            }
+        };
+        for (object_id, impulse) in reaction_impulses {
+            object_world.accumulate_reaction_impulse(object_id, impulse);
         }
 
         {
@@ -508,6 +508,332 @@ impl ParticleWorld {
                 self.pos[i] += self.delta_pos[i];
             }
         }
+        max_density_error
+    }
+
+    fn rebuild_neighbor_cache(&mut self, use_parallel: bool) {
+        let count = self.particle_count();
+        self.neighbor_cache.resize_with(count, Vec::new);
+        if use_parallel {
+            let positions = &self.pos;
+            let materials = &self.material;
+            let grid = &self.neighbor_grid;
+            self.neighbor_cache
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, neighbors)| {
+                    if is_water_particle(materials[i]) {
+                        grid.gather(positions[i], neighbors);
+                    } else {
+                        neighbors.clear();
+                    }
+                });
+        } else {
+            for i in 0..count {
+                if is_water_particle(self.material[i]) {
+                    self.neighbor_grid
+                        .gather(self.pos[i], &mut self.neighbor_cache[i]);
+                } else {
+                    self.neighbor_cache[i].clear();
+                }
+            }
+        }
+    }
+
+    fn solve_density_lambda_sequential(&mut self, h_ww: f32) -> f32 {
+        let mut max_density_error = 0.0f32;
+        for i in 0..self.particle_count() {
+            if !is_water_particle(self.material[i]) {
+                self.density[i] = REST_DENSITY;
+                self.lambda[i] = 0.0;
+                continue;
+            }
+            let neighbors = &self.neighbor_cache[i];
+            let mut rho = 0.0;
+            let mut grad_i = Vec2::ZERO;
+            let mut grad_sum_sq = 0.0;
+
+            for &j in neighbors {
+                if !is_water_particle(self.material[j]) {
+                    continue;
+                }
+                let r = self.pos[i] - self.pos[j];
+                let r2 = r.length_squared();
+                if r2 >= h_ww * h_ww {
+                    continue;
+                }
+
+                rho += self.mass[j] * kernel_poly6(r2, h_ww);
+
+                if i == j {
+                    continue;
+                }
+                let grad = (self.mass[j] / REST_DENSITY) * kernel_spiky_grad(r, h_ww);
+                grad_sum_sq += grad.length_squared();
+                grad_i += grad;
+            }
+            grad_sum_sq += grad_i.length_squared();
+            let c_i = rho / REST_DENSITY - 1.0;
+
+            self.density[i] = rho;
+            self.lambda[i] = -c_i / (grad_sum_sq + EPSILON_LAMBDA);
+            max_density_error = max_density_error.max(c_i.abs());
+        }
+        max_density_error
+    }
+
+    fn solve_density_lambda_parallel(&mut self, h_ww: f32) -> f32 {
+        let positions = &self.pos;
+        let masses = &self.mass;
+        let materials = &self.material;
+        let neighbor_cache = &self.neighbor_cache;
+
+        self.density
+            .par_iter_mut()
+            .zip(self.lambda.par_iter_mut())
+            .enumerate()
+            .map(|(i, (density_i, lambda_i))| {
+                if !is_water_particle(materials[i]) {
+                    *density_i = REST_DENSITY;
+                    *lambda_i = 0.0;
+                    return 0.0;
+                }
+
+                let mut rho = 0.0;
+                let mut grad_i = Vec2::ZERO;
+                let mut grad_sum_sq = 0.0;
+                for &j in &neighbor_cache[i] {
+                    if !is_water_particle(materials[j]) {
+                        continue;
+                    }
+                    let r = positions[i] - positions[j];
+                    let r2 = r.length_squared();
+                    if r2 >= h_ww * h_ww {
+                        continue;
+                    }
+
+                    rho += masses[j] * kernel_poly6(r2, h_ww);
+                    if i == j {
+                        continue;
+                    }
+                    let grad = (masses[j] / REST_DENSITY) * kernel_spiky_grad(r, h_ww);
+                    grad_sum_sq += grad.length_squared();
+                    grad_i += grad;
+                }
+
+                grad_sum_sq += grad_i.length_squared();
+                let c_i = rho / REST_DENSITY - 1.0;
+                *density_i = rho;
+                *lambda_i = -c_i / (grad_sum_sq + EPSILON_LAMBDA);
+                c_i.abs()
+            })
+            .reduce(|| 0.0, f32::max)
+    }
+
+    fn compute_delta_sequential(
+        &mut self,
+        terrain: &TerrainWorld,
+        object_field: &ObjectPhysicsField,
+        object_world: &ObjectWorld,
+        inv_dt: f32,
+        h_ww: f32,
+    ) -> HashMap<ObjectId, Vec2> {
+        let mut reaction_impulses = HashMap::new();
+        let mut object_contacts = Vec::new();
+        for i in 0..self.particle_count() {
+            let is_water = is_water_particle(self.material[i]);
+            let neighbors = if is_water {
+                &self.neighbor_cache[i]
+            } else {
+                &[][..]
+            };
+
+            let mut delta = Vec2::ZERO;
+            let mut boundary_push = Vec2::ZERO;
+            if is_water {
+                for &j in neighbors {
+                    if i == j || !is_water_particle(self.material[j]) {
+                        continue;
+                    }
+                    let r = self.pos[i] - self.pos[j];
+                    if r.length_squared() >= h_ww * h_ww {
+                        continue;
+                    }
+                    delta += (self.lambda[i] + self.lambda[j]) * kernel_spiky_grad(r, h_ww);
+                }
+            }
+
+            if let Some((signed_distance, normal)) =
+                terrain.sample_signed_distance_and_normal(self.pos[i])
+            {
+                let push_radius = if is_water {
+                    TERRAIN_SDF_PUSH_RADIUS_M
+                } else {
+                    STONE_PARTICLE_RADIUS_M
+                };
+                let penetration = push_radius - signed_distance;
+                if penetration > 0.0 {
+                    boundary_push += normal * penetration * TERRAIN_REPULSION_STIFFNESS;
+                }
+            }
+
+            let mut object_push = Vec2::ZERO;
+            let self_object = object_world.object_of_particle(i);
+            if is_water || self_object.is_some() {
+                object_field.gather_candidate_object_ids(self.pos[i], &mut object_contacts);
+                let push_radius = if is_water {
+                    OBJECT_BOUNDARY_PUSH_RADIUS_M
+                } else {
+                    STONE_PARTICLE_RADIUS_M
+                };
+
+                for &object_id in &object_contacts {
+                    if self_object == Some(object_id) {
+                        continue;
+                    }
+                    let Some(sample) = object_world.evaluate_object_sdf(object_id, self.pos[i])
+                    else {
+                        continue;
+                    };
+                    let penetration = push_radius - sample.distance_m;
+                    if penetration <= 0.0 {
+                        continue;
+                    }
+                    let push = sample.normal_world * penetration * OBJECT_REPULSION_STIFFNESS;
+                    object_push += push;
+                    let reaction_impulse = -(self.mass[i] * push) * inv_dt;
+                    *reaction_impulses.entry(object_id).or_insert(Vec2::ZERO) += reaction_impulse;
+                }
+            }
+
+            let max_push = if is_water {
+                OBJECT_BOUNDARY_PUSH_RADIUS_M
+            } else {
+                STONE_PARTICLE_RADIUS_M
+            };
+            object_push = object_push.clamp_length_max(max_push);
+            self.delta_pos[i] = if is_water {
+                delta / REST_DENSITY + boundary_push + object_push
+            } else {
+                boundary_push + object_push
+            };
+        }
+        reaction_impulses
+    }
+
+    fn compute_delta_parallel(
+        &mut self,
+        terrain: &TerrainWorld,
+        object_field: &ObjectPhysicsField,
+        object_world: &ObjectWorld,
+        inv_dt: f32,
+        h_ww: f32,
+    ) -> HashMap<ObjectId, Vec2> {
+        let positions = &self.pos;
+        let masses = &self.mass;
+        let materials = &self.material;
+        let lambdas = &self.lambda;
+        let neighbor_cache = &self.neighbor_cache;
+
+        let reduced = self
+            .delta_pos
+            .par_iter_mut()
+            .enumerate()
+            .fold(
+                ComputeDeltaThreadScratch::default,
+                |mut scratch, (i, delta_pos_i)| {
+                    let is_water = is_water_particle(materials[i]);
+                    let neighbors = if is_water {
+                        &neighbor_cache[i]
+                    } else {
+                        &[][..]
+                    };
+
+                    let mut delta = Vec2::ZERO;
+                    let mut boundary_push = Vec2::ZERO;
+                    if is_water {
+                        for &j in neighbors {
+                            if i == j || !is_water_particle(materials[j]) {
+                                continue;
+                            }
+                            let r = positions[i] - positions[j];
+                            if r.length_squared() >= h_ww * h_ww {
+                                continue;
+                            }
+                            delta += (lambdas[i] + lambdas[j]) * kernel_spiky_grad(r, h_ww);
+                        }
+                    }
+
+                    if let Some((signed_distance, normal)) =
+                        terrain.sample_signed_distance_and_normal(positions[i])
+                    {
+                        let push_radius = if is_water {
+                            TERRAIN_SDF_PUSH_RADIUS_M
+                        } else {
+                            STONE_PARTICLE_RADIUS_M
+                        };
+                        let penetration = push_radius - signed_distance;
+                        if penetration > 0.0 {
+                            boundary_push += normal * penetration * TERRAIN_REPULSION_STIFFNESS;
+                        }
+                    }
+
+                    let mut object_push = Vec2::ZERO;
+                    let self_object = object_world.object_of_particle(i);
+                    if is_water || self_object.is_some() {
+                        object_field.gather_candidate_object_ids(
+                            positions[i],
+                            &mut scratch.object_contacts,
+                        );
+                        let push_radius = if is_water {
+                            OBJECT_BOUNDARY_PUSH_RADIUS_M
+                        } else {
+                            STONE_PARTICLE_RADIUS_M
+                        };
+
+                        for contact_index in 0..scratch.object_contacts.len() {
+                            let object_id = scratch.object_contacts[contact_index];
+                            if self_object == Some(object_id) {
+                                continue;
+                            }
+                            let Some(sample) =
+                                object_world.evaluate_object_sdf(object_id, positions[i])
+                            else {
+                                continue;
+                            };
+                            let penetration = push_radius - sample.distance_m;
+                            if penetration <= 0.0 {
+                                continue;
+                            }
+                            let push =
+                                sample.normal_world * penetration * OBJECT_REPULSION_STIFFNESS;
+                            object_push += push;
+                            let reaction_impulse = -(masses[i] * push) * inv_dt;
+                            scratch.accumulate_impulse(object_id, reaction_impulse);
+                        }
+                    }
+
+                    let max_push = if is_water {
+                        OBJECT_BOUNDARY_PUSH_RADIUS_M
+                    } else {
+                        STONE_PARTICLE_RADIUS_M
+                    };
+                    object_push = object_push.clamp_length_max(max_push);
+                    *delta_pos_i = if is_water {
+                        delta / REST_DENSITY + boundary_push + object_push
+                    } else {
+                        boundary_push + object_push
+                    };
+
+                    scratch
+                },
+            )
+            .reduce(ComputeDeltaThreadScratch::default, |mut a, b| {
+                a.merge_from(b);
+                a
+            });
+
+        reduced.reaction_impulses
     }
 
     fn apply_xsph_viscosity(&mut self) {
@@ -641,8 +967,8 @@ impl ParticleWorld {
         self.density.resize(count, 0.0);
         self.lambda.resize(count, 0.0);
         self.delta_pos.resize(count, Vec2::ZERO);
+        self.neighbor_cache.resize_with(count, Vec::new);
         self.viscosity_work.resize(count, Vec2::ZERO);
-        self.object_contacts_work.clear();
     }
 }
 
@@ -718,6 +1044,23 @@ mod tests {
             / particles.positions().len() as f32;
 
         assert!(after_avg_y < before_avg_y - 0.01);
+    }
+
+    #[test]
+    fn long_run_stability_has_no_nan() {
+        let mut terrain = TerrainWorld::default();
+        terrain.reset_fixed_world();
+        terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+        let mut particles = ParticleWorld::default();
+        let mut object_world = ObjectWorld::default();
+        let object_field = ObjectPhysicsField::default();
+
+        for _ in 0..300 {
+            particles.step_if_running(&terrain, &object_field, &mut object_world, true);
+        }
+
+        assert!(particles.pos.iter().all(|p| p.is_finite()));
+        assert!(particles.vel.iter().all(|v| v.is_finite()));
     }
 
     #[test]
