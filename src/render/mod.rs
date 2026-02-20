@@ -4,6 +4,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
+use crate::physics::material::material_properties;
 use crate::physics::object::{ObjectData, ObjectId, ObjectWorld};
 use crate::physics::particle::{
     ParticleMaterial, ParticleWorld, REST_DENSITY, TERRAIN_BOUNDARY_RADIUS_M,
@@ -35,6 +36,12 @@ pub struct ObjectRenderState {
     object_sprites: HashMap<ObjectId, ObjectSprite>,
 }
 
+#[derive(Resource, Default)]
+pub struct FreeParticleRenderState {
+    image: Option<Handle<Image>>,
+    entity: Option<Entity>,
+}
+
 struct TerrainChunkSprite {
     entity: Entity,
     image: Handle<Image>,
@@ -61,6 +68,7 @@ const WATER_DOT_SMOOTH_WIDTH: f32 = 1.0;
 const WATER_BLUR_RADIUS_DOTS: i32 = 2;
 const WATER_DOT_SCALE: f32 = CELL_PIXEL_SIZE as f32 / CELL_SIZE_M;
 const WATER_RENDER_Z: f32 = 6.0;
+const FREE_PARTICLE_RENDER_Z: f32 = 6.5;
 const OBJECT_DOT_SCALE: f32 = CELL_PIXEL_SIZE as f32 / CELL_SIZE_M;
 const OBJECT_RENDER_Z: f32 = 7.0;
 const OBJECT_PADDING_PX: u32 = 2;
@@ -72,13 +80,15 @@ impl Plugin for RenderPlugin {
         app.init_resource::<TerrainRenderState>()
             .init_resource::<WaterRenderState>()
             .init_resource::<ObjectRenderState>()
+            .init_resource::<FreeParticleRenderState>()
             .add_systems(Startup, bootstrap_terrain_chunks)
             .add_systems(
                 Update,
                 (
                     sync_dirty_terrain_chunks_to_render,
-                    sync_object_sprites_to_render,
                     sync_water_dots_to_render,
+                    sync_free_particles_to_render,
+                    sync_object_sprites_to_render,
                 )
                     .chain()
                     .in_set(SimUpdateSet::Rendering),
@@ -189,7 +199,7 @@ pub fn sync_water_dots_to_render(
     for (particle_index, &pos) in particles.positions().iter().enumerate() {
         if !matches!(
             particles.materials()[particle_index],
-            ParticleMaterial::Water
+            ParticleMaterial::WaterLiquid
         ) {
             continue;
         }
@@ -262,6 +272,75 @@ pub fn sync_water_dots_to_render(
     }
 }
 
+pub fn sync_free_particles_to_render(
+    mut commands: Commands,
+    particles: Res<ParticleWorld>,
+    object_world: Res<ObjectWorld>,
+    terrain: Res<TerrainWorld>,
+    mut free_state: ResMut<FreeParticleRenderState>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let center = world_center();
+    let world_size = world_size();
+    let image_handle = if let Some(handle) = &free_state.image {
+        handle.clone()
+    } else {
+        let image = blank_water_image();
+        let handle = images.add(image);
+        let mut sprite = Sprite::from_image(handle.clone());
+        sprite.custom_size = Some(world_size);
+        let entity = commands
+            .spawn((
+                sprite,
+                Transform::from_xyz(center.x, center.y, FREE_PARTICLE_RENDER_Z),
+            ))
+            .id();
+        free_state.entity = Some(entity);
+        free_state.image = Some(handle.clone());
+        handle
+    };
+
+    let mut pixels = vec![0_u8; (WATER_IMAGE_WIDTH * WATER_IMAGE_HEIGHT * 4) as usize];
+    for (particle_index, &pos) in particles.positions().iter().enumerate() {
+        let material = particles.materials()[particle_index];
+        if matches!(material, ParticleMaterial::WaterLiquid) {
+            continue;
+        }
+        if object_world.object_of_particle(particle_index).is_some() {
+            continue;
+        }
+
+        let radius_m = material_properties(material).radius_m;
+        let radius_px = (radius_m * WATER_DOT_SCALE).ceil().max(1.0) as i32;
+        let center_px = world_to_water_pixel(pos);
+        let palette = cell_palette_for_particle(material);
+        for py in (center_px.y - radius_px)..=(center_px.y + radius_px) {
+            if py < 0 || py >= WATER_IMAGE_HEIGHT as i32 {
+                continue;
+            }
+            for px in (center_px.x - radius_px)..=(center_px.x + radius_px) {
+                if px < 0 || px >= WATER_IMAGE_WIDTH as i32 {
+                    continue;
+                }
+                let sample_world = water_pixel_to_world(IVec2::new(px, py));
+                if is_solid_terrain_at_world(&terrain, sample_world) {
+                    continue;
+                }
+                if (sample_world - pos).length_squared() > radius_m * radius_m {
+                    continue;
+                }
+                let offset = water_density_index(px, py) * 4;
+                let palette_index = deterministic_palette_index(px, py);
+                pixels[offset..offset + 4].copy_from_slice(&palette[palette_index]);
+            }
+        }
+    }
+
+    if let Some(image) = images.get_mut(&image_handle) {
+        image.data = Some(pixels);
+    }
+}
+
 pub fn sync_object_sprites_to_render(
     mut commands: Commands,
     mut object_world: ResMut<ObjectWorld>,
@@ -271,6 +350,7 @@ pub fn sync_object_sprites_to_render(
 ) {
     let positions = particles.positions();
     let masses = particles.masses();
+    let materials = particles.materials();
     let mut live_ids = Vec::new();
 
     for object in object_world.objects_mut() {
@@ -283,9 +363,9 @@ pub fn sync_object_sprites_to_render(
             .with_rotation(Quat::from_rotation_z(theta));
         if let Some(entry) = render_state.object_sprites.get_mut(&object.id) {
             if object.shape_dirty {
-                let (image, world_size) = rasterize_object_image(object);
+                let (image, world_size) = rasterize_object_image(object, materials);
                 if images.insert(entry.image.id(), image).is_err() {
-                    let (new_image, _) = rasterize_object_image(object);
+                    let (new_image, _) = rasterize_object_image(object, materials);
                     entry.image = images.add(new_image);
                 }
                 entry.world_size = world_size;
@@ -298,7 +378,7 @@ pub fn sync_object_sprites_to_render(
             continue;
         }
 
-        let (image, world_size) = rasterize_object_image(object);
+        let (image, world_size) = rasterize_object_image(object, materials);
         let image_handle = images.add(image);
         let mut sprite = Sprite::from_image(image_handle.clone());
         sprite.custom_size = Some(world_size);
@@ -371,13 +451,31 @@ fn cell_palette(cell: TerrainCell) -> Option<[[u8; 4]; 4]> {
     match cell {
         TerrainCell::Empty => None,
         TerrainCell::Solid {
-            material: TerrainMaterial::Rock,
+            material: TerrainMaterial::Stone,
             ..
         } => Some([
             [70, 67, 63, 255],
             [83, 79, 74, 255],
             [95, 90, 84, 255],
             [108, 103, 96, 255],
+        ]),
+        TerrainCell::Solid {
+            material: TerrainMaterial::Sand,
+            ..
+        } => Some([
+            [170, 150, 110, 255],
+            [186, 166, 124, 255],
+            [201, 181, 137, 255],
+            [216, 196, 150, 255],
+        ]),
+        TerrainCell::Solid {
+            material: TerrainMaterial::Soil,
+            ..
+        } => Some([
+            [105, 79, 56, 255],
+            [119, 91, 67, 255],
+            [133, 103, 78, 255],
+            [147, 115, 88, 255],
         ]),
     }
 }
@@ -610,7 +708,7 @@ fn object_pose(object: &ObjectData, positions: &[Vec2], masses: &[f32]) -> Optio
     Some((center, theta))
 }
 
-fn rasterize_object_image(object: &ObjectData) -> (Image, Vec2) {
+fn rasterize_object_image(object: &ObjectData, materials: &[ParticleMaterial]) -> (Image, Vec2) {
     let half_cell = CELL_SIZE_M * 0.5;
     let mut extent = Vec2::splat(half_cell);
     for q in &object.rest_local {
@@ -623,12 +721,13 @@ fn rasterize_object_image(object: &ObjectData) -> (Image, Vec2) {
     let height = ((world_size.y * OBJECT_DOT_SCALE).ceil() as u32 + OBJECT_PADDING_PX * 2).max(2);
     let mut pixels = vec![0_u8; (width * height * 4) as usize];
     let pad = OBJECT_PADDING_PX as f32;
-    let palette = [
-        [70, 67, 63, 255],
-        [83, 79, 74, 255],
-        [95, 90, 84, 255],
-        [108, 103, 96, 255],
-    ];
+    let seed_material = object
+        .particle_indices
+        .first()
+        .and_then(|&index| materials.get(index))
+        .copied()
+        .unwrap_or(ParticleMaterial::StoneSolid);
+    let palette = cell_palette_for_particle(seed_material);
 
     for q in &object.rest_local {
         let min_world = *q - Vec2::splat(half_cell);
@@ -683,4 +782,33 @@ fn rasterize_object_image(object: &ObjectData) -> (Image, Vec2) {
         height as f32 / OBJECT_DOT_SCALE,
     );
     (image, texture_world_size)
+}
+
+fn cell_palette_for_particle(material: ParticleMaterial) -> [[u8; 4]; 4] {
+    match material {
+        ParticleMaterial::WaterLiquid => [
+            [42, 120, 202, 235],
+            [52, 136, 218, 240],
+            [65, 152, 228, 245],
+            [78, 167, 238, 250],
+        ],
+        ParticleMaterial::StoneSolid | ParticleMaterial::StoneGranular => [
+            [70, 67, 63, 255],
+            [83, 79, 74, 255],
+            [95, 90, 84, 255],
+            [108, 103, 96, 255],
+        ],
+        ParticleMaterial::SoilSolid | ParticleMaterial::SoilGranular => [
+            [105, 79, 56, 255],
+            [119, 91, 67, 255],
+            [133, 103, 78, 255],
+            [147, 115, 88, 255],
+        ],
+        ParticleMaterial::SandSolid | ParticleMaterial::SandGranular => [
+            [170, 150, 110, 255],
+            [186, 166, 124, 255],
+            [201, 181, 137, 255],
+            [216, 196, 150, 255],
+        ],
+    }
 }
