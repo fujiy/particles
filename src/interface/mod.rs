@@ -14,8 +14,8 @@ use crate::physics::particle::{
 };
 use crate::physics::state::{SimUpdateSet, SimulationPerfMetrics, SimulationState};
 use crate::physics::terrain::{
-    CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
-    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, world_to_cell,
+    CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, WORLD_MAX_CHUNK_X,
+    WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, world_to_cell,
 };
 
 const HUD_BG_COLOR: Color = Color::srgba(0.05, 0.06, 0.09, 0.82);
@@ -71,37 +71,54 @@ const MATERIAL_PATTERN_SOLID: MaterialPattern8 = [
 ];
 
 #[allow(dead_code)]
-const MATERIAL_PATTERN_POWDER: MaterialPattern8 = [
-    [false, true, false, true, false, true, false, true],
-    [true, false, true, false, true, false, true, false],
-    [false, true, false, true, false, true, false, true],
-    [true, false, true, false, true, false, true, false],
-    [false, true, false, true, false, true, false, true],
-    [true, false, true, false, true, false, true, false],
-    [false, true, false, true, false, true, false, true],
-    [true, false, true, false, true, false, true, false],
+const MATERIAL_PATTERN_GRANULAR: MaterialPattern8 = [
+    [false, false, false, true, true, false, false, false],
+    [false, false, false, true, true, false, false, false],
+    [false, false, true, true, true, true, false, false],
+    [false, false, true, true, true, true, false, false],
+    [false, true, true, true, true, true, true, false],
+    [false, true, true, true, true, true, true, false],
+    [true, true, true, true, true, true, true, true],
+    [true, true, true, true, true, true, true, true],
 ];
 
-const MATERIAL_PALETTE_LIQUID: [[u8; 4]; 4] = [
+const MATERIAL_PALETTE_WATER: [[u8; 4]; 4] = [
     [42, 120, 202, 235],
     [52, 136, 218, 240],
     [65, 152, 228, 245],
     [78, 167, 238, 250],
 ];
 
-const MATERIAL_PALETTE_SOLID: [[u8; 4]; 4] = [
+const MATERIAL_PALETTE_STONE: [[u8; 4]; 4] = [
     [70, 67, 63, 255],
     [83, 79, 74, 255],
     [95, 90, 84, 255],
     [108, 103, 96, 255],
 ];
 
-#[allow(dead_code)]
-const MATERIAL_PALETTE_POWDER: [[u8; 4]; 4] = [
+const MATERIAL_PALETTE_SAND: [[u8; 4]; 4] = [
     [172, 149, 111, 255],
     [185, 162, 124, 255],
     [198, 175, 136, 255],
     [210, 188, 148, 255],
+];
+
+const MATERIAL_PALETTE_SOIL: [[u8; 4]; 4] = [
+    [105, 79, 56, 255],
+    [119, 91, 67, 255],
+    [133, 103, 78, 255],
+    [147, 115, 88, 255],
+];
+
+const WORLD_TOOLBAR_TOOLS: [WorldTool; 8] = [
+    WorldTool::WaterLiquid,
+    WorldTool::StoneSolid,
+    WorldTool::StoneGranular,
+    WorldTool::SoilSolid,
+    WorldTool::SoilGranular,
+    WorldTool::SandSolid,
+    WorldTool::SandGranular,
+    WorldTool::Delete,
 ];
 
 pub struct InterfacePlugin;
@@ -137,18 +154,57 @@ struct SimulationHudText;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum WorldTool {
-    Water,
-    Stone,
+    WaterLiquid,
+    StoneSolid,
+    StoneGranular,
+    SoilSolid,
+    SoilGranular,
+    SandSolid,
+    SandGranular,
     Delete,
 }
 
 impl WorldTool {
     fn label(self) -> &'static str {
         match self {
-            Self::Water => "Water",
-            Self::Stone => "Stone",
+            Self::WaterLiquid => "Water",
+            Self::StoneSolid => "Stone Solid",
+            Self::StoneGranular => "Stone Granular",
+            Self::SoilSolid => "Soil Solid",
+            Self::SoilGranular => "Soil Granular",
+            Self::SandSolid => "Sand Solid",
+            Self::SandGranular => "Sand Granular",
             Self::Delete => "Delete",
         }
+    }
+
+    fn material(self) -> Option<ParticleMaterial> {
+        match self {
+            Self::WaterLiquid => Some(ParticleMaterial::WaterLiquid),
+            Self::StoneSolid => Some(ParticleMaterial::StoneSolid),
+            Self::StoneGranular => Some(ParticleMaterial::StoneGranular),
+            Self::SoilSolid => Some(ParticleMaterial::SoilSolid),
+            Self::SoilGranular => Some(ParticleMaterial::SoilGranular),
+            Self::SandSolid => Some(ParticleMaterial::SandSolid),
+            Self::SandGranular => Some(ParticleMaterial::SandGranular),
+            Self::Delete => None,
+        }
+    }
+
+    fn terrain_material(self) -> Option<TerrainMaterial> {
+        match self {
+            Self::StoneSolid => Some(TerrainMaterial::Stone),
+            Self::SoilSolid => Some(TerrainMaterial::Soil),
+            Self::SandSolid => Some(TerrainMaterial::Sand),
+            _ => None,
+        }
+    }
+
+    fn is_granular(self) -> bool {
+        matches!(
+            self,
+            Self::StoneGranular | Self::SoilGranular | Self::SandGranular
+        )
     }
 }
 
@@ -180,8 +236,13 @@ struct WorldToolTooltipText;
 
 #[derive(Resource, Clone)]
 struct WorldToolIconSet {
-    water: Handle<Image>,
-    stone: Handle<Image>,
+    water_liquid: Handle<Image>,
+    stone_solid: Handle<Image>,
+    stone_granular: Handle<Image>,
+    soil_solid: Handle<Image>,
+    soil_granular: Handle<Image>,
+    sand_solid: Handle<Image>,
+    sand_granular: Handle<Image>,
     delete: Handle<Image>,
 }
 
@@ -229,7 +290,7 @@ fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>
                     BackgroundColor(TOOLBAR_BG_COLOR),
                 ))
                 .with_children(|toolbar| {
-                    for tool in [WorldTool::Water, WorldTool::Stone, WorldTool::Delete] {
+                    for tool in WORLD_TOOLBAR_TOOLS {
                         toolbar
                             .spawn((
                                 Button,
@@ -363,10 +424,20 @@ fn handle_world_interactions(
     mut object_world: ResMut<ObjectWorld>,
 ) {
     if keyboard.just_pressed(KeyCode::Digit1) || keyboard.just_pressed(KeyCode::Numpad1) {
-        select_world_tool(&mut interaction_state, Some(WorldTool::Water));
+        select_world_tool(&mut interaction_state, Some(WorldTool::WaterLiquid));
     } else if keyboard.just_pressed(KeyCode::Digit2) || keyboard.just_pressed(KeyCode::Numpad2) {
-        select_world_tool(&mut interaction_state, Some(WorldTool::Stone));
+        select_world_tool(&mut interaction_state, Some(WorldTool::StoneSolid));
     } else if keyboard.just_pressed(KeyCode::Digit3) || keyboard.just_pressed(KeyCode::Numpad3) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::StoneGranular));
+    } else if keyboard.just_pressed(KeyCode::Digit4) || keyboard.just_pressed(KeyCode::Numpad4) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::SoilSolid));
+    } else if keyboard.just_pressed(KeyCode::Digit5) || keyboard.just_pressed(KeyCode::Numpad5) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::SoilGranular));
+    } else if keyboard.just_pressed(KeyCode::Digit6) || keyboard.just_pressed(KeyCode::Numpad6) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::SandSolid));
+    } else if keyboard.just_pressed(KeyCode::Digit7) || keyboard.just_pressed(KeyCode::Numpad7) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::SandGranular));
+    } else if keyboard.just_pressed(KeyCode::Digit8) || keyboard.just_pressed(KeyCode::Numpad8) {
         select_world_tool(&mut interaction_state, Some(WorldTool::Delete));
     }
 
@@ -381,10 +452,12 @@ fn handle_world_interactions(
         .iter()
         .any(|interaction| *interaction != Interaction::None);
     let cursor_world = cursor_world_position(&windows, &camera_query);
+    let selected_tool = interaction_state.selected_tool;
 
     if !left_pressed || blocked_by_pan || blocked_by_ui || cursor_world.is_none() {
         finalize_stone_stroke(
             &mut interaction_state.stone_stroke,
+            selected_tool,
             &mut particle_world,
             &mut object_world,
         );
@@ -399,14 +472,15 @@ fn handle_world_interactions(
     let dt = time.delta_secs().max(1e-4);
     let stroke_velocity = (cursor_world - previous_world) / dt;
     let mut terrain_changed = false;
-    if interaction_state.selected_tool != Some(WorldTool::Water) {
+    if selected_tool != Some(WorldTool::WaterLiquid) {
         interaction_state.water_spawn_carry_m = 0.0;
     }
 
-    match interaction_state.selected_tool {
-        Some(WorldTool::Water) => {
+    match selected_tool {
+        Some(WorldTool::WaterLiquid) => {
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
+                selected_tool,
                 &mut particle_world,
                 &mut object_world,
             );
@@ -418,7 +492,8 @@ fn handle_world_interactions(
                 &mut interaction_state.water_spawn_carry_m,
             );
         }
-        Some(WorldTool::Stone) => {
+        Some(tool) if tool.terrain_material().is_some() => {
+            let terrain_material = tool.terrain_material().unwrap_or(TerrainMaterial::Stone);
             interaction_state.stone_stroke.active = true;
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
                 let cell = world_to_cell(point);
@@ -430,11 +505,34 @@ fn handle_world_interactions(
             terrain_changed |= update_stone_stroke_partition(
                 &mut interaction_state.stone_stroke,
                 &mut terrain_world,
+                terrain_material,
             );
+        }
+        Some(tool) if tool.is_granular() => {
+            interaction_state.stone_stroke.active = true;
+            interaction_state.stone_stroke.candidate_cells.clear();
+            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
+                let cell = world_to_cell(point);
+                if !cell_in_fixed_world(cell) {
+                    return;
+                }
+                interaction_state.stone_stroke.generated_cells.insert(cell);
+            });
+            let generated: Vec<_> = interaction_state
+                .stone_stroke
+                .generated_cells
+                .iter()
+                .copied()
+                .collect();
+            interaction_state
+                .stone_stroke
+                .candidate_cells
+                .extend(generated);
         }
         Some(WorldTool::Delete) => {
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
+                selected_tool,
                 &mut particle_world,
                 &mut object_world,
             );
@@ -452,9 +550,11 @@ fn handle_world_interactions(
                 );
             });
         }
+        Some(_) => {}
         None => {
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
+                selected_tool,
                 &mut particle_world,
                 &mut object_world,
             );
@@ -481,6 +581,7 @@ fn handle_world_interactions(
 fn update_stone_stroke_partition(
     stroke: &mut StoneStrokeState,
     terrain_world: &mut TerrainWorld,
+    terrain_material: TerrainMaterial,
 ) -> bool {
     if stroke.generated_cells.is_empty() {
         stroke.candidate_cells.clear();
@@ -490,7 +591,7 @@ fn update_stone_stroke_partition(
     let terrain_connected = collect_terrain_connected_stroke_cells(stroke, terrain_world);
     let mut terrain_changed = false;
     for &cell in &terrain_connected {
-        terrain_changed |= terrain_world.set_cell(cell, TerrainCell::rock());
+        terrain_changed |= terrain_world.set_cell(cell, TerrainCell::solid(terrain_material));
     }
 
     stroke.candidate_cells.clear();
@@ -559,6 +660,7 @@ fn is_stroke_cell_connected_to_frozen_terrain(
 
 fn finalize_stone_stroke(
     stroke: &mut StoneStrokeState,
+    selected_tool: Option<WorldTool>,
     particle_world: &mut ParticleWorld,
     object_world: &mut ObjectWorld,
 ) {
@@ -571,14 +673,26 @@ fn finalize_stone_stroke(
     if !stroke.candidate_cells.is_empty() {
         let mut cells: Vec<_> = stroke.candidate_cells.iter().copied().collect();
         cells.sort_by_key(|cell| (cell.y, cell.x));
-        let particle_indices = particle_world.spawn_stone_particles_from_cells(&cells, Vec2::ZERO);
-        let _ = object_world.create_object(
-            particle_indices,
-            particle_world.positions(),
-            particle_world.masses(),
-            OBJECT_SHAPE_STIFFNESS_ALPHA,
-            OBJECT_SHAPE_ITERS,
-        );
+        if let Some(tool) = selected_tool {
+            let Some(material) = tool.material() else {
+                stroke.active = false;
+                stroke.generated_cells.clear();
+                stroke.candidate_cells.clear();
+                return;
+            };
+            let particle_indices =
+                particle_world.spawn_material_particles_from_cells(&cells, material, Vec2::ZERO);
+
+            if tool.terrain_material().is_some() {
+                let _ = object_world.create_object(
+                    particle_indices,
+                    particle_world.positions(),
+                    particle_world.masses(),
+                    OBJECT_SHAPE_STIFFNESS_ALPHA,
+                    OBJECT_SHAPE_ITERS,
+                );
+            }
+        }
     }
 
     stroke.active = false;
@@ -614,12 +728,37 @@ fn update_simulation_hud(
         let water_count = particles
             .materials()
             .iter()
-            .filter(|&&m| matches!(m, ParticleMaterial::Water))
+            .filter(|&&m| matches!(m, ParticleMaterial::WaterLiquid))
             .count();
-        let stone_count = particles
+        let stone_solid_count = particles
             .materials()
             .iter()
-            .filter(|&&m| matches!(m, ParticleMaterial::Stone))
+            .filter(|&&m| matches!(m, ParticleMaterial::StoneSolid))
+            .count();
+        let stone_granular_count = particles
+            .materials()
+            .iter()
+            .filter(|&&m| matches!(m, ParticleMaterial::StoneGranular))
+            .count();
+        let soil_solid_count = particles
+            .materials()
+            .iter()
+            .filter(|&&m| matches!(m, ParticleMaterial::SoilSolid))
+            .count();
+        let soil_granular_count = particles
+            .materials()
+            .iter()
+            .filter(|&&m| matches!(m, ParticleMaterial::SoilGranular))
+            .count();
+        let sand_solid_count = particles
+            .materials()
+            .iter()
+            .filter(|&&m| matches!(m, ParticleMaterial::SandSolid))
+            .count();
+        let sand_granular_count = particles
+            .materials()
+            .iter()
+            .filter(|&&m| matches!(m, ParticleMaterial::SandGranular))
             .count();
         let potential_str = if potential.is_finite() {
             format!("{potential:.1}")
@@ -627,7 +766,7 @@ fn update_simulation_hud(
             "INF".to_string()
         };
         text.0 = format!(
-            "FPS: {fps:.1}\nPotential Max FPS: {potential_str}\nSim: {sim_status}\nWater Particles: {water_count}\nStone Particles: {stone_count}"
+            "FPS: {fps:.1}\nPotential Max FPS: {potential_str}\nSim: {sim_status}\nWater(L): {water_count}\nStone(S): {stone_solid_count}\nStone(G): {stone_granular_count}\nSoil(S): {soil_solid_count}\nSoil(G): {soil_granular_count}\nSand(S): {sand_solid_count}\nSand(G): {sand_granular_count}"
         );
     }
 }
@@ -716,28 +855,63 @@ fn select_world_tool(state: &mut WorldInteractionState, next_tool: Option<WorldT
 impl WorldToolIconSet {
     fn icon_for(&self, tool: WorldTool) -> Handle<Image> {
         match tool {
-            WorldTool::Water => self.water.clone(),
-            WorldTool::Stone => self.stone.clone(),
+            WorldTool::WaterLiquid => self.water_liquid.clone(),
+            WorldTool::StoneSolid => self.stone_solid.clone(),
+            WorldTool::StoneGranular => self.stone_granular.clone(),
+            WorldTool::SoilSolid => self.soil_solid.clone(),
+            WorldTool::SoilGranular => self.soil_granular.clone(),
+            WorldTool::SandSolid => self.sand_solid.clone(),
+            WorldTool::SandGranular => self.sand_granular.clone(),
             WorldTool::Delete => self.delete.clone(),
         }
     }
 }
 
 fn create_world_tool_icon_set(images: &mut Assets<Image>) -> WorldToolIconSet {
-    let water = images.add(build_material_icon_image(
-        MATERIAL_PALETTE_LIQUID,
+    let water_liquid = images.add(build_material_icon_image(
+        MATERIAL_PALETTE_WATER,
         &MATERIAL_PATTERN_LIQUID,
         0x4e23_1f91,
     ));
-    let stone = images.add(build_material_icon_image(
-        MATERIAL_PALETTE_SOLID,
+    let stone_solid = images.add(build_material_icon_image(
+        MATERIAL_PALETTE_STONE,
         &MATERIAL_PATTERN_SOLID,
         0x8a52_d9b7,
     ));
+    let stone_granular = images.add(build_material_icon_image(
+        MATERIAL_PALETTE_STONE,
+        &MATERIAL_PATTERN_GRANULAR,
+        0x77bc_26f1,
+    ));
+    let soil_solid = images.add(build_material_icon_image(
+        MATERIAL_PALETTE_SOIL,
+        &MATERIAL_PATTERN_SOLID,
+        0x68a2_1bd4,
+    ));
+    let soil_granular = images.add(build_material_icon_image(
+        MATERIAL_PALETTE_SOIL,
+        &MATERIAL_PATTERN_GRANULAR,
+        0xb86a_c921,
+    ));
+    let sand_solid = images.add(build_material_icon_image(
+        MATERIAL_PALETTE_SAND,
+        &MATERIAL_PATTERN_SOLID,
+        0x2f9a_43ce,
+    ));
+    let sand_granular = images.add(build_material_icon_image(
+        MATERIAL_PALETTE_SAND,
+        &MATERIAL_PATTERN_GRANULAR,
+        0x9133_257e,
+    ));
     let delete = images.add(build_delete_icon_image());
     WorldToolIconSet {
-        water,
-        stone,
+        water_liquid,
+        stone_solid,
+        stone_granular,
+        soil_solid,
+        soil_granular,
+        sand_solid,
+        sand_granular,
         delete,
     }
 }

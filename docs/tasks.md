@@ -1,23 +1,23 @@
 # Tasks
 
 ## Todo
-- [ ] マテリアル形態を導入（`SolidCell` / `GranularParticle`）し、`Rock` / `Gravel` / `Sand` / `Soil` を定義
-- [ ] マテリアルごとの `PARTICLES_PER_CELL` 定数を追加（同機構を水粒子サイズ調整にも適用）
-- [ ] 衝突インパルス閾値ベースの破壊判定を実装
-- [ ] オブジェクト内部応力（拘束反力/ひずみ）閾値ベースの破壊判定を実装
-- [ ] 固体セル破壊時のセル→粉体粒子変換を実装（平方格子配置）
-- [ ] `Rock(SolidCell) -> Gravel(GranularParticle)` 遷移を実装
-- [ ] `Sand` / `Soil` を同モデルで追加し、低強度パラメータで崩れやすさを調整
-- [ ] 粉体の接触＋摩擦モデルを実装（`mu_s`, `mu_k`, `e`, 必要なら転がり抵抗）
 - [ ] 粉体堆積の安息角を確認する検証シーン/テストを追加
-- [ ] v4では粉体→固体逆変換を無効に固定（実装しないことをコード上で保証）
-- [ ] マップ保存機能を実装（地形・粒子・オブジェクト・最小設定をスナップショット化）
-- [ ] マップ読込機能を実装（状態クリア後に `TerrainWorld` / `ParticleWorld` / `ObjectWorld` 再構築）
-- [ ] セーブデータのバージョニングを実装（`save_version` と互換不可時エラー）
-- [ ] セーブ/ロード後の整合性検証を実装（ID重複・参照不整合・境界外データ）
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] セーブ/ロード後の整合性検証を実装（ID重複・参照不整合・境界外データ）
+- [x] セーブデータのバージョニングを実装（`save_version` と互換不可時エラー）
+- [x] マップ読込機能を実装（状態クリア後に `TerrainWorld` / `ParticleWorld` / `ObjectWorld` 再構築）
+- [x] マップ保存機能を実装（地形・粒子・オブジェクト・最小設定をスナップショット化）
+- [x] v4では粉体→固体逆変換を無効に固定（実装しないことをコード上で保証）
+- [x] 粉体の接触＋摩擦モデルを実装（`mu_s`, `mu_k`, `e`, 必要なら転がり抵抗）
+- [x] `Sand` / `Soil` を同モデルで追加し、低強度パラメータで崩れやすさを調整
+- [x] `Rock(SolidCell) -> Gravel(GranularParticle)` 遷移を実装
+- [x] 固体セル破壊時のセル→粉体粒子変換を実装（平方格子配置）
+- [x] オブジェクト内部応力（拘束反力/ひずみ）閾値ベースの破壊判定を実装
+- [x] 衝突インパルス閾値ベースの破壊判定を実装
+- [x] マテリアルごとの `PARTICLES_PER_CELL` 定数を追加（同機構を水粒子サイズ調整にも適用）
+- [x] マテリアル形態を導入（`SolidCell` / `GranularParticle`）し、`Rock` / `Gravel` / `Sand` / `Soil` を定義
 - [x] Design Feedback反映: `ObjectPhysicsField` 仕様を固定配列グリッド（候補 `ObjectId` 固定長保持）へ更新（`design.md` §13.7）
 - [x] Design Feedback反映: 衝突判定仕様を「候補IDはphysics grid、`distance/normal` はローカルSDF直接評価」へ更新（`design.md` §13.7）
 - [x] v4粉体・破壊遷移仕様を `design.md` に追加（マテリアル形態、破壊トリガ、セル→粒子変換）

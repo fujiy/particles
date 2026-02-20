@@ -4,7 +4,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use crate::physics::material::material_properties;
+use crate::physics::material::particle_properties;
 use crate::physics::object::{ObjectData, ObjectId, ObjectWorld};
 use crate::physics::particle::{
     ParticleMaterial, ParticleWorld, REST_DENSITY, TERRAIN_BOUNDARY_RADIUS_M,
@@ -310,7 +310,7 @@ pub fn sync_free_particles_to_render(
             continue;
         }
 
-        let radius_m = material_properties(material).radius_m;
+        let radius_m = particle_properties(material).radius_m;
         let radius_px = (radius_m * WATER_DOT_SCALE).ceil().max(1.0) as i32;
         let center_px = world_to_water_pixel(pos);
         let palette = cell_palette_for_particle(material);

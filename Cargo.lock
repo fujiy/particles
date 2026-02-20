@@ -3819,6 +3819,8 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "rayon",
+ "serde",
+ "serde_json",
  "tracing-tracy",
 ]
 

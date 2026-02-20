@@ -358,8 +358,13 @@ fn draw_particle_debug_overlay(
     }
     for (index, pos) in particle_world.positions().iter().enumerate() {
         let color = match particle_world.materials()[index] {
-            ParticleMaterial::Water => Color::srgba(0.10, 0.80, 0.95, 0.85),
-            ParticleMaterial::Stone => Color::srgba(0.63, 0.50, 0.34, 0.85),
+            ParticleMaterial::WaterLiquid => Color::srgba(0.10, 0.80, 0.95, 0.85),
+            ParticleMaterial::StoneSolid
+            | ParticleMaterial::StoneGranular
+            | ParticleMaterial::SoilSolid
+            | ParticleMaterial::SoilGranular
+            | ParticleMaterial::SandSolid
+            | ParticleMaterial::SandGranular => Color::srgba(0.63, 0.50, 0.34, 0.85),
         };
         gizmos
             .circle_2d(*pos, water_overlay_radius, color)

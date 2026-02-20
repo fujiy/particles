@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use bevy::prelude::*;
 
+pub use super::material::TerrainMaterial;
+
 pub const CELL_SIZE_M: f32 = 0.25;
 pub const CHUNK_SIZE: usize = 32;
 pub const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
@@ -17,11 +19,6 @@ pub const TERRAIN_SDF_SAMPLES_PER_CELL: i32 = 2;
 const SDF_INF: f32 = 1.0e9;
 const SDF_DIAGONAL_COST: f32 = std::f32::consts::SQRT_2;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TerrainMaterial {
-    Rock,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TerrainCell {
     #[default]
@@ -33,11 +30,15 @@ pub enum TerrainCell {
 }
 
 impl TerrainCell {
-    pub fn rock() -> Self {
+    pub fn solid(material: TerrainMaterial) -> Self {
         Self::Solid {
-            material: TerrainMaterial::Rock,
+            material,
             hp: DEFAULT_SOLID_HP,
         }
+    }
+
+    pub fn stone() -> Self {
+        Self::solid(TerrainMaterial::Stone)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -66,7 +67,7 @@ impl TerrainChunk {
             for local_x in 0..CHUNK_SIZE_I32 {
                 let local = IVec2::new(local_x, local_y);
                 let index = local_cell_to_index(local);
-                chunk.cells[index] = TerrainCell::rock();
+                chunk.cells[index] = TerrainCell::stone();
             }
         }
 
@@ -142,12 +143,12 @@ impl TerrainWorld {
         self.fill_rect(
             IVec2::new(min_cell_x, min_cell_y),
             IVec2::new(min_cell_x, max_cell_y),
-            TerrainCell::rock(),
+            TerrainCell::stone(),
         );
         self.fill_rect(
             IVec2::new(max_cell_x, min_cell_y),
             IVec2::new(max_cell_x, max_cell_y),
-            TerrainCell::rock(),
+            TerrainCell::stone(),
         );
     }
 
@@ -559,7 +560,7 @@ mod tests {
         assert!(!terrain.static_particles_dirty);
 
         let target = IVec2::new(0, 4);
-        assert!(terrain.set_cell(target, TerrainCell::rock()));
+        assert!(terrain.set_cell(target, TerrainCell::stone()));
         assert!(terrain.static_particles_dirty);
 
         terrain.rebuild_static_particles_if_dirty(0.25);

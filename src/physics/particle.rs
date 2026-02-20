@@ -5,8 +5,8 @@ use bevy::prelude::*;
 use rayon::prelude::*;
 
 use super::material::{
-    ENABLE_GRANULAR_TO_SOLID_RECONVERSION, material_properties, particles_per_cell,
-    terrain_break_collision_impulse_threshold, terrain_fracture_particle,
+    ENABLE_GRANULAR_TO_SOLID_RECONVERSION, particle_properties, particles_per_cell,
+    solid_break_properties, terrain_break_collision_impulse_threshold, terrain_fracture_particle,
 };
 use super::object::{ObjectId, ObjectPhysicsField, ObjectWorld};
 use super::terrain::{CELL_SIZE_M, TerrainCell, TerrainWorld, cell_to_world_center, world_to_cell};
@@ -252,7 +252,7 @@ impl ParticleWorld {
         self.mass = self
             .material
             .iter()
-            .map(|&material| material_properties(material).mass)
+            .map(|&material| particle_properties(material).mass)
             .collect();
         self.initial_pos = self.pos.clone();
         self.initial_vel = self.vel.clone();
@@ -728,7 +728,7 @@ impl ParticleWorld {
         let mut object_contacts = Vec::new();
         for i in 0..self.particle_count() {
             let material = self.material[i];
-            let props = material_properties(material);
+            let props = particle_properties(material);
             let is_water = is_water_particle(material);
             let neighbors = &self.neighbor_cache[i];
 
@@ -760,7 +760,7 @@ impl ParticleWorld {
                 if is_water && is_water_particle(neighbor_material) {
                     continue;
                 }
-                let neighbor_props = material_properties(neighbor_material);
+                let neighbor_props = particle_properties(neighbor_material);
                 let r = self.pos[i] - self.pos[j];
                 let dist2 = r.length_squared();
                 let contact_radius = props.radius_m + neighbor_props.radius_m;
@@ -843,7 +843,7 @@ impl ParticleWorld {
                 ComputeDeltaThreadScratch::default,
                 |mut scratch, (i, delta_pos_i)| {
                     let material = materials[i];
-                    let props = material_properties(material);
+                    let props = particle_properties(material);
                     let is_water = is_water_particle(material);
                     let neighbors = &neighbor_cache[i];
 
@@ -877,7 +877,7 @@ impl ParticleWorld {
                         if is_water && is_water_particle(neighbor_material) {
                             continue;
                         }
-                        let neighbor_props = material_properties(neighbor_material);
+                        let neighbor_props = particle_properties(neighbor_material);
                         let r = positions[i] - positions[j];
                         let dist2 = r.length_squared();
                         let contact_radius = props.radius_m + neighbor_props.radius_m;
@@ -963,7 +963,7 @@ impl ParticleWorld {
         let mut object_contacts = Vec::new();
         for i in 0..self.particle_count() {
             let material = self.material[i];
-            let props = material_properties(material);
+            let props = particle_properties(material);
             if !props.apply_contact_velocity_response {
                 continue;
             }
@@ -1049,7 +1049,7 @@ impl ParticleWorld {
                 let w = kernel_poly6(r.length_squared(), WATER_KERNEL_RADIUS_M);
                 correction += (self.vel[j] - self.vel[i]) * w;
             }
-            let viscosity = material_properties(self.material[i]).xsph_viscosity;
+            let viscosity = particle_properties(self.material[i]).xsph_viscosity;
             self.viscosity_work[i] = self.vel[i] + viscosity * correction;
         }
 
@@ -1096,10 +1096,9 @@ impl ParticleWorld {
                 continue;
             }
             let source_material = self.material[particle_index];
-            let props = material_properties(source_material);
-            if props.fracture_to.is_none() {
+            let Some(break_props) = solid_break_properties(source_material) else {
                 continue;
-            }
+            };
 
             let collision_impulse = object_world.reaction_impulse_of(object.id).length();
             let strain = self
@@ -1107,8 +1106,8 @@ impl ParticleWorld {
                 .get(&object.id)
                 .copied()
                 .unwrap_or(0.0);
-            if collision_impulse >= props.break_collision_impulse_threshold
-                || strain >= props.break_strain_threshold
+            if collision_impulse >= break_props.break_collision_impulse_threshold
+                || strain >= break_props.break_strain_threshold
             {
                 self.pending_object_fractures.insert(object.id);
             }
@@ -1117,7 +1116,7 @@ impl ParticleWorld {
         let mut terrain_impulse = HashMap::<IVec2, f32>::new();
         for i in 0..self.particle_count() {
             let particle_material = self.material[i];
-            let props = material_properties(particle_material);
+            let props = particle_properties(particle_material);
             let Some((signed_distance, normal)) =
                 terrain.sample_signed_distance_and_normal(self.pos[i])
             else {
@@ -1144,9 +1143,6 @@ impl ParticleWorld {
             let TerrainCell::Solid { material, .. } = terrain.get_loaded_cell_or_empty(cell) else {
                 continue;
             };
-            if material.form() != super::material::MaterialForm::Solid {
-                continue;
-            }
             if terrain_fracture_particle(material).is_none() {
                 continue;
             }
@@ -1163,6 +1159,7 @@ impl ParticleWorld {
         }
 
         let mut removed = HashSet::new();
+        let mut spawned_particles = Vec::new();
         for object in object_world.objects() {
             if !self.pending_object_fractures.contains(&object.id) {
                 continue;
@@ -1175,19 +1172,64 @@ impl ParticleWorld {
                 continue;
             }
             let source_material = self.material[seed_index];
-            let Some(target_material) = material_properties(source_material).fracture_to else {
+            let Some(target_material) =
+                solid_break_properties(source_material).and_then(|props| props.fracture_to)
+            else {
                 continue;
             };
-            let target_mass = material_properties(target_material).mass;
+            let target_props = particle_properties(target_material);
+            let target_mass = target_props.mass;
+            let split_count = target_props.particles_per_cell.max(1) as usize;
             for &index in &object.particle_indices {
                 if index >= self.particle_count() {
                     continue;
                 }
+                let base_pos = self.pos[index];
+                let base_vel = self.vel[index];
                 self.material[index] = target_material;
                 self.mass[index] = target_mass;
+
+                if split_count <= 1 {
+                    continue;
+                }
+                let axis = (split_count as f32).sqrt().ceil() as usize;
+                let spacing = CELL_SIZE_M / axis as f32;
+                let cell_min = base_pos - Vec2::splat(CELL_SIZE_M * 0.5);
+                let mut placed = 0usize;
+
+                'grid: for y in 0..axis {
+                    for x in 0..axis {
+                        if placed >= split_count {
+                            break 'grid;
+                        }
+                        let split_pos = cell_min
+                            + Vec2::new((x as f32 + 0.5) * spacing, (y as f32 + 0.5) * spacing);
+                        if placed == 0 {
+                            self.pos[index] = split_pos;
+                            self.prev_pos[index] = split_pos;
+                        } else {
+                            spawned_particles.push((
+                                split_pos,
+                                base_vel,
+                                target_mass,
+                                target_material,
+                            ));
+                        }
+                        placed += 1;
+                    }
+                }
             }
             removed.insert(object.id);
         }
+
+        for (position, velocity, mass, material) in spawned_particles {
+            self.pos.push(position);
+            self.prev_pos.push(position);
+            self.vel.push(velocity);
+            self.mass.push(mass);
+            self.material.push(material);
+        }
+        self.resize_work_buffers();
 
         object_world.remove_objects_by_ids(&removed);
         self.pending_object_fractures.clear();
@@ -1281,7 +1323,7 @@ impl ParticleWorld {
         let axis_f = axis as f32;
         let spacing = CELL_SIZE_M / axis_f.max(1.0);
         let cell_min = cell_to_world_center(cell) - Vec2::splat(CELL_SIZE_M * 0.5);
-        let particle_mass = material_properties(material).mass;
+        let particle_mass = particle_properties(material).mass;
 
         for y in 0..axis {
             for x in 0..axis {
@@ -1376,7 +1418,7 @@ fn generate_initial_water_positions() -> Vec<Vec2> {
             positions.push(
                 INITIAL_WATER_ORIGIN_M
                     + Vec2::new(col as f32, row as f32) * PARTICLE_SPACING_M
-                    + Vec2::splat(material_properties(ParticleMaterial::WaterLiquid).radius_m),
+                    + Vec2::splat(particle_properties(ParticleMaterial::WaterLiquid).radius_m),
             );
         }
     }
@@ -1384,7 +1426,7 @@ fn generate_initial_water_positions() -> Vec<Vec2> {
 }
 
 fn default_particle_mass() -> f32 {
-    material_properties(ParticleMaterial::WaterLiquid).mass
+    particle_properties(ParticleMaterial::WaterLiquid).mass
 }
 
 fn particle_grid_cell(position: Vec2) -> IVec2 {

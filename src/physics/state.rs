@@ -14,6 +14,12 @@ pub struct SimulationPerfMetrics {
 #[derive(Message)]
 pub struct ResetSimulationRequest;
 
+#[derive(Message)]
+pub struct SaveMapRequest;
+
+#[derive(Message)]
+pub struct LoadMapRequest;
+
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
 pub enum SimFixedSet {
     Physics,

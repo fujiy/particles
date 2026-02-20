@@ -150,6 +150,15 @@ pub struct ObjectData {
     pub pose_initialized: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ObjectSnapshotData {
+    pub id: ObjectId,
+    pub particle_indices: Vec<usize>,
+    pub rest_local: Vec<Vec2>,
+    pub shape_stiffness_alpha: f32,
+    pub shape_iters: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct ObjectPhysicsSdfSample {
     pub distance_m: f32,
@@ -577,6 +586,95 @@ impl ObjectWorld {
             true
         });
         self.rebuild_object_index_map();
+    }
+
+    pub fn remove_objects_by_ids(&mut self, ids: &HashSet<ObjectId>) {
+        if ids.is_empty() {
+            return;
+        }
+        self.objects.retain(|object| !ids.contains(&object.id));
+        for &id in ids {
+            self.reaction_impulses.remove(&id);
+        }
+        self.rebuild_object_index_map();
+    }
+
+    pub fn snapshot_data(&self) -> Vec<ObjectSnapshotData> {
+        self.objects
+            .iter()
+            .map(|object| ObjectSnapshotData {
+                id: object.id,
+                particle_indices: object.particle_indices.clone(),
+                rest_local: object.rest_local.clone(),
+                shape_stiffness_alpha: object.shape_stiffness_alpha,
+                shape_iters: object.shape_iters,
+            })
+            .collect()
+    }
+
+    pub fn restore_from_snapshot_data(
+        &mut self,
+        snapshots: &[ObjectSnapshotData],
+        particle_pos: &[Vec2],
+        particle_mass: &[f32],
+    ) -> Result<(), String> {
+        self.clear();
+        let mut seen_ids = HashSet::new();
+        let mut max_id = 0u32;
+
+        for snapshot in snapshots {
+            if !seen_ids.insert(snapshot.id) {
+                return Err(format!("duplicate object id: {}", snapshot.id));
+            }
+            if snapshot.particle_indices.is_empty() {
+                return Err(format!("object {} has no particles", snapshot.id));
+            }
+            if snapshot.particle_indices.len() != snapshot.rest_local.len() {
+                return Err(format!(
+                    "object {} has mismatched particle/rest counts",
+                    snapshot.id
+                ));
+            }
+            for &index in &snapshot.particle_indices {
+                if index >= particle_pos.len() || index >= particle_mass.len() {
+                    return Err(format!(
+                        "object {} references out-of-range particle index {}",
+                        snapshot.id, index
+                    ));
+                }
+            }
+
+            let mass_sum = snapshot
+                .particle_indices
+                .iter()
+                .map(|&index| particle_mass[index])
+                .sum::<f32>()
+                .max(1e-6);
+            let local_sdf = build_local_sdf(&snapshot.rest_local);
+            self.objects.push(ObjectData {
+                id: snapshot.id,
+                particle_indices: snapshot.particle_indices.clone(),
+                rest_local: snapshot.rest_local.clone(),
+                mass_sum,
+                shape_stiffness_alpha: snapshot.shape_stiffness_alpha.clamp(0.0, 1.0),
+                shape_iters: snapshot.shape_iters.max(1),
+                shape_dirty: true,
+                physics_dirty: true,
+                local_sdf,
+                pose_center: Vec2::ZERO,
+                pose_theta: 0.0,
+                prev_pose_center: Vec2::ZERO,
+                prev_pose_theta: 0.0,
+                aabb_world: Aabb2::default(),
+                prev_aabb_world: Aabb2::default(),
+                pose_initialized: false,
+            });
+            max_id = max_id.max(snapshot.id);
+        }
+
+        self.next_id = max_id.wrapping_add(1);
+        self.rebuild_object_index_map();
+        Ok(())
     }
 
     pub fn update_physics_field(
