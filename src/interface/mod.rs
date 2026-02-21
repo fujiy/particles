@@ -12,6 +12,7 @@ use crate::physics::material::terrain_fracture_particle;
 use crate::physics::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectWorld};
 use crate::physics::particle::{
     PARTICLE_SPEED_LIMIT_MPS, ParticleMaterial, ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M,
+    WAKE_RADIUS,
 };
 use crate::physics::save_load;
 use crate::physics::state::{
@@ -364,53 +365,55 @@ fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>
             ..default()
         },))
         .with_children(|parent| {
-            parent.spawn((
-                Button,
-                Node {
-                    width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
-                    height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    border: UiRect::all(px(2.0)),
-                    ..default()
-                },
-                BackgroundColor(BUTTON_BG_OFF),
-                BorderColor::all(BUTTON_BORDER_OFF),
-                SaveLoadOpenButton {
-                    mode: SaveLoadDialogMode::Save,
-                },
-            ))
-            .with_children(|button| {
-                button.spawn((
-                    Text::new("Save"),
-                    TextFont::from_font_size(14.0),
-                    TextColor(Color::WHITE),
-                ));
-            });
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
+                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border: UiRect::all(px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_BG_OFF),
+                    BorderColor::all(BUTTON_BORDER_OFF),
+                    SaveLoadOpenButton {
+                        mode: SaveLoadDialogMode::Save,
+                    },
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        Text::new("Save"),
+                        TextFont::from_font_size(14.0),
+                        TextColor(Color::WHITE),
+                    ));
+                });
 
-            parent.spawn((
-                Button,
-                Node {
-                    width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
-                    height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    border: UiRect::all(px(2.0)),
-                    ..default()
-                },
-                BackgroundColor(BUTTON_BG_OFF),
-                BorderColor::all(BUTTON_BORDER_OFF),
-                SaveLoadOpenButton {
-                    mode: SaveLoadDialogMode::Load,
-                },
-            ))
-            .with_children(|button| {
-                button.spawn((
-                    Text::new("Load"),
-                    TextFont::from_font_size(14.0),
-                    TextColor(Color::WHITE),
-                ));
-            });
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
+                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border: UiRect::all(px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_BG_OFF),
+                    BorderColor::all(BUTTON_BORDER_OFF),
+                    SaveLoadOpenButton {
+                        mode: SaveLoadDialogMode::Load,
+                    },
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        Text::new("Load"),
+                        TextFont::from_font_size(14.0),
+                        TextColor(Color::WHITE),
+                    ));
+                });
         });
 
     commands
@@ -750,8 +753,8 @@ fn handle_save_load_text_input(
     mut save_load_ui_state: ResMut<SaveLoadUiState>,
 ) {
     let dialog_open = save_load_ui_state.mode.is_some();
-    let save_mode_focused =
-        save_load_ui_state.mode == Some(SaveLoadDialogMode::Save) && save_load_ui_state.input_focused;
+    let save_mode_focused = save_load_ui_state.mode == Some(SaveLoadDialogMode::Save)
+        && save_load_ui_state.input_focused;
 
     for ime in ime_reader.read() {
         if !save_mode_focused {
@@ -803,8 +806,8 @@ fn sync_save_load_ime_state(
     save_load_ui_state: Res<SaveLoadUiState>,
     mut primary_window: Single<&mut Window, With<PrimaryWindow>>,
 ) {
-    let enable_ime =
-        save_load_ui_state.mode == Some(SaveLoadDialogMode::Save) && save_load_ui_state.input_focused;
+    let enable_ime = save_load_ui_state.mode == Some(SaveLoadDialogMode::Save)
+        && save_load_ui_state.input_focused;
     primary_window.ime_enabled = enable_ime;
     if enable_ime {
         if let Some(cursor) = primary_window.cursor_position() {
@@ -899,7 +902,8 @@ fn update_save_load_slot_button_visuals(
     >,
 ) {
     for (interaction, button, mut bg, mut border_color) in &mut buttons {
-        let selected = save_load_ui_state.selected_slot.as_deref() == Some(button.slot_name.as_str());
+        let selected =
+            save_load_ui_state.selected_slot.as_deref() == Some(button.slot_name.as_str());
         *bg = match *interaction {
             Interaction::Pressed => BUTTON_BG_PRESS.into(),
             Interaction::Hovered => BUTTON_BG_HOVER.into(),
@@ -1142,6 +1146,7 @@ fn handle_world_interactions(
                     spawn_cells.push(cell);
                     last_cell = Some(cell);
                 }
+                particle_world.wake_particles_in_radius(cell_to_world_center(cell), WAKE_RADIUS);
             });
             interaction_state.last_water_spawn_cell = last_cell;
             if !spawn_cells.is_empty() {
@@ -1161,6 +1166,7 @@ fn handle_world_interactions(
                 if cell_in_fixed_world(cell) {
                     interaction_state.stone_stroke.generated_cells.insert(cell);
                 }
+                particle_world.wake_particles_in_radius(cell_to_world_center(cell), WAKE_RADIUS);
             });
             terrain_changed |= update_stone_stroke_partition(
                 &mut interaction_state.stone_stroke,
@@ -1179,11 +1185,16 @@ fn handle_world_interactions(
                         spawn_cells.push(cell);
                         last_cell = Some(cell);
                     }
+                    particle_world
+                        .wake_particles_in_radius(cell_to_world_center(cell), WAKE_RADIUS);
                 });
                 interaction_state.last_granular_spawn_cell = last_cell;
                 if !spawn_cells.is_empty() {
-                    let _ = particle_world
-                        .spawn_material_particles_from_cells(&spawn_cells, material, Vec2::ZERO);
+                    let _ = particle_world.spawn_material_particles_from_cells(
+                        &spawn_cells,
+                        material,
+                        Vec2::ZERO,
+                    );
                 }
             }
         }
@@ -1210,6 +1221,7 @@ fn handle_world_interactions(
                     point,
                     TOOL_DELETE_BRUSH_RADIUS_M,
                 ));
+                particle_world.wake_particles_in_radius(point, WAKE_RADIUS);
             });
             terrain_changed |= !removed_terrain_cells.is_empty();
             if !removed_terrain_cells.is_empty() {
@@ -1235,8 +1247,8 @@ fn handle_world_interactions(
             let mut detached_particles = HashSet::new();
             let mut removed_terrain_cells = HashSet::new();
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                let fractured =
-                    particle_world.fracture_solid_particles_in_radius(point, TOOL_BREAK_BRUSH_RADIUS_M);
+                let fractured = particle_world
+                    .fracture_solid_particles_in_radius(point, TOOL_BREAK_BRUSH_RADIUS_M);
                 detached_particles.extend(fractured);
                 removed_terrain_cells.extend(break_terrain_solids_in_radius(
                     &mut terrain_world,
@@ -1244,10 +1256,12 @@ fn handle_world_interactions(
                     point,
                     TOOL_BREAK_BRUSH_RADIUS_M,
                 ));
+                particle_world.wake_particles_in_radius(point, WAKE_RADIUS);
             });
             terrain_changed |= !removed_terrain_cells.is_empty();
             if !detached_particles.is_empty() {
-                particle_world.detach_and_postprocess_objects(&mut object_world, &detached_particles);
+                particle_world
+                    .detach_and_postprocess_objects(&mut object_world, &detached_particles);
             }
             if !removed_terrain_cells.is_empty() {
                 terrain_changed |= particle_world.detach_terrain_components_after_cell_removal(
@@ -1600,7 +1614,8 @@ fn break_terrain_solids_in_radius(
             if cell_to_world_center(cell).distance_squared(center) > radius2 {
                 continue;
             }
-            let TerrainCell::Solid { material, .. } = terrain_world.get_loaded_cell_or_empty(cell) else {
+            let TerrainCell::Solid { material, .. } = terrain_world.get_loaded_cell_or_empty(cell)
+            else {
                 continue;
             };
             let Some(target_particle) = terrain_fracture_particle(material) else {
@@ -1876,8 +1891,8 @@ fn build_break_icon_image() -> Image {
                 pixels[idx..idx + 4].copy_from_slice(&dark);
                 continue;
             }
-            let diagonal = (x as i32 - y as i32).abs() <= 1
-                || ((width - 1 - x) as i32 - y as i32).abs() <= 1;
+            let diagonal =
+                (x as i32 - y as i32).abs() <= 1 || ((width - 1 - x) as i32 - y as i32).abs() <= 1;
             if diagonal {
                 pixels[idx..idx + 4].copy_from_slice(&amber);
             }

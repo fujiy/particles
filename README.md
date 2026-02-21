@@ -31,13 +31,13 @@ Bevy の `trace` と `LogPlugin` の `custom_layer` で Tracy を有効化でき
 ### Tracy プロファイル（通常実行）
 
 ```bash
-cargo run --features tracy
+cargo run --release --features tracy
 ```
 
 ### Tracy プロファイル（ファイル監視）
 
 ```bash
-cargo watch -x "run --features tracy"
+cargo watch -x "run --release --features tracy"
 ```
 
 - もし表示が不安定な場合は `cargo run --no-default-features --features tracy` で `dynamic_linking` を外して試してください

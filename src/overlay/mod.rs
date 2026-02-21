@@ -2,8 +2,8 @@ use bevy::prelude::*;
 
 use crate::physics::object::{ObjectData, ObjectWorld};
 use crate::physics::particle::{
-    PARTICLE_RADIUS_M, ParticleMaterial, ParticleWorld, WATER_KERNEL_RADIUS_M,
-    nominal_particle_draw_radius_m,
+    PARTICLE_RADIUS_M, ParticleActivityState, ParticleMaterial, ParticleWorld,
+    WATER_KERNEL_RADIUS_M, nominal_particle_draw_radius_m,
 };
 use crate::physics::state::SimUpdateSet;
 use crate::physics::terrain::{
@@ -19,20 +19,20 @@ const GRID_NEIGHBOR_COLOR: Color = Color::srgba(0.27, 0.75, 0.98, 0.28);
 const GRID_CHUNK_COLOR: Color = Color::srgba(0.98, 0.78, 0.25, 0.75);
 const GRID_OBJECT_COLOR: Color = Color::srgba(0.92, 0.36, 0.12, 0.70);
 const GRID_BUTTON_BOTTOM_PX: f32 = 50.0;
-const DEBUG_BUTTON_BOTTOM_PX: f32 = 12.0;
+const PARTICLE_BUTTON_BOTTOM_PX: f32 = 12.0;
 const TERRAIN_PARTICLE_RADIUS_M: f32 = PARTICLE_RADIUS_M * 0.55;
-const DEBUG_OVERLAY_CIRCLE_RESOLUTION: u32 = 8;
+const PARTICLE_OVERLAY_CIRCLE_RESOLUTION: u32 = 8;
 
 pub struct OverlayPlugin;
 
 impl Plugin for OverlayPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<DebugOverlayState>()
+        app.init_resource::<ParticleOverlayState>()
             .init_resource::<GridOverlayState>()
             .add_systems(Startup, setup_overlay_ui)
             .add_systems(
                 Update,
-                (handle_grid_overlay_button, handle_overlay_button)
+                (handle_grid_overlay_button, handle_particle_overlay_button)
                     .chain()
                     .in_set(SimUpdateSet::Interaction),
             )
@@ -40,24 +40,24 @@ impl Plugin for OverlayPlugin {
                 Update,
                 (
                     update_grid_overlay_button_label,
-                    update_overlay_button_label,
+                    update_particle_overlay_button_label,
                 )
                     .chain()
                     .in_set(SimUpdateSet::Ui),
             )
             .add_systems(
                 Update,
-                (draw_grid_overlay, draw_particle_debug_overlay).in_set(SimUpdateSet::Overlay),
+                (draw_grid_overlay, draw_particle_overlay).in_set(SimUpdateSet::Overlay),
             );
     }
 }
 
 #[derive(Resource, Debug)]
-struct DebugOverlayState {
+struct ParticleOverlayState {
     enabled: bool,
 }
 
-impl Default for DebugOverlayState {
+impl Default for ParticleOverlayState {
     fn default() -> Self {
         Self { enabled: false }
     }
@@ -75,10 +75,10 @@ impl Default for GridOverlayState {
 }
 
 #[derive(Component)]
-struct OverlayToggleButton;
+struct ParticleOverlayToggleButton;
 
 #[derive(Component)]
-struct OverlayToggleButtonLabel;
+struct ParticleOverlayToggleButtonLabel;
 
 #[derive(Component)]
 struct GridOverlayToggleButton;
@@ -115,29 +115,29 @@ fn setup_overlay_ui(mut commands: Commands) {
             Node {
                 position_type: PositionType::Absolute,
                 right: px(12.0),
-                bottom: px(DEBUG_BUTTON_BOTTOM_PX),
+                bottom: px(PARTICLE_BUTTON_BOTTOM_PX),
                 padding: UiRect::axes(px(10.0), px(6.0)),
                 ..default()
             },
             BackgroundColor(BUTTON_BG_OFF),
-            OverlayToggleButton,
+            ParticleOverlayToggleButton,
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("Debug Overlay: OFF"),
+                Text::new("Particle Overlay: OFF"),
                 TextFont::from_font_size(14.0),
                 TextColor(Color::WHITE),
-                OverlayToggleButtonLabel,
+                ParticleOverlayToggleButtonLabel,
             ));
         });
 }
 
-fn handle_overlay_button(
+fn handle_particle_overlay_button(
     mut interactions: Query<
         (&Interaction, &mut BackgroundColor),
-        (Changed<Interaction>, With<OverlayToggleButton>),
+        (Changed<Interaction>, With<ParticleOverlayToggleButton>),
     >,
-    mut overlay_state: ResMut<DebugOverlayState>,
+    mut overlay_state: ResMut<ParticleOverlayState>,
 ) {
     for (interaction, mut bg) in &mut interactions {
         match *interaction {
@@ -195,9 +195,9 @@ fn update_grid_overlay_button_label(
     }
 }
 
-fn update_overlay_button_label(
-    overlay_state: Res<DebugOverlayState>,
-    mut labels: Query<&mut Text, With<OverlayToggleButtonLabel>>,
+fn update_particle_overlay_button_label(
+    overlay_state: Res<ParticleOverlayState>,
+    mut labels: Query<&mut Text, With<ParticleOverlayToggleButtonLabel>>,
 ) {
     if !overlay_state.is_changed() {
         return;
@@ -205,9 +205,9 @@ fn update_overlay_button_label(
 
     for mut label in &mut labels {
         label.0 = if overlay_state.enabled {
-            "Debug Overlay: ON".to_string()
+            "Particle Overlay: ON".to_string()
         } else {
-            "Debug Overlay: OFF".to_string()
+            "Particle Overlay: OFF".to_string()
         };
     }
 }
@@ -335,9 +335,9 @@ fn object_pose_for_overlay(
     Some((center, theta))
 }
 
-fn draw_particle_debug_overlay(
+fn draw_particle_overlay(
     mut gizmos: Gizmos,
-    overlay_state: Res<DebugOverlayState>,
+    overlay_state: Res<ParticleOverlayState>,
     terrain_world: Res<TerrainWorld>,
     particle_world: Res<ParticleWorld>,
 ) {
@@ -354,9 +354,14 @@ fn draw_particle_debug_overlay(
                 TERRAIN_PARTICLE_RADIUS_M,
                 Color::srgba(0.84, 0.54, 0.28, 0.65),
             )
-            .resolution(DEBUG_OVERLAY_CIRCLE_RESOLUTION);
+            .resolution(PARTICLE_OVERLAY_CIRCLE_RESOLUTION);
     }
     for (index, pos) in particle_world.positions().iter().enumerate() {
+        if particle_world.activity_states().get(index).copied()
+            != Some(ParticleActivityState::Active)
+        {
+            continue;
+        }
         let color = match particle_world.materials()[index] {
             ParticleMaterial::WaterLiquid => Color::srgba(0.10, 0.80, 0.95, 0.85),
             ParticleMaterial::StoneSolid
@@ -368,7 +373,7 @@ fn draw_particle_debug_overlay(
         };
         gizmos
             .circle_2d(*pos, water_overlay_radius, color)
-            .resolution(DEBUG_OVERLAY_CIRCLE_RESOLUTION);
+            .resolution(PARTICLE_OVERLAY_CIRCLE_RESOLUTION);
     }
 }
 

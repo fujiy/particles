@@ -173,7 +173,13 @@ pub fn save_to_slot(
 ) -> Result<PathBuf, String> {
     let slot = sanitize_slot_name(slot_name)?;
     let path = save_root_dir().join(format!("{slot}.json"));
-    save_to_path(path.to_string_lossy().as_ref(), terrain, particles, objects, sim_state)?;
+    save_to_path(
+        path.to_string_lossy().as_ref(),
+        terrain,
+        particles,
+        objects,
+        sim_state,
+    )?;
     Ok(path)
 }
 

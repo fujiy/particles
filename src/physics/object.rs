@@ -1375,7 +1375,12 @@ mod tests {
         objects.split_object_after_detach(object_id, &detached, &positions, &masses);
 
         assert_eq!(objects.objects().len(), 2);
-        assert!(objects.objects().iter().any(|object| object.id == object_id));
+        assert!(
+            objects
+                .objects()
+                .iter()
+                .any(|object| object.id == object_id)
+        );
         assert!(
             objects
                 .objects()
