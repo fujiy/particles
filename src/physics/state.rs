@@ -3,6 +3,7 @@ use bevy::prelude::*;
 #[derive(Resource, Debug, Default)]
 pub struct SimulationState {
     pub running: bool,
+    pub step_once: bool,
 }
 
 #[derive(Resource, Debug, Default)]
@@ -22,6 +23,28 @@ pub struct SaveMapRequest {
 #[derive(Message)]
 pub struct LoadMapRequest {
     pub slot_name: String,
+}
+
+#[derive(Message)]
+pub struct ReplayLoadScenarioRequest {
+    pub scenario_name: String,
+}
+
+#[derive(Message)]
+pub struct ReplaySaveArtifactRequest {
+    pub save_final: bool,
+}
+
+#[derive(Resource, Debug, Default)]
+pub struct ReplayState {
+    pub enabled: bool,
+    pub scenario_name: Option<String>,
+    pub scenario_total_steps: usize,
+    pub current_step: usize,
+    pub loop_enabled: bool,
+    pub status_message: String,
+    pub baseline_particle_count: usize,
+    pub baseline_solid_cell_count: usize,
 }
 
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]

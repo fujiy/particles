@@ -1,9 +1,21 @@
 # Tasks
 
 ## Todo
+- [ ] 任意で `final_state.png` 出力を実装（目視確認補助）
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] テストケース再生用の簡易テストモードを追加（再生/停止/1step/ループ）
+- [x] テストモードからartifact保存操作を追加（現在step/終了状態）
+- [x] 開発手順をREADMEへ追記（簡易再生モード起動）
+- [x] `tests/physics_scenarios.rs` を追加し、headless統合テストランナーを実装（固定dt手動step）
+- [x] `ScenarioSpec` を導入し、初期状態・step数・判定閾値をデータ化
+- [x] 基本シナリオを追加（単一物体落下、水のみ挙動、地形接触安定）
+- [x] シナリオ終了時artifact出力を実装（`final_state.json`, `metrics.json`）
+- [x] 失敗時artifact保持と出力先規約を整備（`artifacts/tests/<scenario>/<run_id>/`）
+- [x] 数値判定ユーティリティを実装（侵入率、最大速度、睡眠率など）
+- [x] 開発手順をREADMEへ追記（headless実行方法、artifact確認方法）
+- [x] v9物理テスト基盤仕様を `design.md` に追加（headless統合テスト + artifact + 簡易再生）
 - [x] 並列化対応のため接触補正ワークバッファを導入（スレッドローカル集計 + reduce）
 - [x] XPBD移行の回帰テストを追加（水挙動非退行、地形接触補正、砕石化直後のSleep lock）
 - [x] 非水接触用 `GranularSolver` を追加し、水ソルバから実行パスを分離

@@ -1,17 +1,11 @@
-mod camera_controller;
-mod interface;
-mod overlay;
-mod physics;
-mod render;
-
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::log::{BoxedLayer, LogPlugin};
 use bevy::prelude::*;
-use camera_controller::CameraControllerPlugin;
-use interface::InterfacePlugin;
-use overlay::OverlayPlugin;
-use physics::PhysicsPlugin;
-use render::RenderPlugin;
+use particles::camera_controller::CameraControllerPlugin;
+use particles::interface::InterfacePlugin;
+use particles::overlay::OverlayPlugin;
+use particles::physics::PhysicsPlugin;
+use particles::render::RenderPlugin;
 
 fn tracy_layer(_app: &mut App) -> Option<BoxedLayer> {
     #[cfg(feature = "tracy")]

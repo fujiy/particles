@@ -23,6 +23,8 @@ pub const DEFAULT_QUICK_SAVE_SLOT: &str = "quick_save";
 struct SaveSnapshot {
     save_version: u32,
     simulation: SimulationSnapshot,
+    #[serde(default)]
+    loaded_chunks: Vec<ChunkSnapshot>,
     terrain_cells: Vec<TerrainCellSnapshot>,
     particles: Vec<ParticleSnapshot>,
     objects: Vec<ObjectSnapshot>,
@@ -38,6 +40,11 @@ struct TerrainCellSnapshot {
     cell: [i32; 2],
     material: SaveTerrainMaterial,
     hp: u16,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ChunkSnapshot {
+    chunk: [i32; 2],
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -214,6 +221,13 @@ pub fn save_to_path(
         simulation: SimulationSnapshot {
             running: sim_state.running,
         },
+        loaded_chunks: terrain
+            .loaded_chunk_coords()
+            .into_iter()
+            .map(|chunk| ChunkSnapshot {
+                chunk: [chunk.x, chunk.y],
+            })
+            .collect(),
         terrain_cells: collect_terrain_cells(terrain),
         particles: particles
             .positions()
@@ -296,17 +310,25 @@ pub fn load_from_path(
     }
     validate_snapshot(&snapshot)?;
 
-    let min_cell = IVec2::new(
-        WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32,
-        WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32,
-    );
-    let max_cell = IVec2::new(
-        (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1,
-        (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1,
-    );
-
-    terrain.reset_fixed_world();
-    terrain.fill_rect(min_cell, max_cell, TerrainCell::Empty);
+    terrain.clear();
+    if snapshot.loaded_chunks.is_empty() {
+        let mut seen_chunks = HashSet::new();
+        for cell in &snapshot.terrain_cells {
+            let coord = IVec2::new(cell.cell[0], cell.cell[1]);
+            let chunk = IVec2::new(
+                coord.x.div_euclid(CHUNK_SIZE_I32),
+                coord.y.div_euclid(CHUNK_SIZE_I32),
+            );
+            if seen_chunks.insert(chunk) {
+                terrain.ensure_chunk_loaded(chunk);
+            }
+        }
+    } else {
+        for chunk in &snapshot.loaded_chunks {
+            terrain.ensure_chunk_loaded(IVec2::new(chunk.chunk[0], chunk.chunk[1]));
+        }
+    }
+    terrain.clear_loaded_cells();
     for cell in &snapshot.terrain_cells {
         let cell_coord = IVec2::new(cell.cell[0], cell.cell[1]);
         let _ = terrain.set_cell(

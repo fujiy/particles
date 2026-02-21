@@ -1207,7 +1207,7 @@ impl ParticleWorld {
         }
         {
             let _span = tracing::info_span!("physics::cull_escaped_particles").entered();
-            self.cull_escaped_particles(object_world);
+            self.cull_escaped_particles(terrain, object_world);
         }
 
         {
@@ -2638,17 +2638,25 @@ impl ParticleWorld {
         }
     }
 
-    fn cull_escaped_particles(&mut self, object_world: &mut ObjectWorld) {
+    fn cull_escaped_particles(&mut self, terrain: &TerrainWorld, object_world: &mut ObjectWorld) {
         if self.particle_count() == 0 {
             return;
         }
 
-        let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32 - PARTICLE_ESCAPE_MARGIN_X_CELLS;
-        let max_cell_x =
-            (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1 + PARTICLE_ESCAPE_MARGIN_X_CELLS;
-        let min_cell_y = WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32 - PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS;
-        let max_cell_y =
-            (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1 + PARTICLE_ESCAPE_MARGIN_TOP_CELLS;
+        let (base_min_cell, base_max_cell) = terrain.loaded_cell_bounds().unwrap_or((
+            IVec2::new(
+                WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32,
+                WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32,
+            ),
+            IVec2::new(
+                (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1,
+                (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1,
+            ),
+        ));
+        let min_cell_x = base_min_cell.x - PARTICLE_ESCAPE_MARGIN_X_CELLS;
+        let max_cell_x = base_max_cell.x + PARTICLE_ESCAPE_MARGIN_X_CELLS;
+        let min_cell_y = base_min_cell.y - PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS;
+        let max_cell_y = base_max_cell.y + PARTICLE_ESCAPE_MARGIN_TOP_CELLS;
 
         let min_world = cell_to_world_center(IVec2::new(min_cell_x, min_cell_y))
             - Vec2::splat(CELL_SIZE_M * 0.5);

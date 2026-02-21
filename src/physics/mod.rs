@@ -4,6 +4,7 @@ pub mod object;
 pub mod particle;
 mod physics_plugin;
 pub mod save_load;
+pub mod scenario;
 pub mod state;
 pub mod terrain;
 

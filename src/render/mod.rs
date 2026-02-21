@@ -97,7 +97,6 @@ impl Plugin for RenderPlugin {
 }
 
 pub fn bootstrap_terrain_chunks(mut terrain_world: ResMut<TerrainWorld>) {
-    terrain_world.reset_fixed_world();
     terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
 }
 
@@ -107,6 +106,19 @@ pub fn sync_dirty_terrain_chunks_to_render(
     mut render_state: ResMut<TerrainRenderState>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    let stale_chunks: Vec<_> = render_state
+        .chunk_sprites
+        .keys()
+        .copied()
+        .filter(|chunk_coord| terrain_world.chunk(*chunk_coord).is_none())
+        .collect();
+    for chunk_coord in stale_chunks {
+        if let Some(entry) = render_state.chunk_sprites.remove(&chunk_coord) {
+            commands.entity(entry.entity).despawn();
+            images.remove(entry.image.id());
+        }
+    }
+
     let dirty_chunks = terrain_world.take_dirty_chunks();
 
     for chunk_coord in dirty_chunks {

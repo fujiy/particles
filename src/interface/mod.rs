@@ -9,14 +9,21 @@ use bevy::window::{Ime, PrimaryWindow};
 
 use crate::physics::cell_to_world_center;
 use crate::physics::material::terrain_fracture_particle;
-use crate::physics::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectWorld};
+use crate::physics::object::{
+    OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectPhysicsField, ObjectWorld,
+};
 use crate::physics::particle::{
     PARTICLE_SPEED_LIMIT_MPS, ParticleMaterial, ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M,
     WAKE_RADIUS,
 };
 use crate::physics::save_load;
+use crate::physics::scenario::{
+    count_solid_cells, default_scenario_names, default_scenario_spec_by_name,
+    evaluate_scenario_state,
+};
 use crate::physics::state::{
-    LoadMapRequest, SaveMapRequest, SimUpdateSet, SimulationPerfMetrics, SimulationState,
+    LoadMapRequest, ReplayLoadScenarioRequest, ReplayState, ResetSimulationRequest, SaveMapRequest,
+    SimUpdateSet, SimulationPerfMetrics, SimulationState,
 };
 use crate::physics::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, WORLD_MAX_CHUNK_X,
@@ -49,6 +56,9 @@ const DIALOG_WIDTH_PX: f32 = 380.0;
 const DIALOG_NAME_INPUT_HEIGHT_PX: f32 = 34.0;
 const DIALOG_SLOT_LIST_MAX_HEIGHT_PX: f32 = 240.0;
 const DIALOG_SLOT_BUTTON_HEIGHT_PX: f32 = 30.0;
+const TEST_ASSERT_PANEL_TOP_PX: f32 = 260.0;
+const TEST_ASSERT_PANEL_RIGHT_PX: f32 = 10.0;
+const TEST_ASSERT_PANEL_WIDTH_PX: f32 = 360.0;
 const DRAG_VELOCITY_BRUSH_RADIUS_M: f32 = 0.55;
 const DRAG_VELOCITY_GAIN: f32 = 0.9;
 const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
@@ -147,6 +157,7 @@ impl Plugin for InterfacePlugin {
                 Update,
                 (
                     handle_save_load_open_button_interaction,
+                    handle_save_load_reset_button_interaction,
                     handle_save_load_name_input_button_interaction,
                     handle_save_load_dialog_buttons,
                     handle_save_load_slot_button_interaction,
@@ -163,9 +174,11 @@ impl Plugin for InterfacePlugin {
                 (
                     update_world_tool_button_visuals,
                     update_save_load_open_button_visuals,
+                    update_save_load_reset_button_visuals,
                     update_save_load_name_input_button_visuals,
                     update_save_load_slot_button_visuals,
                     update_save_load_dialog,
+                    update_test_assert_panel,
                     update_world_tool_tooltip,
                     update_simulation_hud,
                 )
@@ -287,7 +300,9 @@ enum SaveLoadDialogMode {
 struct SaveLoadUiState {
     mode: Option<SaveLoadDialogMode>,
     slots: Vec<String>,
+    scenario_slots: Vec<String>,
     selected_slot: Option<String>,
+    selected_slot_source: Option<SaveLoadSlotSource>,
     input_name: String,
     input_focused: bool,
     ime_preedit: String,
@@ -295,10 +310,19 @@ struct SaveLoadUiState {
     refresh_requested: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SaveLoadSlotSource {
+    Save,
+    TestCase,
+}
+
 #[derive(Component, Clone, Copy)]
 struct SaveLoadOpenButton {
     mode: SaveLoadDialogMode,
 }
+
+#[derive(Component)]
+struct SaveLoadResetButton;
 
 #[derive(Component)]
 struct SaveLoadDialogRoot;
@@ -330,7 +354,17 @@ struct SaveLoadDialogCancelButton;
 #[derive(Component, Clone)]
 struct SaveLoadSlotButton {
     slot_name: String,
+    source: SaveLoadSlotSource,
 }
+
+#[derive(Component)]
+struct TestAssertPanelRoot;
+
+#[derive(Component)]
+struct TestAssertTitleText;
+
+#[derive(Component)]
+struct TestAssertList;
 
 fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let icon_set = create_world_tool_icon_set(&mut images);
@@ -414,6 +448,64 @@ fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>
                         TextColor(Color::WHITE),
                     ));
                 });
+
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
+                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border: UiRect::all(px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_BG_OFF),
+                    BorderColor::all(BUTTON_BORDER_OFF),
+                    SaveLoadResetButton,
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        Text::new("Reset"),
+                        TextFont::from_font_size(14.0),
+                        TextColor(Color::WHITE),
+                    ));
+                });
+        });
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(TEST_ASSERT_PANEL_RIGHT_PX),
+                top: px(TEST_ASSERT_PANEL_TOP_PX),
+                width: px(TEST_ASSERT_PANEL_WIDTH_PX),
+                display: Display::None,
+                padding: UiRect::all(px(8.0)),
+                row_gap: px(6.0),
+                flex_direction: FlexDirection::Column,
+                ..default()
+            },
+            BackgroundColor(HUD_BG_COLOR),
+            TestAssertPanelRoot,
+        ))
+        .with_children(|panel| {
+            panel.spawn((
+                Text::new("Test Assertions"),
+                TextFont::from_font_size(14.0),
+                TextColor(Color::WHITE),
+                TestAssertTitleText,
+            ));
+            panel
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(2.0),
+                        ..default()
+                    },
+                    TestAssertList,
+                ))
+                .with_children(|_| {});
         });
 
     commands
@@ -659,6 +751,24 @@ fn handle_save_load_open_button_interaction(
     }
 }
 
+fn handle_save_load_reset_button_interaction(
+    mut interactions: Query<
+        &Interaction,
+        (
+            Changed<Interaction>,
+            With<SaveLoadResetButton>,
+            With<Button>,
+        ),
+    >,
+    mut reset_writer: MessageWriter<ResetSimulationRequest>,
+) {
+    for interaction in &mut interactions {
+        if *interaction == Interaction::Pressed {
+            reset_writer.write(ResetSimulationRequest);
+        }
+    }
+}
+
 fn handle_save_load_name_input_button_interaction(
     mut interactions: Query<
         &Interaction,
@@ -688,6 +798,7 @@ fn handle_save_load_dialog_buttons(
     mut save_load_ui_state: ResMut<SaveLoadUiState>,
     mut save_writer: MessageWriter<SaveMapRequest>,
     mut load_writer: MessageWriter<LoadMapRequest>,
+    mut replay_load_writer: MessageWriter<ReplayLoadScenarioRequest>,
 ) {
     for interaction in &mut cancel_buttons {
         if *interaction == Interaction::Pressed {
@@ -716,7 +827,16 @@ fn handle_save_load_dialog_buttons(
                     save_load_ui_state.status_message = "Select a save slot to load".to_string();
                     return;
                 };
-                load_writer.write(LoadMapRequest { slot_name });
+                match save_load_ui_state.selected_slot_source {
+                    Some(SaveLoadSlotSource::Save) | None => {
+                        load_writer.write(LoadMapRequest { slot_name });
+                    }
+                    Some(SaveLoadSlotSource::TestCase) => {
+                        replay_load_writer.write(ReplayLoadScenarioRequest {
+                            scenario_name: slot_name,
+                        });
+                    }
+                }
                 close_save_load_dialog(&mut save_load_ui_state);
             }
             None => {}
@@ -736,8 +856,11 @@ fn handle_save_load_slot_button_interaction(
             continue;
         }
         save_load_ui_state.selected_slot = Some(button.slot_name.clone());
+        save_load_ui_state.selected_slot_source = Some(button.source);
         if matches!(save_load_ui_state.mode, Some(SaveLoadDialogMode::Save)) {
-            save_load_ui_state.input_name = button.slot_name.clone();
+            if matches!(button.source, SaveLoadSlotSource::Save) {
+                save_load_ui_state.input_name = button.slot_name.clone();
+            }
             save_load_ui_state.input_focused = false;
             save_load_ui_state.ime_preedit.clear();
         } else {
@@ -867,6 +990,22 @@ fn update_save_load_open_button_visuals(
     }
 }
 
+fn update_save_load_reset_button_visuals(
+    mut buttons: Query<
+        (&Interaction, &mut BackgroundColor, &mut BorderColor),
+        (With<Button>, With<SaveLoadResetButton>),
+    >,
+) {
+    for (interaction, mut bg, mut border_color) in &mut buttons {
+        *bg = match *interaction {
+            Interaction::Pressed => BUTTON_BG_PRESS.into(),
+            Interaction::Hovered => BUTTON_BG_HOVER.into(),
+            Interaction::None => BUTTON_BG_OFF.into(),
+        };
+        *border_color = BorderColor::all(BUTTON_BORDER_OFF);
+    }
+}
+
 fn update_save_load_name_input_button_visuals(
     save_load_ui_state: Res<SaveLoadUiState>,
     mut inputs: Query<
@@ -902,8 +1041,9 @@ fn update_save_load_slot_button_visuals(
     >,
 ) {
     for (interaction, button, mut bg, mut border_color) in &mut buttons {
-        let selected =
-            save_load_ui_state.selected_slot.as_deref() == Some(button.slot_name.as_str());
+        let selected = save_load_ui_state.selected_slot.as_deref()
+            == Some(button.slot_name.as_str())
+            && save_load_ui_state.selected_slot_source == Some(button.source);
         *bg = match *interaction {
             Interaction::Pressed => BUTTON_BG_PRESS.into(),
             Interaction::Hovered => BUTTON_BG_HOVER.into(),
@@ -915,6 +1055,86 @@ fn update_save_load_slot_button_visuals(
             BorderColor::all(BUTTON_BORDER_OFF)
         };
     }
+}
+
+fn update_test_assert_panel(
+    mut commands: Commands,
+    replay_state: Res<ReplayState>,
+    terrain: Res<TerrainWorld>,
+    particles: Res<ParticleWorld>,
+    objects: Res<ObjectWorld>,
+    object_field: Res<ObjectPhysicsField>,
+    mut panel_node: Single<&mut Node, With<TestAssertPanelRoot>>,
+    title_entity: Single<Entity, With<TestAssertTitleText>>,
+    list_entity: Single<Entity, With<TestAssertList>>,
+    mut text_query: Query<&mut Text>,
+    children_query: Query<&Children>,
+) {
+    if !replay_state.enabled {
+        panel_node.display = Display::None;
+        return;
+    }
+    let Some(scenario_name) = replay_state.scenario_name.as_deref() else {
+        panel_node.display = Display::None;
+        return;
+    };
+    let Some(spec) = default_scenario_spec_by_name(scenario_name) else {
+        panel_node.display = Display::None;
+        return;
+    };
+    panel_node.display = Display::Flex;
+
+    let (metrics, assertions) = evaluate_scenario_state(
+        &spec,
+        replay_state.current_step,
+        replay_state.baseline_particle_count,
+        replay_state.baseline_solid_cell_count,
+        &terrain,
+        &particles,
+        &objects,
+        &object_field,
+    );
+    let overall_ok = assertions.iter().filter(|row| row.active).all(|row| row.ok);
+
+    if let Ok(mut title_text) = text_query.get_mut(*title_entity) {
+        title_text.0 = format!(
+            "Test Assertions: {} | {}",
+            spec.name,
+            if overall_ok { "OK" } else { "NG" }
+        );
+    }
+
+    clear_children_recursive(&mut commands, *list_entity, &children_query);
+    commands.entity(*list_entity).with_children(|parent| {
+        parent.spawn((
+            Text::new(format!(
+                "step: {} / {}",
+                replay_state.current_step, spec.step_count
+            )),
+            TextFont::from_font_size(12.0),
+            TextColor(Color::srgba(0.90, 0.92, 0.95, 0.95)),
+        ));
+        parent.spawn((
+            Text::new(format!(
+                "mass: particles {} / cells {}",
+                metrics.particle_count,
+                count_solid_cells(&terrain)
+            )),
+            TextFont::from_font_size(12.0),
+            TextColor(Color::srgba(0.90, 0.92, 0.95, 0.95)),
+        ));
+        for row in assertions {
+            spawn_assertion_line(
+                parent,
+                row.ok,
+                row.active,
+                format!(
+                    "{} expected {} actual {}",
+                    row.label, row.expected, row.actual
+                ),
+            );
+        }
+    });
 }
 
 fn update_save_load_dialog(
@@ -957,7 +1177,12 @@ fn update_save_load_dialog(
                 .selected_slot
                 .as_deref()
                 .unwrap_or("(none)");
-            format!("Selected: {selected}")
+            let source = match save_load_ui_state.selected_slot_source {
+                Some(SaveLoadSlotSource::Save) => "Save",
+                Some(SaveLoadSlotSource::TestCase) => "Test",
+                None => "-",
+            };
+            format!("Selected: {selected} ({source})")
         }
     };
     let status_label = save_load_ui_state.status_message.clone();
@@ -979,10 +1204,12 @@ fn update_save_load_dialog(
         match save_load::list_save_slots() {
             Ok(slots) => {
                 save_load_ui_state.slots = slots;
+                save_load_ui_state.scenario_slots = default_scenario_names();
                 save_load_ui_state.status_message.clear();
             }
             Err(error) => {
                 save_load_ui_state.slots.clear();
+                save_load_ui_state.scenario_slots = default_scenario_names();
                 save_load_ui_state.status_message = error;
             }
         }
@@ -991,6 +1218,14 @@ fn update_save_load_dialog(
 
     clear_children_recursive(&mut commands, *slot_list_entity, &children_query);
     commands.entity(*slot_list_entity).with_children(|parent| {
+        if save_load_ui_state.mode == Some(SaveLoadDialogMode::Load) {
+            parent.spawn((
+                Text::new("Save Slots"),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::srgba(0.90, 0.92, 0.97, 0.95)),
+            ));
+        }
+
         for slot_name in &save_load_ui_state.slots {
             parent
                 .spawn((
@@ -1008,6 +1243,7 @@ fn update_save_load_dialog(
                     BorderColor::all(BUTTON_BORDER_OFF),
                     SaveLoadSlotButton {
                         slot_name: slot_name.clone(),
+                        source: SaveLoadSlotSource::Save,
                     },
                 ))
                 .with_children(|button| {
@@ -1017,6 +1253,43 @@ fn update_save_load_dialog(
                         TextColor(Color::WHITE),
                     ));
                 });
+        }
+
+        if save_load_ui_state.mode == Some(SaveLoadDialogMode::Load) {
+            parent.spawn((
+                Text::new("Test Cases"),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::srgba(0.90, 0.92, 0.97, 0.95)),
+            ));
+
+            for scenario_name in &save_load_ui_state.scenario_slots {
+                parent
+                    .spawn((
+                        Button,
+                        Node {
+                            width: percent(100.0),
+                            height: px(DIALOG_SLOT_BUTTON_HEIGHT_PX),
+                            align_items: AlignItems::Center,
+                            justify_content: JustifyContent::FlexStart,
+                            padding: UiRect::horizontal(px(8.0)),
+                            border: UiRect::all(px(2.0)),
+                            ..default()
+                        },
+                        BackgroundColor(BUTTON_BG_OFF),
+                        BorderColor::all(BUTTON_BORDER_OFF),
+                        SaveLoadSlotButton {
+                            slot_name: scenario_name.clone(),
+                            source: SaveLoadSlotSource::TestCase,
+                        },
+                    ))
+                    .with_children(|button| {
+                        button.spawn((
+                            Text::new(format!("[Test] {scenario_name}")),
+                            TextFont::from_font_size(13.0),
+                            TextColor(Color::WHITE),
+                        ));
+                    });
+            }
         }
     });
 }
@@ -1654,6 +1927,38 @@ fn toggle_button_bg(enabled: bool) -> BackgroundColor {
     }
 }
 
+fn spawn_assertion_line(parent: &mut ChildSpawnerCommands, ok: bool, active: bool, detail: String) {
+    parent
+        .spawn((Node {
+            column_gap: px(6.0),
+            ..default()
+        },))
+        .with_children(|row| {
+            let state_color = if !active {
+                Color::srgba(0.55, 0.55, 0.55, 1.0)
+            } else if ok {
+                Color::srgba(0.45, 0.95, 0.55, 1.0)
+            } else {
+                Color::srgba(0.95, 0.35, 0.35, 1.0)
+            };
+            let detail_color = if active {
+                Color::WHITE
+            } else {
+                Color::srgba(0.62, 0.62, 0.62, 1.0)
+            };
+            row.spawn((
+                Text::new(if ok { "[OK]" } else { "[NG]" }),
+                TextFont::from_font_size(12.0),
+                TextColor(state_color),
+            ));
+            row.spawn((
+                Text::new(detail),
+                TextFont::from_font_size(12.0),
+                TextColor(detail_color),
+            ));
+        });
+}
+
 fn select_world_tool(state: &mut WorldInteractionState, next_tool: Option<WorldTool>) {
     state.selected_tool = next_tool;
     state.last_drag_world = None;
@@ -1674,6 +1979,7 @@ fn open_save_load_dialog(state: &mut SaveLoadUiState, mode: SaveLoadDialogMode) 
         state.input_focused = false;
     }
     state.selected_slot = None;
+    state.selected_slot_source = None;
 }
 
 fn close_save_load_dialog(state: &mut SaveLoadUiState) {
@@ -1682,6 +1988,7 @@ fn close_save_load_dialog(state: &mut SaveLoadUiState) {
     state.ime_preedit.clear();
     state.status_message.clear();
     state.selected_slot = None;
+    state.selected_slot_source = None;
 }
 
 fn resolve_save_slot_name(state: &SaveLoadUiState) -> Option<String> {

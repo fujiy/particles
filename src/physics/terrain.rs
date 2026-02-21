@@ -117,7 +117,7 @@ pub struct TerrainWorld {
 }
 
 impl TerrainWorld {
-    pub fn reset_fixed_world(&mut self) {
+    pub fn clear(&mut self) {
         self.chunks.clear();
         self.dirty_chunks.clear();
         self.static_particle_pos.clear();
@@ -128,6 +128,10 @@ impl TerrainWorld {
         self.sdf_height = 0;
         self.sdf_sample_spacing_m = 0.0;
         self.sdf_origin_m = Vec2::ZERO;
+    }
+
+    pub fn reset_fixed_world(&mut self) {
+        self.clear();
 
         for chunk_y in WORLD_MIN_CHUNK_Y..=WORLD_MAX_CHUNK_Y {
             for chunk_x in WORLD_MIN_CHUNK_X..=WORLD_MAX_CHUNK_X {
@@ -208,6 +212,36 @@ impl TerrainWorld {
 
     pub fn chunk(&self, chunk_coord: IVec2) -> Option<&TerrainChunk> {
         self.chunks.get(&chunk_coord)
+    }
+
+    pub fn loaded_chunk_coords(&self) -> Vec<IVec2> {
+        let mut coords: Vec<_> = self.chunks.keys().copied().collect();
+        coords.sort_by_key(|coord| (coord.y, coord.x));
+        coords
+    }
+
+    pub fn loaded_cell_bounds(&self) -> Option<(IVec2, IVec2)> {
+        let mut min_chunk = IVec2::new(i32::MAX, i32::MAX);
+        let mut max_chunk = IVec2::new(i32::MIN, i32::MIN);
+        for &chunk in self.chunks.keys() {
+            min_chunk.x = min_chunk.x.min(chunk.x);
+            min_chunk.y = min_chunk.y.min(chunk.y);
+            max_chunk.x = max_chunk.x.max(chunk.x);
+            max_chunk.y = max_chunk.y.max(chunk.y);
+        }
+        if min_chunk.x > max_chunk.x || min_chunk.y > max_chunk.y {
+            return None;
+        }
+        let min_cell = min_chunk * CHUNK_SIZE_I32;
+        let max_cell = (max_chunk + IVec2::ONE) * CHUNK_SIZE_I32 - IVec2::ONE;
+        Some((min_cell, max_cell))
+    }
+
+    pub fn clear_loaded_cells(&mut self) {
+        let Some((min_cell, max_cell)) = self.loaded_cell_bounds() else {
+            return;
+        };
+        self.fill_rect(min_cell, max_cell, TerrainCell::Empty);
     }
 
     #[allow(dead_code)]
