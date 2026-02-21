@@ -57,13 +57,37 @@ pub struct ParticleSpawnSpec {
     pub initial_velocity: Vec2,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ObjectSpawnSpec {
-    pub rect: CellRect,
+    pub cells: Vec<IVec2>,
     pub material: ParticleMaterial,
     pub initial_velocity: Vec2,
     pub shape_stiffness_alpha: f32,
     pub shape_iters: usize,
+}
+
+impl ObjectSpawnSpec {
+    fn from_rects(
+        rects: &[CellRect],
+        material: ParticleMaterial,
+        initial_velocity: Vec2,
+        shape_stiffness_alpha: f32,
+        shape_iters: usize,
+    ) -> Self {
+        let mut cells = Vec::new();
+        for rect in rects {
+            cells.extend(rect.cells());
+        }
+        cells.sort_by_key(|cell| (cell.y, cell.x));
+        cells.dedup();
+        Self {
+            cells,
+            material,
+            initial_velocity,
+            shape_stiffness_alpha,
+            shape_iters,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -158,20 +182,61 @@ struct FinalStateJson {
 pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
     vec![
         ScenarioSpec {
-            name: "single_object_drop".to_string(),
+            name: "objects_drop".to_string(),
             reset_fixed_world: false,
             loaded_chunk_min: Some(IVec2::new(-1, -1)),
             loaded_chunk_max: Some(IVec2::new(0, 0)),
-            terrain_fills: Vec::new(),
+            terrain_fills: vec![
+                TerrainFillSpec {
+                    rect: CellRect::new(IVec2::new(-32, -32), IVec2::new(31, -31)),
+                    material: TerrainMaterial::Stone,
+                },
+                TerrainFillSpec {
+                    rect: CellRect::new(IVec2::new(-32, -32), IVec2::new(-31, 31)),
+                    material: TerrainMaterial::Stone,
+                },
+                TerrainFillSpec {
+                    rect: CellRect::new(IVec2::new(30, -32), IVec2::new(31, 31)),
+                    material: TerrainMaterial::Stone,
+                },
+            ],
             free_particles: Vec::new(),
-            objects: vec![ObjectSpawnSpec {
-                rect: CellRect::new(IVec2::new(-1, 10), IVec2::new(1, 12)),
-                material: ParticleMaterial::StoneSolid,
-                initial_velocity: Vec2::ZERO,
-                shape_stiffness_alpha: OBJECT_SHAPE_STIFFNESS_ALPHA,
-                shape_iters: OBJECT_SHAPE_ITERS,
-            }],
-            step_count: 45,
+            objects: vec![
+                ObjectSpawnSpec::from_rects(
+                    &[
+                        CellRect::new(IVec2::new(-24, -14), IVec2::new(-21, -13)),
+                        CellRect::new(IVec2::new(-23, -12), IVec2::new(-22, -12)),
+                        CellRect::new(IVec2::new(-21, -12), IVec2::new(-21, -11)),
+                    ],
+                    ParticleMaterial::StoneSolid,
+                    Vec2::ZERO,
+                    OBJECT_SHAPE_STIFFNESS_ALPHA,
+                    OBJECT_SHAPE_ITERS,
+                ),
+                ObjectSpawnSpec::from_rects(
+                    &[
+                        CellRect::new(IVec2::new(-4, -14), IVec2::new(0, -13)),
+                        CellRect::new(IVec2::new(-3, -12), IVec2::new(-1, -11)),
+                        CellRect::new(IVec2::new(-4, -11), IVec2::new(-4, -11)),
+                    ],
+                    ParticleMaterial::StoneSolid,
+                    Vec2::ZERO,
+                    OBJECT_SHAPE_STIFFNESS_ALPHA,
+                    OBJECT_SHAPE_ITERS,
+                ),
+                ObjectSpawnSpec::from_rects(
+                    &[
+                        CellRect::new(IVec2::new(16, -14), IVec2::new(19, -13)),
+                        CellRect::new(IVec2::new(17, -12), IVec2::new(19, -11)),
+                        CellRect::new(IVec2::new(16, -11), IVec2::new(16, -11)),
+                    ],
+                    ParticleMaterial::StoneSolid,
+                    Vec2::ZERO,
+                    OBJECT_SHAPE_STIFFNESS_ALPHA,
+                    OBJECT_SHAPE_ITERS,
+                ),
+            ],
+            step_count: 40,
             thresholds: ScenarioThresholds {
                 max_penetration_rate: Some(0.02),
                 max_max_speed_mps: Some(25.0),
@@ -180,7 +245,7 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
             water_surface_assertion: None,
         },
         ScenarioSpec {
-            name: "water_only".to_string(),
+            name: "water_drop".to_string(),
             reset_fixed_world: false,
             loaded_chunk_min: Some(IVec2::new(-1, -1)),
             loaded_chunk_max: Some(IVec2::new(0, 0)),
@@ -312,9 +377,8 @@ pub fn apply_scenario_spec(
 
     objects.clear();
     for object_spawn in &spec.objects {
-        let cells = object_spawn.rect.cells();
         let indices = particles.spawn_material_particles_from_cells(
-            &cells,
+            &object_spawn.cells,
             object_spawn.material,
             object_spawn.initial_velocity,
         );
