@@ -204,9 +204,8 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
             objects: vec![
                 ObjectSpawnSpec::from_rects(
                     &[
-                        CellRect::new(IVec2::new(-24, -14), IVec2::new(-21, -13)),
-                        CellRect::new(IVec2::new(-23, -12), IVec2::new(-22, -12)),
-                        CellRect::new(IVec2::new(-21, -12), IVec2::new(-21, -11)),
+                        CellRect::new(IVec2::new(-24, -14), IVec2::new(-22, -14)),
+                        CellRect::new(IVec2::new(-24, -13), IVec2::new(-24, -12)),
                     ],
                     ParticleMaterial::StoneSolid,
                     Vec2::ZERO,
@@ -215,9 +214,8 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 ),
                 ObjectSpawnSpec::from_rects(
                     &[
-                        CellRect::new(IVec2::new(-4, -14), IVec2::new(0, -13)),
-                        CellRect::new(IVec2::new(-3, -12), IVec2::new(-1, -11)),
-                        CellRect::new(IVec2::new(-4, -11), IVec2::new(-4, -11)),
+                        CellRect::new(IVec2::new(-2, -14), IVec2::new(0, -14)),
+                        CellRect::new(IVec2::new(0, -13), IVec2::new(0, -12)),
                     ],
                     ParticleMaterial::StoneSolid,
                     Vec2::ZERO,
@@ -226,9 +224,8 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 ),
                 ObjectSpawnSpec::from_rects(
                     &[
-                        CellRect::new(IVec2::new(16, -14), IVec2::new(19, -13)),
-                        CellRect::new(IVec2::new(17, -12), IVec2::new(19, -11)),
-                        CellRect::new(IVec2::new(16, -11), IVec2::new(16, -11)),
+                        CellRect::new(IVec2::new(17, -14), IVec2::new(19, -14)),
+                        CellRect::new(IVec2::new(18, -13), IVec2::new(18, -12)),
                     ],
                     ParticleMaterial::StoneSolid,
                     Vec2::ZERO,
@@ -236,7 +233,7 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                     OBJECT_SHAPE_ITERS,
                 ),
             ],
-            step_count: 40,
+            step_count: 300,
             thresholds: ScenarioThresholds {
                 max_penetration_rate: Some(0.02),
                 max_max_speed_mps: Some(25.0),
