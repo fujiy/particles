@@ -1,20 +1,20 @@
 # Tasks
 
 ## Todo
-- [ ] 粒子状態に `Active/Sleeping` フラグを追加し、全粒子共通で管理
-- [ ] Sleep判定を実装（`SLEEP_DISP_THRESHOLD` / `SLEEP_VEL_THRESHOLD` / `SLEEP_FRAMES`）
-- [ ] Wake判定を実装（接触/拘束補正、衝突インパルス、編集イベント）
-- [ ] Wake近傍伝播（`WAKE_RADIUS`）とヒステリシス閾値を実装
-- [ ] Sleep粒子の演算スキップを実装（積分・拘束・衝突の対象除外）
-- [ ] 振動防止の安定化を実装（最小Active保持フレーム等）
-- [ ] Sleep/Wake回帰テストを追加（流体含む全粒子での状態遷移）
-- [ ] 地形セルの持続荷重評価量を実装（局所変位/歪み指標とサンプリング周期を定義）
-- [ ] 地形セルの持続荷重破壊判定を実装（`disp_or_strain > threshold` の継続時間で破壊）
-- [ ] 地形持続荷重判定をSleep/Wakeと統合（Activeセル中心に評価し、影響伝播でWake）
-- [ ] 地形破壊回帰テストを追加（片持ち形状の先端荷重で根元側が遅れて破断するケースを検証）
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] 地形セルの持続荷重評価量を実装（局所変位/歪み指標とサンプリング周期を定義）
+- [x] 地形セルの持続荷重破壊判定を実装（`disp_or_strain > threshold` の継続時間で破壊）
+- [x] 地形持続荷重判定をSleep/Wakeと統合（Activeセル中心に評価し、影響伝播でWake）
+- [x] 地形破壊回帰テストを追加（片持ち形状の先端荷重で根元側が遅れて破断するケースを検証）
+- [x] 粒子状態に `Active/Sleeping` フラグを追加し、全粒子共通で管理
+- [x] Sleep判定を実装（`SLEEP_DISP_THRESHOLD` / `SLEEP_VEL_THRESHOLD` / `SLEEP_FRAMES`）
+- [x] Wake判定を実装（接触/拘束補正、衝突インパルス、編集イベント）
+- [x] Wake近傍伝播（`WAKE_RADIUS`）とヒステリシス閾値を実装
+- [x] Sleep粒子の演算スキップを実装（積分・拘束・衝突の対象除外）
+- [x] 振動防止の安定化を実装（最小Active保持フレーム等）
+- [x] Sleep/Wake回帰テストを追加（流体含む全粒子での状態遷移）
 - [x] `DETACH_FLOOD_FILL_MAX_CELLS` 定数を追加し、地形分離用の上限付きflood fillを実装
 - [x] 地形分離判定を実装（`count <= limit` はオブジェクト化、`count > limit` は地形保持）
 - [x] 地形→オブジェクト変換時の初期物理状態を実装（速度/角速度/姿勢の初期化）
@@ -160,4 +160,4 @@
 - [x] 描画時に岩セル上の水ドット生成/描画を抑制し、重なり時は岩ドットを優先表示
 
 ## Design Feedback (from Impl sessions)
-- (No open feedback items)
+- 粉体/固体/地形の非水接触は現在「PBD風の位置押し戻し + 速度ベース補正（摩擦/減衰）」で、密集堆積時に微小振動が残る。水系（PBF）は維持しつつ、非水接触のみXPBD拘束（法線 + クーロン摩擦投影、接触`lambda`蓄積、compliance導入）へ段階移行する案をDesign sessionで検討したい。

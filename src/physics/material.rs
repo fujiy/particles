@@ -197,14 +197,14 @@ const STONE_GRANULAR_PHASE: ParticlePhaseProperties = ParticlePhaseProperties {
     terrain_push_radius_m: particle_radius_from_particles_per_cell(
         STONE_GRANULAR_PARTICLES_PER_CELL,
     ),
-    terrain_repulsion_stiffness: 0.32,
+    terrain_repulsion_stiffness: 0.28,
     object_push_radius_m: particle_radius_from_particles_per_cell(
         STONE_GRANULAR_PARTICLES_PER_CELL,
     ),
-    object_repulsion_stiffness: 0.28,
+    object_repulsion_stiffness: 0.22,
     friction_static: 0.78,
     friction_dynamic: 0.66,
-    contact_restitution: 0.02,
+    contact_restitution: 0.00,
     xsph_viscosity: 0.0,
     apply_contact_velocity_response: true,
 };
@@ -231,12 +231,12 @@ const SOIL_GRANULAR_PHASE: ParticlePhaseProperties = ParticlePhaseProperties {
     terrain_push_radius_m: particle_radius_from_particles_per_cell(
         SOIL_GRANULAR_PARTICLES_PER_CELL,
     ),
-    terrain_repulsion_stiffness: 0.31,
+    terrain_repulsion_stiffness: 0.26,
     object_push_radius_m: particle_radius_from_particles_per_cell(SOIL_GRANULAR_PARTICLES_PER_CELL),
-    object_repulsion_stiffness: 0.24,
+    object_repulsion_stiffness: 0.20,
     friction_static: 0.88,
     friction_dynamic: 0.74,
-    contact_restitution: 0.01,
+    contact_restitution: 0.00,
     xsph_viscosity: 0.0,
     apply_contact_velocity_response: true,
 };
@@ -263,12 +263,12 @@ const SAND_GRANULAR_PHASE: ParticlePhaseProperties = ParticlePhaseProperties {
     terrain_push_radius_m: particle_radius_from_particles_per_cell(
         SAND_GRANULAR_PARTICLES_PER_CELL,
     ),
-    terrain_repulsion_stiffness: 0.30,
+    terrain_repulsion_stiffness: 0.24,
     object_push_radius_m: particle_radius_from_particles_per_cell(SAND_GRANULAR_PARTICLES_PER_CELL),
-    object_repulsion_stiffness: 0.22,
+    object_repulsion_stiffness: 0.18,
     friction_static: 0.86,
     friction_dynamic: 0.72,
-    contact_restitution: 0.01,
+    contact_restitution: 0.00,
     xsph_viscosity: 0.0,
     apply_contact_velocity_response: true,
 };

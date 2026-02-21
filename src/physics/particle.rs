@@ -30,6 +30,24 @@ pub const TERRAIN_GHOST_DELTA_SCALE: f32 = 1.0;
 pub const PARALLEL_PARTICLE_THRESHOLD: usize = 512;
 pub const PARTICLE_CONTACT_PUSH_FACTOR: f32 = 0.5;
 pub const DETACH_FLOOD_FILL_MAX_CELLS: usize = 128;
+pub const SLEEP_DISP_THRESHOLD: f32 = 0.0020;
+pub const SLEEP_VEL_THRESHOLD: f32 = 0.10;
+pub const SLEEP_FRAMES: u16 = 30;
+pub const WAKE_DISP_THRESHOLD: f32 = 0.0040;
+pub const WAKE_RADIUS: f32 = CELL_SIZE_M * 1.75;
+pub const ACTIVE_MIN_FRAMES: u16 = 8;
+pub const TERRAIN_LOAD_SAMPLE_INTERVAL_SUBSTEPS: u32 = 2;
+pub const TERRAIN_LOAD_STRAIN_THRESHOLD: f32 = 0.28;
+pub const TERRAIN_LOAD_BREAK_DURATION_SECONDS: f32 = 0.45;
+pub const TERRAIN_LOAD_DECAY_PER_SAMPLE: f32 = 0.8;
+pub const GRANULAR_CONTACT_FRICTION_SCALE: f32 = 2.0;
+pub const GRANULAR_GRANULAR_CONTACT_FRICTION_BOOST: f32 = 2.5;
+pub const GRANULAR_SOLID_CONTACT_FRICTION_BOOST: f32 = 1.5;
+pub const TERRAIN_CONTACT_FRICTION_SCALE: f32 = 1.75;
+pub const GRANULAR_CONTACT_NORMAL_DAMPING: f32 = 0.50;
+pub const TERRAIN_CONTACT_NORMAL_DAMPING: f32 = 0.65;
+pub const GRANULAR_CONTACT_VELOCITY_RELAXATION: f32 = 0.28;
+pub const GRANULAR_SPAWN_JITTER_RATIO: f32 = 0.01;
 const PARTICLE_ESCAPE_MARGIN_X_CELLS: i32 = CHUNK_SIZE_I32;
 const PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS: i32 = CHUNK_SIZE_I32;
 const PARTICLE_ESCAPE_MARGIN_TOP_CELLS: i32 = CHUNK_SIZE_I32 * 8;
@@ -52,6 +70,12 @@ pub fn nominal_particle_draw_radius_m() -> f32 {
 pub struct ParticleRemovalResult {
     pub removed_count: usize,
     pub old_to_new: Vec<Option<usize>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParticleActivityState {
+    Active,
+    Sleeping,
 }
 
 #[derive(Debug, Default)]
@@ -204,6 +228,12 @@ impl TerrainFractureSeed {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct TerrainPersistentLoadState {
+    strain_metric: f32,
+    sustained_seconds: f32,
+}
+
 #[derive(Resource, Debug)]
 pub struct ParticleWorld {
     pub pos: Vec<Vec2>,
@@ -214,6 +244,10 @@ pub struct ParticleWorld {
     pub density: Vec<f32>,
     pub lambda: Vec<f32>,
     pub delta_pos: Vec<Vec2>,
+    activity_state: Vec<ParticleActivityState>,
+    sleep_candidate_frames: Vec<u16>,
+    active_hold_frames: Vec<u16>,
+    pending_wake: Vec<bool>,
     initial_pos: Vec<Vec2>,
     initial_vel: Vec<Vec2>,
     neighbor_grid: NeighborGrid,
@@ -225,6 +259,8 @@ pub struct ParticleWorld {
     pending_object_fracture_particles: HashMap<ObjectId, HashSet<usize>>,
     pending_terrain_fractures: HashSet<IVec2>,
     pending_terrain_fracture_seeds: HashMap<IVec2, TerrainFractureSeed>,
+    terrain_persistent_load: HashMap<IVec2, TerrainPersistentLoadState>,
+    terrain_load_substep_counter: u64,
 }
 
 impl Default for ParticleWorld {
@@ -240,6 +276,10 @@ impl Default for ParticleWorld {
             density: Vec::new(),
             lambda: Vec::new(),
             delta_pos: Vec::new(),
+            activity_state: Vec::new(),
+            sleep_candidate_frames: Vec::new(),
+            active_hold_frames: Vec::new(),
+            pending_wake: Vec::new(),
             initial_pos,
             initial_vel,
             neighbor_grid: NeighborGrid::default(),
@@ -251,6 +291,8 @@ impl Default for ParticleWorld {
             pending_object_fracture_particles: HashMap::new(),
             pending_terrain_fractures: HashSet::new(),
             pending_terrain_fracture_seeds: HashMap::new(),
+            terrain_persistent_load: HashMap::new(),
+            terrain_load_substep_counter: 0,
         };
         world.resize_work_buffers();
         world
@@ -270,6 +312,12 @@ impl ParticleWorld {
         self.pending_object_fracture_particles.clear();
         self.pending_terrain_fractures.clear();
         self.pending_terrain_fracture_seeds.clear();
+        self.terrain_persistent_load.clear();
+        self.terrain_load_substep_counter = 0;
+        self.activity_state.fill(ParticleActivityState::Active);
+        self.sleep_candidate_frames.fill(0);
+        self.active_hold_frames.fill(0);
+        self.pending_wake.fill(false);
         self.resize_work_buffers();
     }
 
@@ -287,6 +335,10 @@ impl ParticleWorld {
 
     pub fn materials(&self) -> &[ParticleMaterial] {
         &self.material
+    }
+
+    pub fn activity_states(&self) -> &[ParticleActivityState] {
+        &self.activity_state
     }
 
     pub fn restore_from_snapshot(
@@ -316,6 +368,12 @@ impl ParticleWorld {
         self.pending_object_fracture_particles.clear();
         self.pending_terrain_fractures.clear();
         self.pending_terrain_fracture_seeds.clear();
+        self.terrain_persistent_load.clear();
+        self.terrain_load_substep_counter = 0;
+        self.activity_state.fill(ParticleActivityState::Active);
+        self.sleep_candidate_frames.fill(0);
+        self.active_hold_frames.fill(0);
+        self.pending_wake.fill(false);
         self.resize_work_buffers();
         Ok(())
     }
@@ -333,6 +391,16 @@ impl ParticleWorld {
                 continue;
             }
             self.vel[i] = (self.vel[i] + velocity_delta).clamp_length_max(velocity_limit_mps);
+            self.request_wake(i);
+        }
+    }
+
+    pub fn wake_particles_in_radius(&mut self, center: Vec2, radius: f32) {
+        let radius2 = radius * radius;
+        for i in 0..self.particle_count() {
+            if self.pos[i].distance_squared(center) <= radius2 {
+                self.request_wake(i);
+            }
         }
     }
 
@@ -396,6 +464,7 @@ impl ParticleWorld {
         let mut indices = Vec::new();
         for &cell in cells {
             self.append_material_particles_in_cell(cell, material, initial_velocity, &mut indices);
+            self.request_wake_near(cell_to_world_center(cell), WAKE_RADIUS);
         }
         self.resize_work_buffers();
         indices
@@ -438,11 +507,8 @@ impl ParticleWorld {
             self.collect_detached_terrain_components(terrain, &fracture_cell_set);
 
         for component_cells in detached_components {
-            let spawn_plan = self.build_terrain_detach_spawn_plan(
-                &component_cells,
-                terrain,
-                &fracture_cell_set,
-            );
+            let spawn_plan =
+                self.build_terrain_detach_spawn_plan(&component_cells, terrain, &fracture_cell_set);
             if spawn_plan.cells.is_empty() {
                 continue;
             }
@@ -464,6 +530,9 @@ impl ParticleWorld {
         }
 
         if !appended_indices.is_empty() || changed {
+            for &cell in &fracture_cells {
+                self.request_wake_near(cell_to_world_center(cell), WAKE_RADIUS);
+            }
             self.resize_work_buffers();
         }
         if changed {
@@ -512,6 +581,10 @@ impl ParticleWorld {
         let mut new_vel = Vec::with_capacity(new_count);
         let mut new_mass = Vec::with_capacity(new_count);
         let mut new_material = Vec::with_capacity(new_count);
+        let mut new_activity_state = Vec::with_capacity(new_count);
+        let mut new_sleep_candidate_frames = Vec::with_capacity(new_count);
+        let mut new_active_hold_frames = Vec::with_capacity(new_count);
+        let mut new_pending_wake = Vec::with_capacity(new_count);
         for old_index in 0..old_count {
             if !keep[old_index] {
                 continue;
@@ -521,6 +594,10 @@ impl ParticleWorld {
             new_vel.push(self.vel[old_index]);
             new_mass.push(self.mass[old_index]);
             new_material.push(self.material[old_index]);
+            new_activity_state.push(self.activity_state[old_index]);
+            new_sleep_candidate_frames.push(self.sleep_candidate_frames[old_index]);
+            new_active_hold_frames.push(self.active_hold_frames[old_index]);
+            new_pending_wake.push(self.pending_wake[old_index]);
         }
 
         self.pos = new_pos;
@@ -528,6 +605,11 @@ impl ParticleWorld {
         self.vel = new_vel;
         self.mass = new_mass;
         self.material = new_material;
+        self.activity_state = new_activity_state;
+        self.sleep_candidate_frames = new_sleep_candidate_frames;
+        self.active_hold_frames = new_active_hold_frames;
+        self.pending_wake = new_pending_wake;
+        self.request_wake_near(center, WAKE_RADIUS);
         self.resize_work_buffers();
 
         ParticleRemovalResult {
@@ -536,7 +618,11 @@ impl ParticleWorld {
         }
     }
 
-    pub fn fracture_solid_particles_in_radius(&mut self, center: Vec2, radius: f32) -> HashSet<usize> {
+    pub fn fracture_solid_particles_in_radius(
+        &mut self,
+        center: Vec2,
+        radius: f32,
+    ) -> HashSet<usize> {
         let radius2 = radius * radius;
         let mut detached = HashSet::new();
         let mut spawned_particles = Vec::new();
@@ -560,6 +646,7 @@ impl ParticleWorld {
             self.material.push(material);
         }
         if !detached.is_empty() {
+            self.request_wake_near(center, WAKE_RADIUS);
             self.resize_work_buffers();
         }
         detached
@@ -603,6 +690,9 @@ impl ParticleWorld {
             );
         }
         if changed {
+            for &cell in removed_cells {
+                self.request_wake_near(cell_to_world_center(cell), WAKE_RADIUS);
+            }
             self.resize_work_buffers();
             self.auto_fracture_single_cell_objects(object_world);
         }
@@ -660,6 +750,7 @@ impl ParticleWorld {
         object_world: &mut ObjectWorld,
         dt_sub: f32,
     ) {
+        self.terrain_load_substep_counter = self.terrain_load_substep_counter.wrapping_add(1);
         self.object_peak_strain.clear();
         self.object_peak_strain_particle.clear();
         {
@@ -669,6 +760,11 @@ impl ParticleWorld {
         {
             let _span = tracing::info_span!("physics::predict_positions").entered();
             for i in 0..self.particle_count() {
+                if !self.is_active_particle(i) {
+                    self.prev_pos[i] = self.pos[i];
+                    self.vel[i] = Vec2::ZERO;
+                    continue;
+                }
                 self.prev_pos[i] = self.pos[i];
                 self.vel[i] += GRAVITY_MPS2 * dt_sub;
                 self.pos[i] += self.vel[i] * dt_sub;
@@ -700,9 +796,18 @@ impl ParticleWorld {
         {
             let _span = tracing::info_span!("physics::update_velocity").entered();
             for i in 0..self.particle_count() {
+                if !self.is_active_particle(i) {
+                    self.vel[i] = Vec2::ZERO;
+                    self.prev_pos[i] = self.pos[i];
+                    continue;
+                }
                 self.vel[i] = (self.pos[i] - self.prev_pos[i]) / dt_sub;
                 self.vel[i] = self.vel[i].clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
             }
+        }
+        {
+            let _span = tracing::info_span!("physics::granular_contact_relaxation").entered();
+            self.apply_granular_contact_velocity_relaxation();
         }
         {
             let _span = tracing::info_span!("physics::contact_velocity_response").entered();
@@ -719,14 +824,28 @@ impl ParticleWorld {
         }
         {
             let _span = tracing::info_span!("physics::final_velocity_clamp").entered();
-            for vel in &mut self.vel {
-                *vel = vel.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
+            for i in 0..self.particle_count() {
+                if self.is_active_particle(i) {
+                    self.vel[i] = self.vel[i].clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
+                } else {
+                    self.vel[i] = Vec2::ZERO;
+                }
             }
+        }
+        {
+            let _span = tracing::info_span!("physics::wake_detection").entered();
+            self.neighbor_grid.rebuild(&self.pos);
+            self.detect_wake_events(terrain, object_field, object_world);
+            self.propagate_and_apply_wake_requests();
         }
         {
             let _span = tracing::info_span!("physics::fracture_detection").entered();
             self.detect_fracture_candidates(terrain, object_field, object_world);
             self.apply_object_fractures(object_world);
+        }
+        {
+            let _span = tracing::info_span!("physics::sleep_update").entered();
+            self.update_sleep_states();
         }
     }
 
@@ -798,7 +917,7 @@ impl ParticleWorld {
     fn solve_density_lambda_sequential(&mut self, terrain: &TerrainWorld, h_ww: f32) -> f32 {
         let mut max_density_error = 0.0f32;
         for i in 0..self.particle_count() {
-            if !is_water_particle(self.material[i]) {
+            if !self.is_active_particle(i) || !is_water_particle(self.material[i]) {
                 self.density[i] = REST_DENSITY;
                 self.lambda[i] = 0.0;
                 continue;
@@ -853,6 +972,7 @@ impl ParticleWorld {
         let positions = &self.pos;
         let masses = &self.mass;
         let materials = &self.material;
+        let activity_state = &self.activity_state;
         let neighbor_cache = &self.neighbor_cache;
 
         self.density
@@ -860,7 +980,9 @@ impl ParticleWorld {
             .zip(self.lambda.par_iter_mut())
             .enumerate()
             .map(|(i, (density_i, lambda_i))| {
-                if !is_water_particle(materials[i]) {
+                if activity_state[i] == ParticleActivityState::Sleeping
+                    || !is_water_particle(materials[i])
+                {
                     *density_i = REST_DENSITY;
                     *lambda_i = 0.0;
                     return 0.0;
@@ -916,9 +1038,14 @@ impl ParticleWorld {
         inv_dt: f32,
         h_ww: f32,
     ) -> HashMap<ObjectId, Vec2> {
+        let dt_sub = 1.0 / inv_dt.max(1e-6);
         let mut reaction_impulses = HashMap::new();
         let mut object_contacts = Vec::new();
         for i in 0..self.particle_count() {
+            if !self.is_active_particle(i) {
+                self.delta_pos[i] = Vec2::ZERO;
+                continue;
+            }
             let material = self.material[i];
             let props = particle_properties(material);
             let is_water = is_water_particle(material);
@@ -965,8 +1092,40 @@ impl ParticleWorld {
                 let stiffness = 0.5
                     * (props.object_repulsion_stiffness
                         + neighbor_props.object_repulsion_stiffness);
-                particle_contact_push +=
-                    normal * penetration * stiffness * PARTICLE_CONTACT_PUSH_FACTOR;
+                let normal_push = normal * penetration * stiffness * PARTICLE_CONTACT_PUSH_FACTOR;
+                particle_contact_push += normal_push;
+                if let Some(contact_pair_scale) =
+                    granular_contact_friction_pair_scale(material, neighbor_material)
+                {
+                    let static_friction = 0.5
+                        * (props.friction_static + neighbor_props.friction_static)
+                        * GRANULAR_CONTACT_FRICTION_SCALE
+                        * contact_pair_scale;
+                    let dynamic_friction = 0.5
+                        * (props.friction_dynamic + neighbor_props.friction_dynamic)
+                        * GRANULAR_CONTACT_FRICTION_SCALE
+                        * contact_pair_scale;
+                    let rel_velocity = self.vel[i] - self.vel[j];
+                    particle_contact_push += granular_tangential_friction_push(
+                        normal,
+                        normal_push,
+                        rel_velocity,
+                        static_friction,
+                        dynamic_friction,
+                        dt_sub,
+                    );
+                    let rel_normal_speed = (self.vel[i] - self.vel[j]).dot(normal);
+                    if rel_normal_speed < 0.0 {
+                        let normal_damping_push = -normal
+                            * rel_normal_speed
+                            * dt_sub
+                            * GRANULAR_CONTACT_NORMAL_DAMPING
+                            * contact_pair_scale;
+                        let max_damping_push = penetration * 0.35;
+                        particle_contact_push +=
+                            normal_damping_push.clamp_length_max(max_damping_push);
+                    }
+                }
             }
 
             if let Some((signed_distance, normal)) =
@@ -974,7 +1133,25 @@ impl ParticleWorld {
             {
                 let penetration = props.terrain_push_radius_m - signed_distance;
                 if penetration > 0.0 {
-                    boundary_push += normal * penetration * props.terrain_repulsion_stiffness;
+                    let normal_push = normal * penetration * props.terrain_repulsion_stiffness;
+                    boundary_push += normal_push;
+                    if !is_water {
+                        boundary_push += granular_tangential_friction_push(
+                            normal,
+                            normal_push,
+                            self.vel[i],
+                            props.friction_static * TERRAIN_CONTACT_FRICTION_SCALE,
+                            props.friction_dynamic * TERRAIN_CONTACT_FRICTION_SCALE,
+                            dt_sub,
+                        );
+                        let normal_speed = self.vel[i].dot(normal);
+                        if normal_speed < 0.0 {
+                            let normal_damping_push =
+                                -normal * normal_speed * dt_sub * TERRAIN_CONTACT_NORMAL_DAMPING;
+                            boundary_push +=
+                                normal_damping_push.clamp_length_max(penetration * 0.35);
+                        }
+                    }
                 }
             }
 
@@ -1021,9 +1198,12 @@ impl ParticleWorld {
         inv_dt: f32,
         h_ww: f32,
     ) -> HashMap<ObjectId, Vec2> {
+        let dt_sub = 1.0 / inv_dt.max(1e-6);
         let positions = &self.pos;
+        let velocities = &self.vel;
         let masses = &self.mass;
         let materials = &self.material;
+        let activity_state = &self.activity_state;
         let lambdas = &self.lambda;
         let neighbor_cache = &self.neighbor_cache;
 
@@ -1034,6 +1214,10 @@ impl ParticleWorld {
             .fold(
                 ComputeDeltaThreadScratch::default,
                 |mut scratch, (i, delta_pos_i)| {
+                    if activity_state[i] == ParticleActivityState::Sleeping {
+                        *delta_pos_i = Vec2::ZERO;
+                        return scratch;
+                    }
                     let material = materials[i];
                     let props = particle_properties(material);
                     let is_water = is_water_particle(material);
@@ -1082,8 +1266,41 @@ impl ParticleWorld {
                         let stiffness = 0.5
                             * (props.object_repulsion_stiffness
                                 + neighbor_props.object_repulsion_stiffness);
-                        particle_contact_push +=
+                        let normal_push =
                             normal * penetration * stiffness * PARTICLE_CONTACT_PUSH_FACTOR;
+                        particle_contact_push += normal_push;
+                        if let Some(contact_pair_scale) =
+                            granular_contact_friction_pair_scale(material, neighbor_material)
+                        {
+                            let static_friction = 0.5
+                                * (props.friction_static + neighbor_props.friction_static)
+                                * GRANULAR_CONTACT_FRICTION_SCALE
+                                * contact_pair_scale;
+                            let dynamic_friction = 0.5
+                                * (props.friction_dynamic + neighbor_props.friction_dynamic)
+                                * GRANULAR_CONTACT_FRICTION_SCALE
+                                * contact_pair_scale;
+                            let rel_velocity = velocities[i] - velocities[j];
+                            particle_contact_push += granular_tangential_friction_push(
+                                normal,
+                                normal_push,
+                                rel_velocity,
+                                static_friction,
+                                dynamic_friction,
+                                dt_sub,
+                            );
+                            let rel_normal_speed = (velocities[i] - velocities[j]).dot(normal);
+                            if rel_normal_speed < 0.0 {
+                                let normal_damping_push = -normal
+                                    * rel_normal_speed
+                                    * dt_sub
+                                    * GRANULAR_CONTACT_NORMAL_DAMPING
+                                    * contact_pair_scale;
+                                let max_damping_push = penetration * 0.35;
+                                particle_contact_push +=
+                                    normal_damping_push.clamp_length_max(max_damping_push);
+                            }
+                        }
                     }
 
                     if let Some((signed_distance, normal)) =
@@ -1091,8 +1308,28 @@ impl ParticleWorld {
                     {
                         let penetration = props.terrain_push_radius_m - signed_distance;
                         if penetration > 0.0 {
-                            boundary_push +=
+                            let normal_push =
                                 normal * penetration * props.terrain_repulsion_stiffness;
+                            boundary_push += normal_push;
+                            if !is_water {
+                                boundary_push += granular_tangential_friction_push(
+                                    normal,
+                                    normal_push,
+                                    velocities[i],
+                                    props.friction_static * TERRAIN_CONTACT_FRICTION_SCALE,
+                                    props.friction_dynamic * TERRAIN_CONTACT_FRICTION_SCALE,
+                                    dt_sub,
+                                );
+                                let normal_speed = velocities[i].dot(normal);
+                                if normal_speed < 0.0 {
+                                    let normal_damping_push = -normal
+                                        * normal_speed
+                                        * dt_sub
+                                        * TERRAIN_CONTACT_NORMAL_DAMPING;
+                                    boundary_push +=
+                                        normal_damping_push.clamp_length_max(penetration * 0.35);
+                                }
+                            }
                         }
                     }
 
@@ -1154,6 +1391,9 @@ impl ParticleWorld {
     ) {
         let mut object_contacts = Vec::new();
         for i in 0..self.particle_count() {
+            if !self.is_active_particle(i) {
+                continue;
+            }
             let material = self.material[i];
             let props = particle_properties(material);
             if !props.apply_contact_velocity_response {
@@ -1200,7 +1440,7 @@ impl ParticleWorld {
 
             let normal_speed = self.vel[i].dot(contact_normal);
             let tangential_velocity = self.vel[i] - contact_normal * normal_speed;
-            let normal_contact_speed = normal_speed.max(0.0);
+            let normal_contact_speed = normal_speed.abs();
             let tangential_speed = tangential_velocity.length();
             let adjusted_tangent = if tangential_speed <= 1e-6 {
                 Vec2::ZERO
@@ -1211,13 +1451,54 @@ impl ParticleWorld {
                     (tangential_speed - props.friction_dynamic * normal_contact_speed).max(0.0);
                 tangential_velocity * (reduced_speed / tangential_speed)
             };
-            let adjusted_normal_speed = if normal_contact_speed > 0.0 {
-                normal_speed * props.contact_restitution.clamp(0.0, 1.0)
+            let adjusted_normal_speed = if normal_speed < 0.0 {
+                -normal_speed * props.contact_restitution.clamp(0.0, 1.0)
             } else {
-                0.0
+                normal_speed
             };
             self.vel[i] = adjusted_tangent + contact_normal * adjusted_normal_speed;
         }
+    }
+
+    fn apply_granular_contact_velocity_relaxation(&mut self) {
+        if GRANULAR_CONTACT_VELOCITY_RELAXATION <= 0.0 {
+            return;
+        }
+        let mut relaxed_vel = self.vel.clone();
+        for (i, relaxed_vel_i) in relaxed_vel
+            .iter_mut()
+            .enumerate()
+            .take(self.particle_count())
+        {
+            if !self.is_active_particle(i) || !is_granular_particle(self.material[i]) {
+                continue;
+            }
+            let props_i = particle_properties(self.material[i]);
+            let mut contact_count = 0u32;
+            let mut neighbor_velocity_sum = Vec2::ZERO;
+            for &j in &self.neighbor_cache[i] {
+                if i == j || !self.is_active_particle(j) || !is_granular_particle(self.material[j])
+                {
+                    continue;
+                }
+                let contact_radius =
+                    props_i.radius_m + particle_properties(self.material[j]).radius_m;
+                if self.pos[i].distance_squared(self.pos[j]) < contact_radius * contact_radius {
+                    contact_count += 1;
+                    neighbor_velocity_sum += self.vel[j];
+                }
+            }
+            if contact_count == 0 {
+                continue;
+            }
+            let neighbor_velocity = neighbor_velocity_sum / contact_count as f32;
+            let relative = self.vel[i] - neighbor_velocity;
+            let blend = (GRANULAR_CONTACT_VELOCITY_RELAXATION
+                * (contact_count as f32 / 4.0).clamp(0.3, 1.0))
+            .clamp(0.0, 0.6);
+            *relaxed_vel_i = self.vel[i] - relative * blend;
+        }
+        self.vel = relaxed_vel;
     }
 
     fn apply_xsph_viscosity(&mut self) {
@@ -1226,7 +1507,7 @@ impl ParticleWorld {
         self.viscosity_work.clone_from(&self.vel);
 
         for i in 0..self.particle_count() {
-            if !is_water_particle(self.material[i]) {
+            if !self.is_active_particle(i) || !is_water_particle(self.material[i]) {
                 self.viscosity_work[i] = self.vel[i];
                 continue;
             }
@@ -1288,9 +1569,13 @@ impl ParticleWorld {
         self.pending_terrain_fracture_seeds.clear();
 
         let mut terrain_impulse = HashMap::<IVec2, f32>::new();
+        let mut terrain_load_metric = HashMap::<IVec2, f32>::new();
         let mut terrain_seed = HashMap::<IVec2, TerrainFractureSeed>::new();
         let mut object_terrain_impulse = HashMap::<ObjectId, f32>::new();
         for i in 0..self.particle_count() {
+            if !self.is_active_particle(i) {
+                continue;
+            }
             let particle_material = self.material[i];
             let props = particle_properties(particle_material);
             let Some((signed_distance, normal)) =
@@ -1322,6 +1607,11 @@ impl ParticleWorld {
             else {
                 continue;
             };
+            let strain_metric = (penetration / props.terrain_push_radius_m.max(1e-6)).max(0.0);
+            terrain_load_metric
+                .entry(cell)
+                .and_modify(|metric| *metric = metric.max(strain_metric))
+                .or_insert(strain_metric);
             let entry = terrain_impulse.entry(cell).or_insert(0.0);
             *entry = (*entry).max(impulse);
             terrain_seed
@@ -1330,8 +1620,13 @@ impl ParticleWorld {
                 .accumulate(impulse, self.vel[i], self.pos[i]);
         }
 
+        self.evaluate_terrain_persistent_load(terrain, &terrain_load_metric);
+
         let mut object_contacts = Vec::new();
         for i in 0..self.particle_count() {
+            if !self.is_active_particle(i) {
+                continue;
+            }
             let Some(object_id) = object_world.object_of_particle(i) else {
                 continue;
             };
@@ -1369,17 +1664,19 @@ impl ParticleWorld {
             };
 
             let external_collision_impulse = object_world.reaction_impulse_of(object.id).length();
-            let terrain_collision_impulse =
-                object_terrain_impulse.get(&object.id).copied().unwrap_or(0.0);
+            let terrain_collision_impulse = object_terrain_impulse
+                .get(&object.id)
+                .copied()
+                .unwrap_or(0.0);
             let collision_impulse = external_collision_impulse + terrain_collision_impulse;
             let strain = self
                 .object_peak_strain
                 .get(&object.id)
                 .copied()
                 .unwrap_or(0.0);
-            let should_fracture = collision_impulse >= break_props.break_collision_impulse_threshold
-                || strain >= break_props.break_strain_threshold
-                ;
+            let should_fracture = collision_impulse
+                >= break_props.break_collision_impulse_threshold
+                || strain >= break_props.break_strain_threshold;
             if should_fracture {
                 self.pending_object_fractures.insert(object.id);
                 let fracture_particles = self
@@ -1436,7 +1733,8 @@ impl ParticleWorld {
                 continue;
             };
             let mut detached = HashSet::new();
-            if let Some(fracture_particles) = self.pending_object_fracture_particles.get(&object.id) {
+            if let Some(fracture_particles) = self.pending_object_fracture_particles.get(&object.id)
+            {
                 for &index in &object.particle_indices {
                     if fracture_particles.contains(&index) {
                         detached.insert(index);
@@ -1499,7 +1797,7 @@ impl ParticleWorld {
                 let mut mass_sum = 0.0;
                 let mut com = Vec2::ZERO;
                 for &index in &object.particle_indices {
-                    if index >= self.particle_count() {
+                    if index >= self.particle_count() || !self.is_active_particle(index) {
                         continue;
                     }
                     let mass = self.mass[index];
@@ -1520,6 +1818,9 @@ impl ParticleWorld {
                     if index >= self.particle_count() || slot >= object.rest_local.len() {
                         continue;
                     }
+                    if !self.is_active_particle(index) {
+                        continue;
+                    }
                     let mass = self.mass[index];
                     let p = self.pos[index] - com;
                     let q = object.rest_local[slot];
@@ -1536,6 +1837,9 @@ impl ParticleWorld {
                     if index >= self.particle_count() || slot >= object.rest_local.len() {
                         continue;
                     }
+                    if !self.is_active_particle(index) {
+                        continue;
+                    }
                     let q = object.rest_local[slot];
                     let rotated = Vec2::new(cos_t * q.x - sin_t * q.y, sin_t * q.x + cos_t * q.y);
                     let goal = com + rotated;
@@ -1548,7 +1852,8 @@ impl ParticleWorld {
                     self.pos[index] = current + (goal - current) * alpha;
                 }
             }
-            self.object_peak_strain.insert(object.id, object_peak_strain);
+            self.object_peak_strain
+                .insert(object.id, object_peak_strain);
             if let Some(particle_index) = object_peak_particle {
                 self.object_peak_strain_particle
                     .insert(object.id, particle_index);
@@ -1573,17 +1878,29 @@ impl ParticleWorld {
         velocity: Vec2,
         out_indices: &mut Vec<usize>,
     ) {
+        let props = particle_properties(material);
         let count = particles_per_cell(material);
         let axis = particle_grid_axis(count);
         let axis_f = axis as f32;
         let spacing = CELL_SIZE_M / axis_f.max(1.0);
         let cell_min = cell_to_world_center(cell) - Vec2::splat(CELL_SIZE_M * 0.5);
-        let particle_mass = particle_properties(material).mass;
+        let particle_mass = props.mass;
+        let jitter_scale = spacing * GRANULAR_SPAWN_JITTER_RATIO;
+        let min_bound = cell_min + Vec2::splat(props.radius_m);
+        let max_bound = cell_min + Vec2::splat(CELL_SIZE_M - props.radius_m);
+        let granular_spawn = is_granular_particle(material) && jitter_scale > 0.0;
 
         for y in 0..axis {
             for x in 0..axis {
                 let local = Vec2::new((x as f32 + 0.5) * spacing, (y as f32 + 0.5) * spacing);
-                let position = cell_min + local;
+                let mut position = cell_min + local;
+                if granular_spawn {
+                    position += spawn_jitter_offset(cell, material, x, y, jitter_scale);
+                    position = Vec2::new(
+                        position.x.clamp(min_bound.x, max_bound.x),
+                        position.y.clamp(min_bound.y, max_bound.y),
+                    );
+                }
                 let index = self.pos.len();
                 self.pos.push(position);
                 self.prev_pos.push(position);
@@ -1662,8 +1979,8 @@ impl ParticleWorld {
                 if index >= self.particle_count() {
                     continue;
                 }
-                let Some(target_material) =
-                    solid_break_properties(self.material[index]).and_then(|props| props.fracture_to)
+                let Some(target_material) = solid_break_properties(self.material[index])
+                    .and_then(|props| props.fracture_to)
                 else {
                     continue;
                 };
@@ -1680,7 +1997,11 @@ impl ParticleWorld {
 
         let mut spawned_particles = Vec::new();
         for (index, target_material) in targets {
-            self.fracture_particle_to_target_material(index, target_material, &mut spawned_particles);
+            self.fracture_particle_to_target_material(
+                index,
+                target_material,
+                &mut spawned_particles,
+            );
         }
         for (position, velocity, mass, material) in spawned_particles {
             self.pos.push(position);
@@ -1693,15 +2014,207 @@ impl ParticleWorld {
         object_world.remove_objects_by_ids(&objects_to_remove);
     }
 
+    fn is_active_particle(&self, index: usize) -> bool {
+        self.activity_state
+            .get(index)
+            .copied()
+            .unwrap_or(ParticleActivityState::Active)
+            == ParticleActivityState::Active
+    }
+
+    fn request_wake(&mut self, index: usize) {
+        if index >= self.particle_count() {
+            return;
+        }
+        if self.pending_wake.len() < self.particle_count() {
+            self.pending_wake.resize(self.particle_count(), false);
+        }
+        if self.activity_state.len() < self.particle_count() {
+            self.activity_state
+                .resize(self.particle_count(), ParticleActivityState::Active);
+        }
+        if self.sleep_candidate_frames.len() < self.particle_count() {
+            self.sleep_candidate_frames.resize(self.particle_count(), 0);
+        }
+        if self.active_hold_frames.len() < self.particle_count() {
+            self.active_hold_frames.resize(self.particle_count(), 0);
+        }
+        self.pending_wake[index] = true;
+    }
+
+    fn request_wake_near(&mut self, center: Vec2, radius: f32) {
+        let radius2 = radius * radius;
+        for i in 0..self.particle_count() {
+            if self.pos[i].distance_squared(center) <= radius2 {
+                self.request_wake(i);
+            }
+        }
+    }
+
+    fn propagate_and_apply_wake_requests(&mut self) {
+        let wake_radius2 = WAKE_RADIUS * WAKE_RADIUS;
+        let mut seeds = Vec::new();
+        for i in 0..self.particle_count() {
+            if self.pending_wake[i] {
+                seeds.push(i);
+            }
+        }
+
+        let mut neighbors = Vec::new();
+        for &seed in &seeds {
+            self.neighbor_grid.gather(self.pos[seed], &mut neighbors);
+            for &j in &neighbors {
+                if j == seed || self.is_active_particle(j) {
+                    continue;
+                }
+                if self.pos[seed].distance_squared(self.pos[j]) <= wake_radius2 {
+                    self.pending_wake[j] = true;
+                }
+            }
+        }
+
+        for i in 0..self.particle_count() {
+            if !self.pending_wake[i] {
+                continue;
+            }
+            self.activity_state[i] = ParticleActivityState::Active;
+            self.sleep_candidate_frames[i] = 0;
+            self.active_hold_frames[i] = ACTIVE_MIN_FRAMES;
+            self.pending_wake[i] = false;
+        }
+    }
+
+    fn update_sleep_states(&mut self) {
+        for i in 0..self.particle_count() {
+            if self.pending_wake[i] {
+                continue;
+            }
+            if self.activity_state[i] == ParticleActivityState::Sleeping {
+                self.vel[i] = Vec2::ZERO;
+                self.prev_pos[i] = self.pos[i];
+                continue;
+            }
+
+            if self.active_hold_frames[i] > 0 {
+                self.active_hold_frames[i] -= 1;
+                self.sleep_candidate_frames[i] = 0;
+                continue;
+            }
+
+            let displacement = (self.pos[i] - self.prev_pos[i]).length();
+            let speed = self.vel[i].length();
+            let should_sleep_sample =
+                displacement < SLEEP_DISP_THRESHOLD && speed < SLEEP_VEL_THRESHOLD;
+
+            if should_sleep_sample {
+                self.sleep_candidate_frames[i] = self.sleep_candidate_frames[i].saturating_add(1);
+                if self.sleep_candidate_frames[i] >= SLEEP_FRAMES {
+                    self.activity_state[i] = ParticleActivityState::Sleeping;
+                    self.sleep_candidate_frames[i] = 0;
+                    self.vel[i] = Vec2::ZERO;
+                    self.prev_pos[i] = self.pos[i];
+                }
+            } else {
+                self.sleep_candidate_frames[i] = 0;
+            }
+        }
+    }
+
+    fn detect_wake_events(
+        &mut self,
+        terrain: &TerrainWorld,
+        object_field: &ObjectPhysicsField,
+        object_world: &ObjectWorld,
+    ) {
+        let mut neighbors = Vec::new();
+        let mut object_contacts = Vec::new();
+        for i in 0..self.particle_count() {
+            if !self.is_active_particle(i) {
+                continue;
+            }
+            let displacement_i = self.pos[i] - self.prev_pos[i];
+            if displacement_i.length() > WAKE_DISP_THRESHOLD {
+                self.request_wake(i);
+            }
+
+            self.neighbor_grid.gather(self.pos[i], &mut neighbors);
+            for &j in &neighbors {
+                if i == j || self.is_active_particle(j) {
+                    continue;
+                }
+                let r = self.pos[i] - self.pos[j];
+                let contact_radius = particle_properties(self.material[i]).radius_m
+                    + particle_properties(self.material[j]).radius_m;
+                let dist2 = r.length_squared();
+                if dist2 <= 1e-12 || dist2 >= contact_radius * contact_radius {
+                    continue;
+                }
+                let dist = dist2.sqrt();
+                let normal = r / dist;
+                let displacement_j = self.pos[j] - self.prev_pos[j];
+                let relative_normal_displacement =
+                    (displacement_i - displacement_j).dot(normal).abs();
+                if relative_normal_displacement > WAKE_DISP_THRESHOLD {
+                    self.request_wake(i);
+                    self.request_wake(j);
+                }
+            }
+
+            if let Some((signed_distance, normal)) =
+                terrain.sample_signed_distance_and_normal(self.pos[i])
+            {
+                let props = particle_properties(self.material[i]);
+                let penetration = props.terrain_push_radius_m - signed_distance;
+                if penetration > 0.0 {
+                    let normal_displacement = displacement_i.dot(normal).abs();
+                    if normal_displacement > WAKE_DISP_THRESHOLD {
+                        self.request_wake(i);
+                        self.request_wake_near(self.pos[i], WAKE_RADIUS);
+                    }
+                }
+            }
+
+            let self_object = object_world.object_of_particle(i);
+            object_field.gather_candidate_object_ids(self.pos[i], &mut object_contacts);
+            for &object_id in &object_contacts {
+                if self_object == Some(object_id) {
+                    continue;
+                }
+                let Some(sample) = object_world.evaluate_object_sdf(object_id, self.pos[i]) else {
+                    continue;
+                };
+                let props = particle_properties(self.material[i]);
+                let penetration = props.object_push_radius_m - sample.distance_m;
+                if penetration <= 0.0 {
+                    continue;
+                }
+                let normal_displacement = displacement_i.dot(sample.normal_world).abs();
+                if normal_displacement <= WAKE_DISP_THRESHOLD {
+                    continue;
+                }
+                self.request_wake(i);
+                if let Some(target_object) = object_world
+                    .objects()
+                    .iter()
+                    .find(|object| object.id == object_id)
+                {
+                    for &index in &target_object.particle_indices {
+                        self.request_wake(index);
+                    }
+                }
+            }
+        }
+    }
+
     fn cull_escaped_particles(&mut self, object_world: &mut ObjectWorld) {
         if self.particle_count() == 0 {
             return;
         }
 
         let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32 - PARTICLE_ESCAPE_MARGIN_X_CELLS;
-        let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1 + PARTICLE_ESCAPE_MARGIN_X_CELLS;
-        let min_cell_y =
-            WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32 - PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS;
+        let max_cell_x =
+            (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1 + PARTICLE_ESCAPE_MARGIN_X_CELLS;
+        let min_cell_y = WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32 - PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS;
         let max_cell_y =
             (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1 + PARTICLE_ESCAPE_MARGIN_TOP_CELLS;
 
@@ -1744,6 +2257,10 @@ impl ParticleWorld {
         let mut new_vel = Vec::with_capacity(new_count);
         let mut new_mass = Vec::with_capacity(new_count);
         let mut new_material = Vec::with_capacity(new_count);
+        let mut new_activity_state = Vec::with_capacity(new_count);
+        let mut new_sleep_candidate_frames = Vec::with_capacity(new_count);
+        let mut new_active_hold_frames = Vec::with_capacity(new_count);
+        let mut new_pending_wake = Vec::with_capacity(new_count);
         for old_index in 0..old_count {
             if !keep[old_index] {
                 continue;
@@ -1753,6 +2270,10 @@ impl ParticleWorld {
             new_vel.push(self.vel[old_index]);
             new_mass.push(self.mass[old_index]);
             new_material.push(self.material[old_index]);
+            new_activity_state.push(self.activity_state[old_index]);
+            new_sleep_candidate_frames.push(self.sleep_candidate_frames[old_index]);
+            new_active_hold_frames.push(self.active_hold_frames[old_index]);
+            new_pending_wake.push(self.pending_wake[old_index]);
         }
 
         self.pos = new_pos;
@@ -1760,6 +2281,10 @@ impl ParticleWorld {
         self.vel = new_vel;
         self.mass = new_mass;
         self.material = new_material;
+        self.activity_state = new_activity_state;
+        self.sleep_candidate_frames = new_sleep_candidate_frames;
+        self.active_hold_frames = new_active_hold_frames;
+        self.pending_wake = new_pending_wake;
         object_world.apply_particle_remap(&old_to_new, self.masses());
         self.resize_work_buffers();
     }
@@ -1773,6 +2298,11 @@ impl ParticleWorld {
         self.density.resize(count, 0.0);
         self.lambda.resize(count, 0.0);
         self.delta_pos.resize(count, Vec2::ZERO);
+        self.activity_state
+            .resize(count, ParticleActivityState::Active);
+        self.sleep_candidate_frames.resize(count, 0);
+        self.active_hold_frames.resize(count, 0);
+        self.pending_wake.resize(count, false);
         self.neighbor_cache.resize_with(count, Vec::new);
         self.viscosity_work.resize(count, Vec2::ZERO);
     }
@@ -1796,12 +2326,18 @@ impl ParticleWorld {
             for offset in FOUR_NEIGHBOR_OFFSETS {
                 let start = removed_cell + offset;
                 if checked.contains(&start)
-                    || !matches!(terrain.get_loaded_cell_or_empty(start), TerrainCell::Solid { .. })
+                    || !matches!(
+                        terrain.get_loaded_cell_or_empty(start),
+                        TerrainCell::Solid { .. }
+                    )
                 {
                     continue;
                 }
                 let fill = flood_fill_4_limited(start, DETACH_FLOOD_FILL_MAX_CELLS, |cell| {
-                    matches!(terrain.get_loaded_cell_or_empty(cell), TerrainCell::Solid { .. })
+                    matches!(
+                        terrain.get_loaded_cell_or_empty(cell),
+                        TerrainCell::Solid { .. }
+                    )
                 });
                 checked.extend(fill.cells.iter().copied());
                 if fill.reached_limit {
@@ -1813,6 +2349,73 @@ impl ParticleWorld {
             }
         }
         detached_components
+    }
+
+    fn evaluate_terrain_persistent_load(
+        &mut self,
+        terrain: &TerrainWorld,
+        terrain_load_metric: &HashMap<IVec2, f32>,
+    ) {
+        if TERRAIN_LOAD_SAMPLE_INTERVAL_SUBSTEPS == 0 {
+            return;
+        }
+        if self.terrain_load_substep_counter % TERRAIN_LOAD_SAMPLE_INTERVAL_SUBSTEPS as u64 != 0 {
+            return;
+        }
+        let dt_sample = (FIXED_DT / SUBSTEPS as f32) * TERRAIN_LOAD_SAMPLE_INTERVAL_SUBSTEPS as f32;
+        let mut seen_cells = HashSet::new();
+
+        for (&cell, &metric) in terrain_load_metric {
+            if !matches!(
+                terrain.get_loaded_cell_or_empty(cell),
+                TerrainCell::Solid { .. }
+            ) {
+                self.terrain_persistent_load.remove(&cell);
+                continue;
+            }
+            seen_cells.insert(cell);
+            let mut should_wake = false;
+            let mut should_fracture = false;
+            {
+                let state = self.terrain_persistent_load.entry(cell).or_default();
+                state.strain_metric = metric;
+                if metric >= TERRAIN_LOAD_STRAIN_THRESHOLD {
+                    state.sustained_seconds += dt_sample;
+                    should_wake = true;
+                    should_fracture =
+                        state.sustained_seconds >= TERRAIN_LOAD_BREAK_DURATION_SECONDS;
+                } else {
+                    state.sustained_seconds = (state.sustained_seconds - dt_sample).max(0.0);
+                }
+            }
+            if should_wake {
+                self.request_wake_near(cell_to_world_center(cell), WAKE_RADIUS);
+            }
+            if should_fracture {
+                self.pending_terrain_fractures.insert(cell);
+            }
+        }
+
+        let cells: Vec<_> = self.terrain_persistent_load.keys().copied().collect();
+        for cell in cells {
+            if seen_cells.contains(&cell) {
+                continue;
+            }
+            if !matches!(
+                terrain.get_loaded_cell_or_empty(cell),
+                TerrainCell::Solid { .. }
+            ) {
+                self.terrain_persistent_load.remove(&cell);
+                continue;
+            }
+            if let Some(state) = self.terrain_persistent_load.get_mut(&cell) {
+                state.strain_metric *= TERRAIN_LOAD_DECAY_PER_SAMPLE;
+                state.sustained_seconds = (state.sustained_seconds - dt_sample).max(0.0);
+                if state.sustained_seconds <= 0.0 && state.strain_metric <= 1e-4 {
+                    self.terrain_persistent_load.remove(&cell);
+                }
+            }
+        }
     }
 
     fn build_terrain_detach_spawn_plan(
@@ -2052,6 +2655,125 @@ fn is_water_particle(material: ParticleMaterial) -> bool {
     matches!(material, ParticleMaterial::WaterLiquid)
 }
 
+fn is_granular_particle(material: ParticleMaterial) -> bool {
+    matches!(
+        material,
+        ParticleMaterial::StoneGranular
+            | ParticleMaterial::SoilGranular
+            | ParticleMaterial::SandGranular
+    )
+}
+
+fn is_solid_particle(material: ParticleMaterial) -> bool {
+    matches!(
+        material,
+        ParticleMaterial::StoneSolid | ParticleMaterial::SoilSolid | ParticleMaterial::SandSolid
+    )
+}
+
+fn granular_contact_friction_pair_scale(
+    material_a: ParticleMaterial,
+    material_b: ParticleMaterial,
+) -> Option<f32> {
+    if is_water_particle(material_a) || is_water_particle(material_b) {
+        return None;
+    }
+    if !(is_granular_particle(material_a) || is_granular_particle(material_b)) {
+        return None;
+    }
+    let pair_scale = if is_granular_particle(material_a) && is_granular_particle(material_b) {
+        GRANULAR_GRANULAR_CONTACT_FRICTION_BOOST
+    } else if is_solid_particle(material_a) || is_solid_particle(material_b) {
+        GRANULAR_SOLID_CONTACT_FRICTION_BOOST
+    } else {
+        1.0
+    };
+    Some(pair_scale)
+}
+
+fn granular_tangential_friction_push(
+    contact_normal: Vec2,
+    normal_push: Vec2,
+    relative_velocity: Vec2,
+    static_friction: f32,
+    dynamic_friction: f32,
+    dt_sub: f32,
+) -> Vec2 {
+    let normal_push_mag = normal_push.length();
+    if normal_push_mag <= 1e-8 {
+        return Vec2::ZERO;
+    }
+    let tangential_velocity =
+        relative_velocity - contact_normal * relative_velocity.dot(contact_normal);
+    let tangential_speed = tangential_velocity.length();
+    if tangential_speed <= 1e-6 {
+        return Vec2::ZERO;
+    }
+
+    let tangential_displacement = tangential_velocity * dt_sub.max(0.0);
+    let tangential_displacement_mag = tangential_displacement.length();
+    if tangential_displacement_mag <= 1e-8 {
+        return Vec2::ZERO;
+    }
+
+    let static_limit = static_friction.max(0.0) * normal_push_mag;
+    if tangential_displacement_mag <= static_limit {
+        return -tangential_displacement;
+    }
+
+    let dynamic_limit = dynamic_friction.max(0.0) * normal_push_mag;
+    if dynamic_limit <= 1e-8 {
+        return Vec2::ZERO;
+    }
+    let friction_mag = dynamic_limit.min(tangential_displacement_mag);
+    -tangential_displacement.normalize_or_zero() * friction_mag
+}
+
+fn spawn_jitter_offset(
+    cell: IVec2,
+    material: ParticleMaterial,
+    slot_x: u32,
+    slot_y: u32,
+    max_offset: f32,
+) -> Vec2 {
+    if max_offset <= 0.0 {
+        return Vec2::ZERO;
+    }
+    let base = mix_u32(
+        (cell.x as u32).wrapping_mul(0x45d9_f3b)
+            ^ (cell.y as u32).wrapping_mul(0x27d4_eb2d)
+            ^ material_seed(material)
+            ^ slot_x.wrapping_mul(0x1656_67b1)
+            ^ slot_y.wrapping_mul(0x9e37_79b9),
+    );
+    let hx = mix_u32(base ^ 0x68bc_21eb);
+    let hy = mix_u32(base ^ 0x02e5_be93);
+    let fx = (hx as f32 / u32::MAX as f32) * 2.0 - 1.0;
+    let fy = (hy as f32 / u32::MAX as f32) * 2.0 - 1.0;
+    Vec2::new(fx, fy) * max_offset
+}
+
+fn material_seed(material: ParticleMaterial) -> u32 {
+    match material {
+        ParticleMaterial::WaterLiquid => 0x1111_1111,
+        ParticleMaterial::StoneSolid => 0x2222_2222,
+        ParticleMaterial::StoneGranular => 0x3333_3333,
+        ParticleMaterial::SoilSolid => 0x4444_4444,
+        ParticleMaterial::SoilGranular => 0x5555_5555,
+        ParticleMaterial::SandSolid => 0x6666_6666,
+        ParticleMaterial::SandGranular => 0x7777_7777,
+    }
+}
+
+fn mix_u32(mut state: u32) -> u32 {
+    state ^= state >> 16;
+    state = state.wrapping_mul(0x7feb_352d);
+    state ^= state >> 15;
+    state = state.wrapping_mul(0x846c_a68b);
+    state ^= state >> 16;
+    state
+}
+
 fn terrain_ghost_neighbor_vector(
     position: Vec2,
     terrain: &TerrainWorld,
@@ -2094,6 +2816,119 @@ mod tests {
             (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1,
         );
         terrain.fill_rect(min_cell, max_cell, TerrainCell::Empty);
+    }
+
+    #[test]
+    fn particle_transitions_to_sleep_after_threshold_frames() {
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        let _ = particles.spawn_material_particles_from_cells(
+            &[IVec2::new(0, 4)],
+            ParticleMaterial::SandSolid,
+            Vec2::ZERO,
+        );
+        let index = 0usize;
+        particles.activity_state[index] = ParticleActivityState::Active;
+        particles.active_hold_frames[index] = 0;
+        particles.sleep_candidate_frames[index] = 0;
+        particles.pending_wake[index] = false;
+        particles.vel[index] = Vec2::ZERO;
+        particles.prev_pos[index] = particles.pos[index];
+
+        for _ in 0..SLEEP_FRAMES {
+            particles.update_sleep_states();
+        }
+
+        assert_eq!(
+            particles.activity_state[index],
+            ParticleActivityState::Sleeping
+        );
+    }
+
+    #[test]
+    fn wake_event_reactivates_sleeping_particle() {
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        let _ = particles.spawn_material_particles_from_cells(
+            &[IVec2::new(0, 4)],
+            ParticleMaterial::SandSolid,
+            Vec2::ZERO,
+        );
+        let index = 0usize;
+        particles.activity_state[index] = ParticleActivityState::Sleeping;
+        particles.vel[index] = Vec2::ZERO;
+        particles.prev_pos[index] = particles.pos[index];
+
+        particles.wake_particles_in_radius(particles.pos[index], WAKE_RADIUS * 0.5);
+        particles.neighbor_grid.rebuild(&particles.pos);
+        particles.propagate_and_apply_wake_requests();
+
+        assert_eq!(
+            particles.activity_state[index],
+            ParticleActivityState::Active
+        );
+        assert!(particles.active_hold_frames[index] > 0);
+    }
+
+    #[test]
+    fn sleeping_particle_skips_gravity_integration() {
+        let terrain = TerrainWorld::default();
+        let object_field = ObjectPhysicsField::default();
+        let mut objects = ObjectWorld::default();
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        let _ = particles.spawn_material_particles_from_cells(
+            &[IVec2::new(0, 4)],
+            ParticleMaterial::SandSolid,
+            Vec2::ZERO,
+        );
+        let index = 0usize;
+        particles.activity_state[index] = ParticleActivityState::Sleeping;
+        particles.vel[index] = Vec2::ZERO;
+        particles.prev_pos[index] = particles.pos[index];
+        particles.pending_wake[index] = false;
+        let before = particles.pos[index];
+
+        particles.step_if_running(&terrain, &object_field, &mut objects, true);
+
+        assert!(
+            particles.pos[index].distance(before) < 1e-6,
+            "sleeping particle should not move while sleeping"
+        );
+    }
+
+    #[test]
+    fn terrain_breaks_under_sustained_load() {
+        let mut terrain = TerrainWorld::default();
+        terrain.reset_fixed_world();
+        clear_fixed_terrain(&mut terrain);
+        let load_cell = IVec2::new(0, 0);
+        assert!(terrain.set_cell(load_cell, TerrainCell::stone()));
+
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        let mut objects = ObjectWorld::default();
+        let samples_needed = (TERRAIN_LOAD_BREAK_DURATION_SECONDS
+            / ((FIXED_DT / SUBSTEPS as f32) * TERRAIN_LOAD_SAMPLE_INTERVAL_SUBSTEPS as f32))
+            .ceil() as usize
+            + 2;
+        for _ in 0..samples_needed {
+            particles.terrain_load_substep_counter += TERRAIN_LOAD_SAMPLE_INTERVAL_SUBSTEPS as u64;
+            let mut metric = HashMap::new();
+            metric.insert(load_cell, TERRAIN_LOAD_STRAIN_THRESHOLD + 0.2);
+            particles.evaluate_terrain_persistent_load(&terrain, &metric);
+            if particles.apply_pending_terrain_fractures(&mut terrain, &mut objects) {
+                break;
+            }
+        }
+
+        assert!(
+            matches!(
+                terrain.get_loaded_cell_or_empty(load_cell),
+                TerrainCell::Empty
+            ),
+            "terrain should fracture after sustained load duration"
+        );
     }
 
     #[test]
@@ -2433,7 +3268,10 @@ mod tests {
 
         particles.step_if_running(&terrain, &object_field, &mut objects, true);
 
-        assert!(objects.objects().is_empty(), "object should fracture on terrain impact");
+        assert!(
+            objects.objects().is_empty(),
+            "object should fracture on terrain impact"
+        );
         assert!(
             particles
                 .materials()
@@ -2614,7 +3452,10 @@ mod tests {
             ));
         }
         assert_eq!(objects.objects().len(), 1);
-        assert_eq!(objects.objects()[0].particle_indices.len(), detached_cells.len());
+        assert_eq!(
+            objects.objects()[0].particle_indices.len(),
+            detached_cells.len()
+        );
     }
 
     #[test]
