@@ -1,9 +1,20 @@
 # Tasks
 
 ## Todo
+- [ ] 非水接触用 `GranularSolver` を追加し、水ソルバから実行パスを分離
+- [ ] 粉体-粉体のXPBD法線非貫通拘束を実装（`lambda_n` 蓄積 + `compliance_n`）
+- [ ] 粉体接触のXPBD摩擦拘束を実装（接線補正 + `mu_s` / `mu_k` クランプ）
+- [ ] 粉体接触の反発係数 `e` を速度更新段へ統合
+- [ ] 粉体-地形接触を共通XPBD接触APIへ統合（静的相手 `inv_mass=0`）
+- [ ] 粉体-オブジェクト接触を共通XPBD接触APIへ統合（反作用インパルス集計を接続）
+- [ ] `XPBD_CONTACT_COMPLIANCE_N/T` と `GRANULAR_SUBSTEPS/ITERS` を設定定数として追加
+- [ ] 粉体の接触Wake条件を強化し、破壊直後粒子の一時Sleep禁止を実装
+- [ ] 並列化対応のため接触補正ワークバッファを導入（スレッドローカル集計 + reduce）
+- [ ] XPBD移行の回帰テストを追加（安息角、斜面滑り、砕石化直後の安定性、水挙動非退行）
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] Design Feedback反映: 非水接触のXPBD段階移行仕様を `design.md` §19 として追加
 - [x] 地形セルの持続荷重評価量を実装（局所変位/歪み指標とサンプリング周期を定義）
 - [x] 地形セルの持続荷重破壊判定を実装（`disp_or_strain > threshold` の継続時間で破壊）
 - [x] 地形持続荷重判定をSleep/Wakeと統合（Activeセル中心に評価し、影響伝播でWake）
@@ -160,4 +171,4 @@
 - [x] 描画時に岩セル上の水ドット生成/描画を抑制し、重なり時は岩ドットを優先表示
 
 ## Design Feedback (from Impl sessions)
-- 粉体/固体/地形の非水接触は現在「PBD風の位置押し戻し + 速度ベース補正（摩擦/減衰）」で、密集堆積時に微小振動が残る。水系（PBF）は維持しつつ、非水接触のみXPBD拘束（法線 + クーロン摩擦投影、接触`lambda`蓄積、compliance導入）へ段階移行する案をDesign sessionで検討したい。
+- (No open feedback items)
