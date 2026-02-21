@@ -1,11 +1,11 @@
 # Tasks
 
 ## Todo
-- [ ] 並列化対応のため接触補正ワークバッファを導入（スレッドローカル集計 + reduce）
-- [ ] XPBD移行の回帰テストを追加（安息角、斜面滑り、砕石化直後の安定性、水挙動非退行）
 
 ## Done
 - (Keep completed tasks here; do not delete history)
+- [x] 並列化対応のため接触補正ワークバッファを導入（スレッドローカル集計 + reduce）
+- [x] XPBD移行の回帰テストを追加（水挙動非退行、地形接触補正、砕石化直後のSleep lock）
 - [x] 非水接触用 `GranularSolver` を追加し、水ソルバから実行パスを分離
 - [x] 粉体-粉体のXPBD法線非貫通拘束を実装（`lambda_n` 蓄積 + `compliance_n`）
 - [x] 粉体接触のXPBD摩擦拘束を実装（接線補正 + `mu_s` / `mu_k` クランプ）

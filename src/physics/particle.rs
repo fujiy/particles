@@ -209,6 +209,39 @@ struct GranularObjectContactKey {
 }
 
 #[derive(Default)]
+struct GranularContactThreadScratch {
+    object_contacts: Vec<ObjectId>,
+    delta_pos: Vec<(usize, Vec2)>,
+    wake_impulses: Vec<(usize, f32)>,
+    reaction_impulses: HashMap<ObjectId, Vec2>,
+    terrain_lambda_n_updates: Vec<(usize, f32)>,
+    terrain_lambda_t_updates: Vec<(usize, f32)>,
+    object_lambda_n_updates: Vec<(GranularObjectContactKey, f32)>,
+    object_lambda_t_updates: Vec<(GranularObjectContactKey, f32)>,
+}
+
+impl GranularContactThreadScratch {
+    fn merge_from(&mut self, mut other: Self) {
+        self.delta_pos.append(&mut other.delta_pos);
+        self.wake_impulses.append(&mut other.wake_impulses);
+        self.terrain_lambda_n_updates
+            .append(&mut other.terrain_lambda_n_updates);
+        self.terrain_lambda_t_updates
+            .append(&mut other.terrain_lambda_t_updates);
+        self.object_lambda_n_updates
+            .append(&mut other.object_lambda_n_updates);
+        self.object_lambda_t_updates
+            .append(&mut other.object_lambda_t_updates);
+        for (object_id, impulse) in other.reaction_impulses {
+            *self
+                .reaction_impulses
+                .entry(object_id)
+                .or_insert(Vec2::ZERO) += impulse;
+        }
+    }
+}
+
+#[derive(Default)]
 struct GranularSolver;
 
 impl GranularSolver {
@@ -225,7 +258,6 @@ impl GranularSolver {
 
         let mut reaction_impulses = HashMap::<ObjectId, Vec2>::new();
         let n = particles.particle_count();
-        let mut object_contacts = Vec::new();
         let granular_substeps = GRANULAR_SUBSTEPS.max(1);
         let dt_granular = dt_sub / granular_substeps as f32;
         let inv_dt_granular = 1.0 / dt_granular.max(1e-6);
@@ -326,18 +358,100 @@ impl GranularSolver {
                         wake_impulses[i] += impulse_i;
                         wake_impulses[j] += impulse_j;
                     }
+                }
 
-                    if let Some((signed_distance, normal)) =
-                        terrain.sample_signed_distance_and_normal(particles.pos[i])
-                    {
-                        let c_n = signed_distance - props_i.terrain_push_radius_m;
-                        if c_n < 0.0 {
-                            let lambda_n = &mut lambda_n_terrain[i];
+                let terrain_object_reduced = (0..n)
+                    .into_par_iter()
+                    .fold(GranularContactThreadScratch::default, |mut scratch, i| {
+                        if !particles.is_active_particle(i)
+                            || is_water_particle(particles.material[i])
+                        {
+                            return scratch;
+                        }
+                        let props_i = particle_properties(particles.material[i]);
+                        let inv_mass_i = 1.0 / particles.mass[i].max(1e-6);
+
+                        if let Some((signed_distance, normal)) =
+                            terrain.sample_signed_distance_and_normal(particles.pos[i])
+                        {
+                            let c_n = signed_distance - props_i.terrain_push_radius_m;
+                            if c_n < 0.0 {
+                                let key = i;
+                                let prev_lambda_n = *lambda_n_terrain.get(key).unwrap_or(&0.0);
+                                let delta_lambda_n =
+                                    (-c_n - alpha_n * prev_lambda_n) / (inv_mass_i + alpha_n);
+                                let next_lambda_n = prev_lambda_n + delta_lambda_n;
+                                scratch.terrain_lambda_n_updates.push((i, next_lambda_n));
+                                let corr_n = normal * (delta_lambda_n * inv_mass_i);
+                                scratch.delta_pos.push((i, corr_n));
+
+                                let rel_vel = particles.vel[i];
+                                let tangent = rel_vel - normal * rel_vel.dot(normal);
+                                let tangent_len = tangent.length();
+                                if tangent_len > 1e-6 {
+                                    let t_hat = tangent / tangent_len;
+                                    let c_t = rel_vel.dot(t_hat) * dt_granular;
+                                    let prev_lambda_t = *lambda_t_terrain.get(key).unwrap_or(&0.0);
+                                    let delta_lambda_t =
+                                        (-c_t - alpha_t * prev_lambda_t) / (inv_mass_i + alpha_t);
+                                    let max_tangent = (props_i.friction_dynamic
+                                        * TERRAIN_CONTACT_FRICTION_SCALE)
+                                        .max(0.0)
+                                        * next_lambda_n.abs();
+                                    let next_lambda_t = (prev_lambda_t + delta_lambda_t)
+                                        .clamp(-max_tangent, max_tangent);
+                                    let applied_t = next_lambda_t - prev_lambda_t;
+                                    scratch.terrain_lambda_t_updates.push((i, next_lambda_t));
+                                    scratch
+                                        .delta_pos
+                                        .push((i, t_hat * (applied_t * inv_mass_i)));
+                                }
+                                scratch.wake_impulses.push((
+                                    i,
+                                    particles.mass[i] * corr_n.length() * inv_dt_granular,
+                                ));
+                            }
+                        }
+
+                        object_field.gather_candidate_object_ids(
+                            particles.pos[i],
+                            &mut scratch.object_contacts,
+                        );
+                        let mut best_contact: Option<(ObjectId, Vec2, f32)> = None;
+                        for &object_id in &scratch.object_contacts {
+                            if object_world.object_of_particle(i) == Some(object_id) {
+                                continue;
+                            }
+                            let Some(sample) =
+                                object_world.evaluate_object_sdf(object_id, particles.pos[i])
+                            else {
+                                continue;
+                            };
+                            let c_n = sample.distance_m - props_i.object_push_radius_m;
+                            if c_n >= 0.0 {
+                                continue;
+                            }
+                            let replace = match best_contact {
+                                Some((_, _, best_c_n)) => c_n < best_c_n,
+                                None => true,
+                            };
+                            if replace {
+                                best_contact = Some((object_id, sample.normal_world, c_n));
+                            }
+                        }
+
+                        if let Some((object_id, normal, c_n)) = best_contact {
+                            let key = GranularObjectContactKey {
+                                particle: i,
+                                object_id,
+                            };
+                            let prev_lambda_n = *lambda_n_object.get(&key).unwrap_or(&0.0);
                             let delta_lambda_n =
-                                (-c_n - alpha_n * *lambda_n) / (inv_mass_i + alpha_n);
-                            *lambda_n += delta_lambda_n;
+                                (-c_n - alpha_n * prev_lambda_n) / (inv_mass_i + alpha_n);
+                            let next_lambda_n = prev_lambda_n + delta_lambda_n;
+                            scratch.object_lambda_n_updates.push((key, next_lambda_n));
                             let corr_n = normal * (delta_lambda_n * inv_mass_i);
-                            delta_pos[i] += corr_n;
+                            scratch.delta_pos.push((i, corr_n));
 
                             let rel_vel = particles.vel[i];
                             let tangent = rel_vel - normal * rel_vel.dot(normal);
@@ -345,83 +459,56 @@ impl GranularSolver {
                             if tangent_len > 1e-6 {
                                 let t_hat = tangent / tangent_len;
                                 let c_t = rel_vel.dot(t_hat) * dt_granular;
-                                let lambda_t = &mut lambda_t_terrain[i];
+                                let prev_lambda_t = *lambda_t_object.get(&key).unwrap_or(&0.0);
                                 let delta_lambda_t =
-                                    (-c_t - alpha_t * *lambda_t) / (inv_mass_i + alpha_t);
-                                let max_tangent = (props_i.friction_dynamic
-                                    * TERRAIN_CONTACT_FRICTION_SCALE)
-                                    .max(0.0)
-                                    * lambda_n.abs();
-                                let next_lambda_t =
-                                    (*lambda_t + delta_lambda_t).clamp(-max_tangent, max_tangent);
-                                let applied_t = next_lambda_t - *lambda_t;
-                                *lambda_t = next_lambda_t;
-                                delta_pos[i] += t_hat * (applied_t * inv_mass_i);
+                                    (-c_t - alpha_t * prev_lambda_t) / (inv_mass_i + alpha_t);
+                                let max_tangent =
+                                    props_i.friction_dynamic.max(0.0) * next_lambda_n.abs();
+                                let next_lambda_t = (prev_lambda_t + delta_lambda_t)
+                                    .clamp(-max_tangent, max_tangent);
+                                let applied_t = next_lambda_t - prev_lambda_t;
+                                scratch.object_lambda_t_updates.push((key, next_lambda_t));
+                                scratch
+                                    .delta_pos
+                                    .push((i, t_hat * (applied_t * inv_mass_i)));
                             }
 
-                            wake_impulses[i] +=
-                                particles.mass[i] * corr_n.length() * inv_dt_granular;
+                            let reaction_impulse = -(particles.mass[i] * corr_n) * inv_dt_granular;
+                            *scratch
+                                .reaction_impulses
+                                .entry(object_id)
+                                .or_insert(Vec2::ZERO) += reaction_impulse;
+                            scratch
+                                .wake_impulses
+                                .push((i, particles.mass[i] * corr_n.length() * inv_dt_granular));
                         }
-                    }
+                        scratch
+                    })
+                    .reduce(GranularContactThreadScratch::default, |mut a, b| {
+                        a.merge_from(b);
+                        a
+                    });
 
-                    object_field
-                        .gather_candidate_object_ids(particles.pos[i], &mut object_contacts);
-                    let mut best_contact: Option<(ObjectId, Vec2, f32)> = None;
-                    for &object_id in &object_contacts {
-                        if object_world.object_of_particle(i) == Some(object_id) {
-                            continue;
-                        }
-                        let Some(sample) =
-                            object_world.evaluate_object_sdf(object_id, particles.pos[i])
-                        else {
-                            continue;
-                        };
-                        let c_n = sample.distance_m - props_i.object_push_radius_m;
-                        if c_n >= 0.0 {
-                            continue;
-                        }
-                        let replace = match best_contact {
-                            Some((_, _, best_c_n)) => c_n < best_c_n,
-                            None => true,
-                        };
-                        if replace {
-                            best_contact = Some((object_id, sample.normal_world, c_n));
-                        }
-                    }
-
-                    if let Some((object_id, normal, c_n)) = best_contact {
-                        let key = GranularObjectContactKey {
-                            particle: i,
-                            object_id,
-                        };
-                        let lambda_n = lambda_n_object.entry(key).or_insert(0.0);
-                        let delta_lambda_n = (-c_n - alpha_n * *lambda_n) / (inv_mass_i + alpha_n);
-                        *lambda_n += delta_lambda_n;
-                        let corr_n = normal * (delta_lambda_n * inv_mass_i);
-                        delta_pos[i] += corr_n;
-
-                        let rel_vel = particles.vel[i];
-                        let tangent = rel_vel - normal * rel_vel.dot(normal);
-                        let tangent_len = tangent.length();
-                        if tangent_len > 1e-6 {
-                            let t_hat = tangent / tangent_len;
-                            let c_t = rel_vel.dot(t_hat) * dt_granular;
-                            let lambda_t = lambda_t_object.entry(key).or_insert(0.0);
-                            let delta_lambda_t =
-                                (-c_t - alpha_t * *lambda_t) / (inv_mass_i + alpha_t);
-                            let max_tangent = props_i.friction_dynamic.max(0.0) * lambda_n.abs();
-                            let next_lambda_t =
-                                (*lambda_t + delta_lambda_t).clamp(-max_tangent, max_tangent);
-                            let applied_t = next_lambda_t - *lambda_t;
-                            *lambda_t = next_lambda_t;
-                            delta_pos[i] += t_hat * (applied_t * inv_mass_i);
-                        }
-
-                        let reaction_impulse = -(particles.mass[i] * corr_n) * inv_dt_granular;
-                        *reaction_impulses.entry(object_id).or_insert(Vec2::ZERO) +=
-                            reaction_impulse;
-                        wake_impulses[i] += particles.mass[i] * corr_n.length() * inv_dt_granular;
-                    }
+                for (i, next_lambda) in terrain_object_reduced.terrain_lambda_n_updates {
+                    lambda_n_terrain[i] = next_lambda;
+                }
+                for (i, next_lambda) in terrain_object_reduced.terrain_lambda_t_updates {
+                    lambda_t_terrain[i] = next_lambda;
+                }
+                for (key, next_lambda) in terrain_object_reduced.object_lambda_n_updates {
+                    lambda_n_object.insert(key, next_lambda);
+                }
+                for (key, next_lambda) in terrain_object_reduced.object_lambda_t_updates {
+                    lambda_t_object.insert(key, next_lambda);
+                }
+                for (i, delta) in terrain_object_reduced.delta_pos {
+                    delta_pos[i] += delta;
+                }
+                for (i, impulse) in terrain_object_reduced.wake_impulses {
+                    wake_impulses[i] += impulse;
+                }
+                for (object_id, impulse) in terrain_object_reduced.reaction_impulses {
+                    *reaction_impulses.entry(object_id).or_insert(Vec2::ZERO) += impulse;
                 }
 
                 for i in 0..n {
@@ -3803,5 +3890,104 @@ mod tests {
                 .any(|&m| matches!(m, ParticleMaterial::SandGranular)),
             "single-cell object should be converted to granular particles"
         );
+    }
+
+    #[test]
+    fn granular_solver_does_not_modify_water_only_particles() {
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        particles.pos.push(Vec2::new(-0.1, 1.0));
+        particles.prev_pos.push(Vec2::new(-0.1, 1.0));
+        particles.vel.push(Vec2::new(0.0, -1.0));
+        particles
+            .mass
+            .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+        particles.material.push(ParticleMaterial::WaterLiquid);
+        particles.resize_work_buffers();
+
+        let before_pos = particles.pos.clone();
+        let before_vel = particles.vel.clone();
+        let terrain = TerrainWorld::default();
+        let object_field = ObjectPhysicsField::default();
+        let object_world = ObjectWorld::default();
+
+        let reaction = GranularSolver::solve_contacts(
+            &mut particles,
+            &terrain,
+            &object_field,
+            &object_world,
+            FIXED_DT / SUBSTEPS as f32,
+        );
+
+        assert!(reaction.is_empty());
+        assert_eq!(particles.pos, before_pos);
+        assert_eq!(particles.vel, before_vel);
+    }
+
+    #[test]
+    fn granular_solver_pushes_particle_out_of_terrain() {
+        let mut terrain = TerrainWorld::default();
+        terrain.reset_fixed_world();
+        terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        let indices = particles.spawn_material_particles_from_cells(
+            &[IVec2::new(0, 1)],
+            ParticleMaterial::SandGranular,
+            Vec2::new(0.0, -2.0),
+        );
+        let index = indices[0];
+        particles.pos[index] = Vec2::new(0.0, 0.01);
+        particles.prev_pos[index] = particles.pos[index];
+        particles.vel[index] = Vec2::new(0.0, -2.0);
+        particles.resize_work_buffers();
+
+        let object_field = ObjectPhysicsField::default();
+        let object_world = ObjectWorld::default();
+        let before_y = particles.pos[index].y;
+
+        let _ = GranularSolver::solve_contacts(
+            &mut particles,
+            &terrain,
+            &object_field,
+            &object_world,
+            FIXED_DT / SUBSTEPS as f32,
+        );
+
+        assert!(
+            particles.pos[index].y >= before_y,
+            "expected granular XPBD contact to resolve terrain penetration"
+        );
+    }
+
+    #[test]
+    fn fractured_granular_particles_remain_awake_during_sleep_lock() {
+        let mut particles = ParticleWorld::default();
+        clear_particles(&mut particles);
+        let _ = particles.spawn_material_particles_from_cells(
+            &[IVec2::new(0, 3)],
+            ParticleMaterial::SandSolid,
+            Vec2::ZERO,
+        );
+        particles.resize_work_buffers();
+
+        let center = particles.pos[0];
+        let detached = particles.fracture_solid_particles_in_radius(center, CELL_SIZE_M);
+        assert_eq!(detached.len(), 1);
+        assert!(matches!(
+            particles.material[0],
+            ParticleMaterial::SandGranular
+        ));
+
+        particles.vel[0] = Vec2::ZERO;
+        particles.prev_pos[0] = particles.pos[0];
+        for _ in 0..(SLEEP_FRAMES + 4) {
+            particles.update_sleep_states();
+            assert!(
+                particles.activity_state[0] == ParticleActivityState::Active,
+                "fracture sleep lock should keep fresh granular particle active"
+            );
+        }
     }
 }
