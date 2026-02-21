@@ -36,6 +36,12 @@ pub const SLEEP_FRAMES: u16 = 30;
 pub const WAKE_DISP_THRESHOLD: f32 = 0.0040;
 pub const WAKE_RADIUS: f32 = CELL_SIZE_M * 1.75;
 pub const ACTIVE_MIN_FRAMES: u16 = 8;
+pub const GRANULAR_SUBSTEPS: usize = 1;
+pub const GRANULAR_ITERS: usize = 8;
+pub const XPBD_CONTACT_COMPLIANCE_N: f32 = 1e-6;
+pub const XPBD_CONTACT_COMPLIANCE_T: f32 = 6e-6;
+pub const WAKE_IMPULSE_THRESHOLD: f32 = 2.5;
+pub const FRACTURE_WAKE_LOCK_FRAMES: u16 = 45;
 pub const TERRAIN_LOAD_SAMPLE_INTERVAL_SUBSTEPS: u32 = 2;
 pub const TERRAIN_LOAD_STRAIN_THRESHOLD: f32 = 0.28;
 pub const TERRAIN_LOAD_BREAK_DURATION_SECONDS: f32 = 0.45;
@@ -46,7 +52,6 @@ pub const GRANULAR_SOLID_CONTACT_FRICTION_BOOST: f32 = 1.5;
 pub const TERRAIN_CONTACT_FRICTION_SCALE: f32 = 1.75;
 pub const GRANULAR_CONTACT_NORMAL_DAMPING: f32 = 0.50;
 pub const TERRAIN_CONTACT_NORMAL_DAMPING: f32 = 0.65;
-pub const GRANULAR_CONTACT_VELOCITY_RELAXATION: f32 = 0.28;
 pub const GRANULAR_SPAWN_JITTER_RATIO: f32 = 0.01;
 const PARTICLE_ESCAPE_MARGIN_X_CELLS: i32 = CHUNK_SIZE_I32;
 const PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS: i32 = CHUNK_SIZE_I32;
@@ -197,6 +202,298 @@ impl ComputeDeltaThreadScratch {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct GranularObjectContactKey {
+    particle: usize,
+    object_id: ObjectId,
+}
+
+#[derive(Default)]
+struct GranularSolver;
+
+impl GranularSolver {
+    fn solve_contacts(
+        particles: &mut ParticleWorld,
+        terrain: &TerrainWorld,
+        object_field: &ObjectPhysicsField,
+        object_world: &ObjectWorld,
+        dt_sub: f32,
+    ) -> HashMap<ObjectId, Vec2> {
+        if GRANULAR_ITERS == 0 || GRANULAR_SUBSTEPS == 0 || particles.particle_count() == 0 {
+            return HashMap::new();
+        }
+
+        let mut reaction_impulses = HashMap::<ObjectId, Vec2>::new();
+        let n = particles.particle_count();
+        let mut object_contacts = Vec::new();
+        let granular_substeps = GRANULAR_SUBSTEPS.max(1);
+        let dt_granular = dt_sub / granular_substeps as f32;
+        let inv_dt_granular = 1.0 / dt_granular.max(1e-6);
+        let alpha_n = XPBD_CONTACT_COMPLIANCE_N / dt_granular.max(1e-6).powi(2);
+        let alpha_t = XPBD_CONTACT_COMPLIANCE_T / dt_granular.max(1e-6).powi(2);
+
+        let mut lambda_n_pair = HashMap::<u64, f32>::new();
+        let mut lambda_t_pair = HashMap::<u64, f32>::new();
+        let mut lambda_n_terrain = vec![0.0f32; n];
+        let mut lambda_t_terrain = vec![0.0f32; n];
+        let mut lambda_n_object = HashMap::<GranularObjectContactKey, f32>::new();
+        let mut lambda_t_object = HashMap::<GranularObjectContactKey, f32>::new();
+        let mut wake_impulses = vec![0.0f32; n];
+
+        for _ in 0..granular_substeps {
+            particles.neighbor_grid.rebuild(&particles.pos);
+            particles.rebuild_neighbor_cache(false);
+
+            for _ in 0..GRANULAR_ITERS {
+                let mut delta_pos = vec![Vec2::ZERO; n];
+                wake_impulses.fill(0.0);
+
+                for i in 0..n {
+                    if !particles.is_active_particle(i) || is_water_particle(particles.material[i])
+                    {
+                        continue;
+                    }
+
+                    let props_i = particle_properties(particles.material[i]);
+                    let inv_mass_i = 1.0 / particles.mass[i].max(1e-6);
+
+                    for &j in &particles.neighbor_cache[i] {
+                        if j <= i
+                            || !particles.is_active_particle(j)
+                            || is_water_particle(particles.material[j])
+                        {
+                            continue;
+                        }
+
+                        let props_j = particle_properties(particles.material[j]);
+                        let r = particles.pos[i] - particles.pos[j];
+                        let dist2 = r.length_squared();
+                        if dist2 <= 1e-12 {
+                            continue;
+                        }
+                        let contact_radius = props_i.radius_m + props_j.radius_m;
+                        if dist2 >= contact_radius * contact_radius {
+                            continue;
+                        }
+
+                        let dist = dist2.sqrt();
+                        let n_ij = r / dist;
+                        let c_n = dist - contact_radius;
+                        let inv_mass_j = 1.0 / particles.mass[j].max(1e-6);
+                        let w_sum = inv_mass_i + inv_mass_j;
+                        if w_sum <= 1e-8 {
+                            continue;
+                        }
+
+                        let pair_key = pack_pair_key(i, j);
+                        let lambda_n = lambda_n_pair.entry(pair_key).or_insert(0.0);
+                        let delta_lambda_n = (-c_n - alpha_n * *lambda_n) / (w_sum + alpha_n);
+                        *lambda_n += delta_lambda_n;
+                        let normal_correction = n_ij * delta_lambda_n;
+                        let corr_i_n = normal_correction * inv_mass_i;
+                        let corr_j_n = -normal_correction * inv_mass_j;
+                        delta_pos[i] += corr_i_n;
+                        delta_pos[j] += corr_j_n;
+
+                        if let Some(scale) = granular_contact_friction_pair_scale(
+                            particles.material[i],
+                            particles.material[j],
+                        ) {
+                            let mu_k =
+                                0.5 * (props_i.friction_dynamic + props_j.friction_dynamic) * scale;
+                            let rel_vel = particles.vel[i] - particles.vel[j];
+                            let tangent = rel_vel - n_ij * rel_vel.dot(n_ij);
+                            let tangent_len = tangent.length();
+                            if tangent_len > 1e-6 {
+                                let t_hat = tangent / tangent_len;
+                                let c_t = rel_vel.dot(t_hat) * dt_granular;
+                                let lambda_t = lambda_t_pair.entry(pair_key).or_insert(0.0);
+                                let delta_lambda_t =
+                                    (-c_t - alpha_t * *lambda_t) / (w_sum + alpha_t);
+                                let max_tangent = mu_k.max(0.0) * lambda_n.abs();
+                                let next_lambda_t =
+                                    (*lambda_t + delta_lambda_t).clamp(-max_tangent, max_tangent);
+                                let applied_t = next_lambda_t - *lambda_t;
+                                *lambda_t = next_lambda_t;
+                                let tangent_correction = t_hat * applied_t;
+                                delta_pos[i] += tangent_correction * inv_mass_i;
+                                delta_pos[j] += -tangent_correction * inv_mass_j;
+                            }
+                        }
+
+                        let impulse_i = particles.mass[i] * corr_i_n.length() * inv_dt_granular;
+                        let impulse_j = particles.mass[j] * corr_j_n.length() * inv_dt_granular;
+                        wake_impulses[i] += impulse_i;
+                        wake_impulses[j] += impulse_j;
+                    }
+
+                    if let Some((signed_distance, normal)) =
+                        terrain.sample_signed_distance_and_normal(particles.pos[i])
+                    {
+                        let c_n = signed_distance - props_i.terrain_push_radius_m;
+                        if c_n < 0.0 {
+                            let lambda_n = &mut lambda_n_terrain[i];
+                            let delta_lambda_n =
+                                (-c_n - alpha_n * *lambda_n) / (inv_mass_i + alpha_n);
+                            *lambda_n += delta_lambda_n;
+                            let corr_n = normal * (delta_lambda_n * inv_mass_i);
+                            delta_pos[i] += corr_n;
+
+                            let rel_vel = particles.vel[i];
+                            let tangent = rel_vel - normal * rel_vel.dot(normal);
+                            let tangent_len = tangent.length();
+                            if tangent_len > 1e-6 {
+                                let t_hat = tangent / tangent_len;
+                                let c_t = rel_vel.dot(t_hat) * dt_granular;
+                                let lambda_t = &mut lambda_t_terrain[i];
+                                let delta_lambda_t =
+                                    (-c_t - alpha_t * *lambda_t) / (inv_mass_i + alpha_t);
+                                let max_tangent = (props_i.friction_dynamic
+                                    * TERRAIN_CONTACT_FRICTION_SCALE)
+                                    .max(0.0)
+                                    * lambda_n.abs();
+                                let next_lambda_t =
+                                    (*lambda_t + delta_lambda_t).clamp(-max_tangent, max_tangent);
+                                let applied_t = next_lambda_t - *lambda_t;
+                                *lambda_t = next_lambda_t;
+                                delta_pos[i] += t_hat * (applied_t * inv_mass_i);
+                            }
+
+                            wake_impulses[i] +=
+                                particles.mass[i] * corr_n.length() * inv_dt_granular;
+                        }
+                    }
+
+                    object_field
+                        .gather_candidate_object_ids(particles.pos[i], &mut object_contacts);
+                    let mut best_contact: Option<(ObjectId, Vec2, f32)> = None;
+                    for &object_id in &object_contacts {
+                        if object_world.object_of_particle(i) == Some(object_id) {
+                            continue;
+                        }
+                        let Some(sample) =
+                            object_world.evaluate_object_sdf(object_id, particles.pos[i])
+                        else {
+                            continue;
+                        };
+                        let c_n = sample.distance_m - props_i.object_push_radius_m;
+                        if c_n >= 0.0 {
+                            continue;
+                        }
+                        let replace = match best_contact {
+                            Some((_, _, best_c_n)) => c_n < best_c_n,
+                            None => true,
+                        };
+                        if replace {
+                            best_contact = Some((object_id, sample.normal_world, c_n));
+                        }
+                    }
+
+                    if let Some((object_id, normal, c_n)) = best_contact {
+                        let key = GranularObjectContactKey {
+                            particle: i,
+                            object_id,
+                        };
+                        let lambda_n = lambda_n_object.entry(key).or_insert(0.0);
+                        let delta_lambda_n = (-c_n - alpha_n * *lambda_n) / (inv_mass_i + alpha_n);
+                        *lambda_n += delta_lambda_n;
+                        let corr_n = normal * (delta_lambda_n * inv_mass_i);
+                        delta_pos[i] += corr_n;
+
+                        let rel_vel = particles.vel[i];
+                        let tangent = rel_vel - normal * rel_vel.dot(normal);
+                        let tangent_len = tangent.length();
+                        if tangent_len > 1e-6 {
+                            let t_hat = tangent / tangent_len;
+                            let c_t = rel_vel.dot(t_hat) * dt_granular;
+                            let lambda_t = lambda_t_object.entry(key).or_insert(0.0);
+                            let delta_lambda_t =
+                                (-c_t - alpha_t * *lambda_t) / (inv_mass_i + alpha_t);
+                            let max_tangent = props_i.friction_dynamic.max(0.0) * lambda_n.abs();
+                            let next_lambda_t =
+                                (*lambda_t + delta_lambda_t).clamp(-max_tangent, max_tangent);
+                            let applied_t = next_lambda_t - *lambda_t;
+                            *lambda_t = next_lambda_t;
+                            delta_pos[i] += t_hat * (applied_t * inv_mass_i);
+                        }
+
+                        let reaction_impulse = -(particles.mass[i] * corr_n) * inv_dt_granular;
+                        *reaction_impulses.entry(object_id).or_insert(Vec2::ZERO) +=
+                            reaction_impulse;
+                        wake_impulses[i] += particles.mass[i] * corr_n.length() * inv_dt_granular;
+                    }
+                }
+
+                for i in 0..n {
+                    if !particles.is_active_particle(i) || is_water_particle(particles.material[i])
+                    {
+                        continue;
+                    }
+                    particles.pos[i] += delta_pos[i];
+                    if wake_impulses[i] > WAKE_IMPULSE_THRESHOLD {
+                        particles.request_wake(i);
+                    }
+                }
+
+                particles.neighbor_grid.rebuild(&particles.pos);
+                particles.rebuild_neighbor_cache(false);
+            }
+        }
+
+        reaction_impulses
+    }
+
+    fn apply_restitution(particles: &mut ParticleWorld, _dt_sub: f32) {
+        let mut neighbors = Vec::new();
+        for i in 0..particles.particle_count() {
+            if !particles.is_active_particle(i) || is_water_particle(particles.material[i]) {
+                continue;
+            }
+            particles
+                .neighbor_grid
+                .gather(particles.pos[i], &mut neighbors);
+            for &j in &neighbors {
+                if j <= i
+                    || !particles.is_active_particle(j)
+                    || is_water_particle(particles.material[j])
+                {
+                    continue;
+                }
+                let r = particles.pos[i] - particles.pos[j];
+                let dist2 = r.length_squared();
+                if dist2 <= 1e-12 {
+                    continue;
+                }
+                let props_i = particle_properties(particles.material[i]);
+                let props_j = particle_properties(particles.material[j]);
+                let contact_radius = props_i.radius_m + props_j.radius_m;
+                if dist2 >= contact_radius * contact_radius {
+                    continue;
+                }
+
+                let n_ij = r.normalize_or_zero();
+                let rel_normal_speed = (particles.vel[i] - particles.vel[j]).dot(n_ij);
+                if rel_normal_speed >= 0.0 {
+                    continue;
+                }
+                let restitution = 0.5 * (props_i.contact_restitution + props_j.contact_restitution);
+                let inv_mass_i = 1.0 / particles.mass[i].max(1e-6);
+                let inv_mass_j = 1.0 / particles.mass[j].max(1e-6);
+                let denom = (inv_mass_i + inv_mass_j).max(1e-6);
+                let impulse = -(1.0 + restitution.clamp(0.0, 1.0)) * rel_normal_speed / denom;
+                let impulse_vec = n_ij * impulse;
+                particles.vel[i] += impulse_vec * inv_mass_i;
+                particles.vel[j] -= impulse_vec * inv_mass_j;
+
+                if impulse.abs() > WAKE_IMPULSE_THRESHOLD {
+                    particles.request_wake(i);
+                    particles.request_wake(j);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 struct TerrainFractureSeed {
     impulse_sum: f32,
@@ -247,6 +544,7 @@ pub struct ParticleWorld {
     activity_state: Vec<ParticleActivityState>,
     sleep_candidate_frames: Vec<u16>,
     active_hold_frames: Vec<u16>,
+    sleep_lock_frames: Vec<u16>,
     pending_wake: Vec<bool>,
     initial_pos: Vec<Vec2>,
     initial_vel: Vec<Vec2>,
@@ -279,6 +577,7 @@ impl Default for ParticleWorld {
             activity_state: Vec::new(),
             sleep_candidate_frames: Vec::new(),
             active_hold_frames: Vec::new(),
+            sleep_lock_frames: Vec::new(),
             pending_wake: Vec::new(),
             initial_pos,
             initial_vel,
@@ -317,6 +616,7 @@ impl ParticleWorld {
         self.activity_state.fill(ParticleActivityState::Active);
         self.sleep_candidate_frames.fill(0);
         self.active_hold_frames.fill(0);
+        self.sleep_lock_frames.fill(0);
         self.pending_wake.fill(false);
         self.resize_work_buffers();
     }
@@ -373,6 +673,7 @@ impl ParticleWorld {
         self.activity_state.fill(ParticleActivityState::Active);
         self.sleep_candidate_frames.fill(0);
         self.active_hold_frames.fill(0);
+        self.sleep_lock_frames.fill(0);
         self.pending_wake.fill(false);
         self.resize_work_buffers();
         Ok(())
@@ -584,6 +885,7 @@ impl ParticleWorld {
         let mut new_activity_state = Vec::with_capacity(new_count);
         let mut new_sleep_candidate_frames = Vec::with_capacity(new_count);
         let mut new_active_hold_frames = Vec::with_capacity(new_count);
+        let mut new_sleep_lock_frames = Vec::with_capacity(new_count);
         let mut new_pending_wake = Vec::with_capacity(new_count);
         for old_index in 0..old_count {
             if !keep[old_index] {
@@ -597,6 +899,7 @@ impl ParticleWorld {
             new_activity_state.push(self.activity_state[old_index]);
             new_sleep_candidate_frames.push(self.sleep_candidate_frames[old_index]);
             new_active_hold_frames.push(self.active_hold_frames[old_index]);
+            new_sleep_lock_frames.push(self.sleep_lock_frames[old_index]);
             new_pending_wake.push(self.pending_wake[old_index]);
         }
 
@@ -608,6 +911,7 @@ impl ParticleWorld {
         self.activity_state = new_activity_state;
         self.sleep_candidate_frames = new_sleep_candidate_frames;
         self.active_hold_frames = new_active_hold_frames;
+        self.sleep_lock_frames = new_sleep_lock_frames;
         self.pending_wake = new_pending_wake;
         self.request_wake_near(center, WAKE_RADIUS);
         self.resize_work_buffers();
@@ -639,11 +943,16 @@ impl ParticleWorld {
             self.fracture_particle_to_target_material(i, target_material, &mut spawned_particles);
         }
         for (position, velocity, mass, material) in spawned_particles {
+            let new_index = self.pos.len();
             self.pos.push(position);
             self.prev_pos.push(position);
             self.vel.push(velocity);
             self.mass.push(mass);
             self.material.push(material);
+            if is_granular_particle(material) {
+                self.request_wake(new_index);
+                self.sleep_lock_frames[new_index] = FRACTURE_WAKE_LOCK_FRAMES;
+            }
         }
         if !detached.is_empty() {
             self.request_wake_near(center, WAKE_RADIUS);
@@ -789,6 +1098,14 @@ impl ParticleWorld {
             }
         }
         {
+            let _span = tracing::info_span!("physics::granular_solver").entered();
+            let reaction_impulses =
+                GranularSolver::solve_contacts(self, terrain, object_field, object_world, dt_sub);
+            for (object_id, impulse) in reaction_impulses {
+                object_world.accumulate_reaction_impulse(object_id, impulse);
+            }
+        }
+        {
             let _span = tracing::info_span!("physics::shape_matching").entered();
             self.solve_shape_matching_constraints(object_world);
         }
@@ -806,8 +1123,8 @@ impl ParticleWorld {
             }
         }
         {
-            let _span = tracing::info_span!("physics::granular_contact_relaxation").entered();
-            self.apply_granular_contact_velocity_relaxation();
+            let _span = tracing::info_span!("physics::granular_restitution").entered();
+            GranularSolver::apply_restitution(self, dt_sub);
         }
         {
             let _span = tracing::info_span!("physics::contact_velocity_response").entered();
@@ -1049,6 +1366,10 @@ impl ParticleWorld {
             let material = self.material[i];
             let props = particle_properties(material);
             let is_water = is_water_particle(material);
+            if !is_water {
+                self.delta_pos[i] = Vec2::ZERO;
+                continue;
+            }
             let neighbors = &self.neighbor_cache[i];
 
             let mut delta = Vec2::ZERO;
@@ -1221,6 +1542,10 @@ impl ParticleWorld {
                     let material = materials[i];
                     let props = particle_properties(material);
                     let is_water = is_water_particle(material);
+                    if !is_water {
+                        *delta_pos_i = Vec2::ZERO;
+                        return scratch;
+                    }
                     let neighbors = &neighbor_cache[i];
 
                     let mut delta = Vec2::ZERO;
@@ -1458,47 +1783,6 @@ impl ParticleWorld {
             };
             self.vel[i] = adjusted_tangent + contact_normal * adjusted_normal_speed;
         }
-    }
-
-    fn apply_granular_contact_velocity_relaxation(&mut self) {
-        if GRANULAR_CONTACT_VELOCITY_RELAXATION <= 0.0 {
-            return;
-        }
-        let mut relaxed_vel = self.vel.clone();
-        for (i, relaxed_vel_i) in relaxed_vel
-            .iter_mut()
-            .enumerate()
-            .take(self.particle_count())
-        {
-            if !self.is_active_particle(i) || !is_granular_particle(self.material[i]) {
-                continue;
-            }
-            let props_i = particle_properties(self.material[i]);
-            let mut contact_count = 0u32;
-            let mut neighbor_velocity_sum = Vec2::ZERO;
-            for &j in &self.neighbor_cache[i] {
-                if i == j || !self.is_active_particle(j) || !is_granular_particle(self.material[j])
-                {
-                    continue;
-                }
-                let contact_radius =
-                    props_i.radius_m + particle_properties(self.material[j]).radius_m;
-                if self.pos[i].distance_squared(self.pos[j]) < contact_radius * contact_radius {
-                    contact_count += 1;
-                    neighbor_velocity_sum += self.vel[j];
-                }
-            }
-            if contact_count == 0 {
-                continue;
-            }
-            let neighbor_velocity = neighbor_velocity_sum / contact_count as f32;
-            let relative = self.vel[i] - neighbor_velocity;
-            let blend = (GRANULAR_CONTACT_VELOCITY_RELAXATION
-                * (contact_count as f32 / 4.0).clamp(0.3, 1.0))
-            .clamp(0.0, 0.6);
-            *relaxed_vel_i = self.vel[i] - relative * blend;
-        }
-        self.vel = relaxed_vel;
     }
 
     fn apply_xsph_viscosity(&mut self) {
@@ -1766,11 +2050,16 @@ impl ParticleWorld {
         }
 
         for (position, velocity, mass, material) in spawned_particles {
+            let new_index = self.pos.len();
             self.pos.push(position);
             self.prev_pos.push(position);
             self.vel.push(velocity);
             self.mass.push(mass);
             self.material.push(material);
+            if is_granular_particle(material) {
+                self.request_wake(new_index);
+                self.sleep_lock_frames[new_index] = FRACTURE_WAKE_LOCK_FRAMES;
+            }
         }
         self.resize_work_buffers();
 
@@ -1928,6 +2217,10 @@ impl ParticleWorld {
         let base_vel = self.vel[index];
         self.material[index] = target_material;
         self.mass[index] = target_mass;
+        if is_granular_particle(target_material) {
+            self.request_wake(index);
+            self.sleep_lock_frames[index] = FRACTURE_WAKE_LOCK_FRAMES;
+        }
         if split_count <= 1 {
             return;
         }
@@ -2004,11 +2297,16 @@ impl ParticleWorld {
             );
         }
         for (position, velocity, mass, material) in spawned_particles {
+            let new_index = self.pos.len();
             self.pos.push(position);
             self.prev_pos.push(position);
             self.vel.push(velocity);
             self.mass.push(mass);
             self.material.push(material);
+            if is_granular_particle(material) {
+                self.request_wake(new_index);
+                self.sleep_lock_frames[new_index] = FRACTURE_WAKE_LOCK_FRAMES;
+            }
         }
         self.resize_work_buffers();
         object_world.remove_objects_by_ids(&objects_to_remove);
@@ -2038,6 +2336,9 @@ impl ParticleWorld {
         }
         if self.active_hold_frames.len() < self.particle_count() {
             self.active_hold_frames.resize(self.particle_count(), 0);
+        }
+        if self.sleep_lock_frames.len() < self.particle_count() {
+            self.sleep_lock_frames.resize(self.particle_count(), 0);
         }
         self.pending_wake[index] = true;
     }
@@ -2097,6 +2398,11 @@ impl ParticleWorld {
 
             if self.active_hold_frames[i] > 0 {
                 self.active_hold_frames[i] -= 1;
+                self.sleep_candidate_frames[i] = 0;
+                continue;
+            }
+            if self.sleep_lock_frames[i] > 0 {
+                self.sleep_lock_frames[i] -= 1;
                 self.sleep_candidate_frames[i] = 0;
                 continue;
             }
@@ -2260,6 +2566,7 @@ impl ParticleWorld {
         let mut new_activity_state = Vec::with_capacity(new_count);
         let mut new_sleep_candidate_frames = Vec::with_capacity(new_count);
         let mut new_active_hold_frames = Vec::with_capacity(new_count);
+        let mut new_sleep_lock_frames = Vec::with_capacity(new_count);
         let mut new_pending_wake = Vec::with_capacity(new_count);
         for old_index in 0..old_count {
             if !keep[old_index] {
@@ -2273,6 +2580,7 @@ impl ParticleWorld {
             new_activity_state.push(self.activity_state[old_index]);
             new_sleep_candidate_frames.push(self.sleep_candidate_frames[old_index]);
             new_active_hold_frames.push(self.active_hold_frames[old_index]);
+            new_sleep_lock_frames.push(self.sleep_lock_frames[old_index]);
             new_pending_wake.push(self.pending_wake[old_index]);
         }
 
@@ -2284,6 +2592,7 @@ impl ParticleWorld {
         self.activity_state = new_activity_state;
         self.sleep_candidate_frames = new_sleep_candidate_frames;
         self.active_hold_frames = new_active_hold_frames;
+        self.sleep_lock_frames = new_sleep_lock_frames;
         self.pending_wake = new_pending_wake;
         object_world.apply_particle_remap(&old_to_new, self.masses());
         self.resize_work_buffers();
@@ -2302,6 +2611,7 @@ impl ParticleWorld {
             .resize(count, ParticleActivityState::Active);
         self.sleep_candidate_frames.resize(count, 0);
         self.active_hold_frames.resize(count, 0);
+        self.sleep_lock_frames.resize(count, 0);
         self.pending_wake.resize(count, false);
         self.neighbor_cache.resize_with(count, Vec::new);
         self.viscosity_work.resize(count, Vec2::ZERO);
@@ -2563,6 +2873,11 @@ fn particle_grid_axis(particles_per_cell: u32) -> u32 {
     } else {
         1
     }
+}
+
+fn pack_pair_key(i: usize, j: usize) -> u64 {
+    let (a, b) = if i <= j { (i, j) } else { (j, i) };
+    ((a as u64) << 32) | b as u64
 }
 
 fn resolve_terrain_contact_cell(
