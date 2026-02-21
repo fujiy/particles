@@ -18,10 +18,15 @@ const BUTTON_BG_PRESS: Color = Color::srgba(0.38, 0.40, 0.48, 0.98);
 const GRID_NEIGHBOR_COLOR: Color = Color::srgba(0.27, 0.75, 0.98, 0.28);
 const GRID_CHUNK_COLOR: Color = Color::srgba(0.98, 0.78, 0.25, 0.75);
 const GRID_OBJECT_COLOR: Color = Color::srgba(0.92, 0.36, 0.12, 0.70);
+const GRID_OBJECT_CENTER_COLOR: Color = Color::srgba(0.98, 0.98, 0.98, 0.90);
+const GRID_OBJECT_LOCAL_X_COLOR: Color = Color::srgba(0.95, 0.26, 0.21, 0.95);
+const GRID_OBJECT_LOCAL_Y_COLOR: Color = Color::srgba(0.18, 0.80, 0.44, 0.95);
 const GRID_BUTTON_BOTTOM_PX: f32 = 50.0;
 const PARTICLE_BUTTON_BOTTOM_PX: f32 = 12.0;
 const TERRAIN_PARTICLE_RADIUS_M: f32 = PARTICLE_RADIUS_M * 0.55;
 const PARTICLE_OVERLAY_CIRCLE_RESOLUTION: u32 = 8;
+const GRID_OBJECT_AXIS_LENGTH_M: f32 = CELL_SIZE_M * 1.6;
+const GRID_OBJECT_CENTER_RADIUS_M: f32 = CELL_SIZE_M * 0.12;
 
 pub struct OverlayPlugin;
 
@@ -266,6 +271,7 @@ fn draw_grid_overlay(
             object_pose_for_overlay(object, particle_positions, particle_masses)
         {
             draw_object_grid_cells(&mut gizmos, object, center, theta);
+            draw_object_pose_axes(&mut gizmos, center, theta);
         }
     }
 }
@@ -289,6 +295,22 @@ fn draw_object_grid_cells(gizmos: &mut Gizmos, object: &ObjectData, center: Vec2
         gizmos.line_2d(world[2], world[3], GRID_OBJECT_COLOR);
         gizmos.line_2d(world[3], world[0], GRID_OBJECT_COLOR);
     }
+}
+
+fn draw_object_pose_axes(gizmos: &mut Gizmos, center: Vec2, theta: f32) {
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+    let local_x = Vec2::new(cos_t, sin_t);
+    let local_y = Vec2::new(-sin_t, cos_t);
+    let x_end = center + local_x * GRID_OBJECT_AXIS_LENGTH_M;
+    let y_end = center + local_y * GRID_OBJECT_AXIS_LENGTH_M;
+    gizmos.line_2d(center, x_end, GRID_OBJECT_LOCAL_X_COLOR);
+    gizmos.line_2d(center, y_end, GRID_OBJECT_LOCAL_Y_COLOR);
+    gizmos.circle_2d(
+        center,
+        GRID_OBJECT_CENTER_RADIUS_M,
+        GRID_OBJECT_CENTER_COLOR,
+    );
 }
 
 fn object_pose_for_overlay(
@@ -340,6 +362,7 @@ fn draw_particle_overlay(
     overlay_state: Res<ParticleOverlayState>,
     terrain_world: Res<TerrainWorld>,
     particle_world: Res<ParticleWorld>,
+    object_world: Res<ObjectWorld>,
 ) {
     if !overlay_state.enabled {
         return;
@@ -357,19 +380,25 @@ fn draw_particle_overlay(
             .resolution(PARTICLE_OVERLAY_CIRCLE_RESOLUTION);
     }
     for (index, pos) in particle_world.positions().iter().enumerate() {
-        if particle_world.activity_states().get(index).copied()
-            != Some(ParticleActivityState::Active)
-        {
+        let is_object_particle = object_world.object_of_particle(index).is_some();
+        let is_active = particle_world.activity_states().get(index).copied()
+            == Some(ParticleActivityState::Active);
+        if !is_object_particle && !is_active {
             continue;
         }
-        let color = match particle_world.materials()[index] {
-            ParticleMaterial::WaterLiquid => Color::srgba(0.10, 0.80, 0.95, 0.85),
-            ParticleMaterial::StoneSolid
-            | ParticleMaterial::StoneGranular
-            | ParticleMaterial::SoilSolid
-            | ParticleMaterial::SoilGranular
-            | ParticleMaterial::SandSolid
-            | ParticleMaterial::SandGranular => Color::srgba(0.63, 0.50, 0.34, 0.85),
+        let color = if is_object_particle {
+            let alpha = if is_active { 0.95 } else { 0.55 };
+            Color::srgba(0.98, 0.90, 0.38, alpha)
+        } else {
+            match particle_world.materials()[index] {
+                ParticleMaterial::WaterLiquid => Color::srgba(0.10, 0.80, 0.95, 0.85),
+                ParticleMaterial::StoneSolid
+                | ParticleMaterial::StoneGranular
+                | ParticleMaterial::SoilSolid
+                | ParticleMaterial::SoilGranular
+                | ParticleMaterial::SandSolid
+                | ParticleMaterial::SandGranular => Color::srgba(0.63, 0.50, 0.34, 0.85),
+            }
         };
         gizmos
             .circle_2d(*pos, water_overlay_radius, color)

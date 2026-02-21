@@ -22,8 +22,8 @@ use crate::physics::scenario::{
     evaluate_scenario_state,
 };
 use crate::physics::state::{
-    LoadMapRequest, ReplayLoadScenarioRequest, ReplayState, ResetSimulationRequest, SaveMapRequest,
-    SimUpdateSet, SimulationPerfMetrics, SimulationState,
+    LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest, ReplayState,
+    ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationPerfMetrics, SimulationState,
 };
 use crate::physics::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, WORLD_MAX_CHUNK_X,
@@ -158,6 +158,8 @@ impl Plugin for InterfacePlugin {
                 (
                     handle_save_load_open_button_interaction,
                     handle_save_load_reset_button_interaction,
+                    handle_sim_play_pause_button_interaction,
+                    handle_sim_step_button_interaction,
                     handle_save_load_name_input_button_interaction,
                     handle_save_load_dialog_buttons,
                     handle_save_load_slot_button_interaction,
@@ -175,6 +177,9 @@ impl Plugin for InterfacePlugin {
                     update_world_tool_button_visuals,
                     update_save_load_open_button_visuals,
                     update_save_load_reset_button_visuals,
+                    update_sim_play_pause_button_visuals,
+                    update_sim_step_button_visuals,
+                    update_sim_play_pause_button_label,
                     update_save_load_name_input_button_visuals,
                     update_save_load_slot_button_visuals,
                     update_save_load_dialog,
@@ -312,6 +317,7 @@ struct SaveLoadUiState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SaveLoadSlotSource {
+    DefaultWorld,
     Save,
     TestCase,
 }
@@ -323,6 +329,15 @@ struct SaveLoadOpenButton {
 
 #[derive(Component)]
 struct SaveLoadResetButton;
+
+#[derive(Component)]
+struct SimPlayPauseButton;
+
+#[derive(Component)]
+struct SimPlayPauseButtonText;
+
+#[derive(Component)]
+struct SimStepButton;
 
 #[derive(Component)]
 struct SaveLoadDialogRoot;
@@ -399,6 +414,53 @@ fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>
             ..default()
         },))
         .with_children(|parent| {
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
+                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border: UiRect::all(px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_BG_OFF),
+                    BorderColor::all(BUTTON_BORDER_OFF),
+                    SimPlayPauseButton,
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        Text::new("Play"),
+                        TextFont::from_font_size(14.0),
+                        TextColor(Color::WHITE),
+                        SimPlayPauseButtonText,
+                    ));
+                });
+
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
+                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border: UiRect::all(px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_BG_OFF),
+                    BorderColor::all(BUTTON_BORDER_OFF),
+                    SimStepButton,
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        Text::new("Step"),
+                        TextFont::from_font_size(14.0),
+                        TextColor(Color::WHITE),
+                    ));
+                });
+
             parent
                 .spawn((
                     Button,
@@ -769,6 +831,35 @@ fn handle_save_load_reset_button_interaction(
     }
 }
 
+fn handle_sim_play_pause_button_interaction(
+    mut interactions: Query<
+        &Interaction,
+        (Changed<Interaction>, With<SimPlayPauseButton>, With<Button>),
+    >,
+    mut sim_state: ResMut<SimulationState>,
+) {
+    for interaction in &mut interactions {
+        if *interaction == Interaction::Pressed {
+            sim_state.running = !sim_state.running;
+        }
+    }
+}
+
+fn handle_sim_step_button_interaction(
+    mut interactions: Query<
+        &Interaction,
+        (Changed<Interaction>, With<SimStepButton>, With<Button>),
+    >,
+    mut sim_state: ResMut<SimulationState>,
+) {
+    for interaction in &mut interactions {
+        if *interaction == Interaction::Pressed {
+            sim_state.running = false;
+            sim_state.step_once = true;
+        }
+    }
+}
+
 fn handle_save_load_name_input_button_interaction(
     mut interactions: Query<
         &Interaction,
@@ -799,6 +890,7 @@ fn handle_save_load_dialog_buttons(
     mut save_writer: MessageWriter<SaveMapRequest>,
     mut load_writer: MessageWriter<LoadMapRequest>,
     mut replay_load_writer: MessageWriter<ReplayLoadScenarioRequest>,
+    mut load_default_world_writer: MessageWriter<LoadDefaultWorldRequest>,
 ) {
     for interaction in &mut cancel_buttons {
         if *interaction == Interaction::Pressed {
@@ -828,6 +920,9 @@ fn handle_save_load_dialog_buttons(
                     return;
                 };
                 match save_load_ui_state.selected_slot_source {
+                    Some(SaveLoadSlotSource::DefaultWorld) => {
+                        load_default_world_writer.write(LoadDefaultWorldRequest);
+                    }
                     Some(SaveLoadSlotSource::Save) | None => {
                         load_writer.write(LoadMapRequest { slot_name });
                     }
@@ -1006,6 +1101,60 @@ fn update_save_load_reset_button_visuals(
     }
 }
 
+fn update_sim_play_pause_button_visuals(
+    sim_state: Res<SimulationState>,
+    mut buttons: Query<
+        (&Interaction, &mut BackgroundColor, &mut BorderColor),
+        (With<Button>, With<SimPlayPauseButton>),
+    >,
+) {
+    for (interaction, mut bg, mut border_color) in &mut buttons {
+        let selected = sim_state.running;
+        *bg = match *interaction {
+            Interaction::Pressed => BUTTON_BG_PRESS.into(),
+            Interaction::Hovered => BUTTON_BG_HOVER.into(),
+            Interaction::None => toggle_button_bg(selected),
+        };
+        *border_color = if selected {
+            BorderColor::all(BUTTON_BORDER_ON)
+        } else {
+            BorderColor::all(BUTTON_BORDER_OFF)
+        };
+    }
+}
+
+fn update_sim_step_button_visuals(
+    mut buttons: Query<
+        (&Interaction, &mut BackgroundColor, &mut BorderColor),
+        (With<Button>, With<SimStepButton>),
+    >,
+) {
+    for (interaction, mut bg, mut border_color) in &mut buttons {
+        *bg = match *interaction {
+            Interaction::Pressed => BUTTON_BG_PRESS.into(),
+            Interaction::Hovered => BUTTON_BG_HOVER.into(),
+            Interaction::None => BUTTON_BG_OFF.into(),
+        };
+        *border_color = BorderColor::all(BUTTON_BORDER_OFF);
+    }
+}
+
+fn update_sim_play_pause_button_label(
+    sim_state: Res<SimulationState>,
+    mut labels: Query<&mut Text, With<SimPlayPauseButtonText>>,
+) {
+    if !sim_state.is_changed() {
+        return;
+    }
+    for mut label in &mut labels {
+        label.0 = if sim_state.running {
+            "Pause".to_string()
+        } else {
+            "Play".to_string()
+        };
+    }
+}
+
 fn update_save_load_name_input_button_visuals(
     save_load_ui_state: Res<SaveLoadUiState>,
     mut inputs: Query<
@@ -1178,6 +1327,7 @@ fn update_save_load_dialog(
                 .as_deref()
                 .unwrap_or("(none)");
             let source = match save_load_ui_state.selected_slot_source {
+                Some(SaveLoadSlotSource::DefaultWorld) => "Default",
                 Some(SaveLoadSlotSource::Save) => "Save",
                 Some(SaveLoadSlotSource::TestCase) => "Test",
                 None => "-",
@@ -1219,6 +1369,34 @@ fn update_save_load_dialog(
     clear_children_recursive(&mut commands, *slot_list_entity, &children_query);
     commands.entity(*slot_list_entity).with_children(|parent| {
         if save_load_ui_state.mode == Some(SaveLoadDialogMode::Load) {
+            let default_world_label = "Default World".to_string();
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: percent(100.0),
+                        height: px(DIALOG_SLOT_BUTTON_HEIGHT_PX),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::FlexStart,
+                        padding: UiRect::horizontal(px(8.0)),
+                        border: UiRect::all(px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_BG_OFF),
+                    BorderColor::all(BUTTON_BORDER_OFF),
+                    SaveLoadSlotButton {
+                        slot_name: default_world_label.clone(),
+                        source: SaveLoadSlotSource::DefaultWorld,
+                    },
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        Text::new(default_world_label),
+                        TextFont::from_font_size(13.0),
+                        TextColor(Color::WHITE),
+                    ));
+                });
+
             parent.spawn((
                 Text::new("Save Slots"),
                 TextFont::from_font_size(13.0),

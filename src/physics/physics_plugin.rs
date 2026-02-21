@@ -11,9 +11,9 @@ use super::scenario::{
     write_scenario_artifacts_for_state,
 };
 use super::state::{
-    LoadMapRequest, ReplayLoadScenarioRequest, ReplaySaveArtifactRequest, ReplayState,
-    ResetSimulationRequest, SaveMapRequest, SimFixedSet, SimUpdateSet, SimulationPerfMetrics,
-    SimulationState,
+    LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest, ReplaySaveArtifactRequest,
+    ReplayState, ResetSimulationRequest, SaveMapRequest, SimFixedSet, SimUpdateSet,
+    SimulationPerfMetrics, SimulationState,
 };
 use super::terrain::TerrainWorld;
 
@@ -42,6 +42,7 @@ impl Plugin for PhysicsPlugin {
             .init_resource::<ReplayState>()
             .init_resource::<SimulationPerfMetrics>()
             .add_message::<ResetSimulationRequest>()
+            .add_message::<LoadDefaultWorldRequest>()
             .add_message::<SaveMapRequest>()
             .add_message::<LoadMapRequest>()
             .add_message::<ReplayLoadScenarioRequest>()
@@ -71,10 +72,16 @@ impl Plugin for PhysicsPlugin {
 
 fn initialize_default_world(
     mut terrain_world: ResMut<TerrainWorld>,
+    mut particle_world: ResMut<ParticleWorld>,
+    mut object_world: ResMut<ObjectWorld>,
+    mut object_field: ResMut<ObjectPhysicsField>,
     mut sim_state: ResMut<SimulationState>,
 ) {
     terrain_world.reset_fixed_world();
     terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+    *particle_world = ParticleWorld::default();
+    object_world.clear();
+    object_field.clear();
     sim_state.running = false;
     sim_state.step_once = false;
 }
@@ -130,6 +137,10 @@ fn handle_sim_controls(
 ) {
     if keyboard.just_pressed(KeyCode::Space) {
         sim_state.running = !sim_state.running;
+    }
+    if keyboard.just_pressed(KeyCode::Period) || keyboard.just_pressed(KeyCode::NumpadDecimal) {
+        sim_state.running = false;
+        sim_state.step_once = true;
     }
 
     if keyboard.just_pressed(KeyCode::KeyR) {
@@ -238,6 +249,7 @@ fn handle_replay_requests(
 
 fn apply_sim_reset(
     mut reset_reader: MessageReader<ResetSimulationRequest>,
+    mut default_world_reader: MessageReader<LoadDefaultWorldRequest>,
     mut sim_state: ResMut<SimulationState>,
     mut replay_state: ResMut<ReplayState>,
     mut terrain_world: ResMut<TerrainWorld>,
@@ -245,11 +257,13 @@ fn apply_sim_reset(
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
 ) {
-    if reset_reader.read().next().is_none() {
+    let has_default_world_request = default_world_reader.read().next().is_some();
+    let has_reset_request = reset_reader.read().next().is_some();
+    if !has_default_world_request && !has_reset_request {
         return;
     }
 
-    if replay_state.enabled {
+    if !has_default_world_request && replay_state.enabled {
         if let Some(name) = replay_state.scenario_name.clone() {
             if let Some(spec) = default_scenario_spec_by_name(&name) {
                 if let Err(error) = apply_scenario_spec(
@@ -277,7 +291,7 @@ fn apply_sim_reset(
 
     terrain_world.reset_fixed_world();
     terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
-    particle_world.reset_to_initial();
+    *particle_world = ParticleWorld::default();
     object_world.clear();
     object_field.clear();
     sim_state.running = false;

@@ -53,6 +53,8 @@ pub const TERRAIN_CONTACT_FRICTION_SCALE: f32 = 1.75;
 pub const GRANULAR_CONTACT_NORMAL_DAMPING: f32 = 0.50;
 pub const TERRAIN_CONTACT_NORMAL_DAMPING: f32 = 0.65;
 pub const GRANULAR_SPAWN_JITTER_RATIO: f32 = 0.01;
+pub const OBJECT_REACTION_MAX_DV_PER_SUBSTEP_MPS: f32 = 1.5;
+pub const FRACTURE_MIN_IMPACT_SPEED_MPS: f32 = 2.0;
 const PARTICLE_ESCAPE_MARGIN_X_CELLS: i32 = CHUNK_SIZE_I32;
 const PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS: i32 = CHUNK_SIZE_I32;
 const PARTICLE_ESCAPE_MARGIN_TOP_CELLS: i32 = CHUNK_SIZE_I32 * 8;
@@ -1235,6 +1237,10 @@ impl ParticleWorld {
             let _span = tracing::info_span!("physics::shape_matching").entered();
             self.solve_shape_matching_constraints(object_world);
         }
+        {
+            let _span = tracing::info_span!("physics::shape_contact_projection").entered();
+            self.project_solids_out_of_terrain(terrain);
+        }
 
         {
             let _span = tracing::info_span!("physics::update_velocity").entered();
@@ -1288,7 +1294,7 @@ impl ParticleWorld {
         }
         {
             let _span = tracing::info_span!("physics::sleep_update").entered();
-            self.update_sleep_states();
+            self.update_sleep_states(object_world);
         }
     }
 
@@ -1953,7 +1959,7 @@ impl ParticleWorld {
                 .filter_map(|&index| self.mass.get(index).copied())
                 .sum::<f32>()
                 .max(1e-6);
-            let dv = impulse / mass_sum;
+            let dv = (impulse / mass_sum).clamp_length_max(OBJECT_REACTION_MAX_DV_PER_SUBSTEP_MPS);
             for &index in &object.particle_indices {
                 if index >= self.particle_count() {
                     continue;
@@ -1998,15 +2004,31 @@ impl ParticleWorld {
                 continue;
             }
             let dt_sub = FIXED_DT / SUBSTEPS as f32;
-            let step_normal_speed =
-                (self.pos[i] - self.prev_pos[i]).dot(normal).abs() / dt_sub.max(1e-6);
-            let normal_speed = self.vel[i].dot(normal).abs().max(step_normal_speed);
-            let impulse = self.mass[i] * normal_speed;
+            let step_normal_velocity =
+                (self.pos[i] - self.prev_pos[i]).dot(normal) / dt_sub.max(1e-6);
+            let approach_speed = (-self.vel[i].dot(normal))
+                .max(-step_normal_velocity)
+                .max(0.0);
+            let contact_speed = self.vel[i]
+                .dot(normal)
+                .abs()
+                .max(step_normal_velocity.abs());
+            let impact_speed = if approach_speed > 0.0 {
+                approach_speed
+            } else if contact_speed >= FRACTURE_MIN_IMPACT_SPEED_MPS {
+                contact_speed
+            } else {
+                0.0
+            };
+            let impulse = self.mass[i] * impact_speed;
             if impulse <= 1e-6 {
                 continue;
             }
             if let Some(object_id) = object_world.object_of_particle(i) {
-                *object_terrain_impulse.entry(object_id).or_insert(0.0) += impulse;
+                object_terrain_impulse
+                    .entry(object_id)
+                    .and_modify(|value| *value = value.max(impulse))
+                    .or_insert(impulse);
                 self.pending_object_fracture_particles
                     .entry(object_id)
                     .or_default()
@@ -2278,6 +2300,24 @@ impl ParticleWorld {
         }
     }
 
+    fn project_solids_out_of_terrain(&mut self, terrain: &TerrainWorld) {
+        for i in 0..self.particle_count() {
+            if !self.is_active_particle(i) || is_water_particle(self.material[i]) {
+                continue;
+            }
+            let props = particle_properties(self.material[i]);
+            let Some((signed_distance, normal)) =
+                terrain.sample_signed_distance_and_normal(self.pos[i])
+            else {
+                continue;
+            };
+            let penetration = props.terrain_push_radius_m - signed_distance;
+            if penetration > 0.0 {
+                self.pos[i] += normal * penetration;
+            }
+        }
+    }
+
     fn push_water_particle(&mut self, position: Vec2, velocity: Vec2) {
         self.pos.push(position);
         self.prev_pos.push(position);
@@ -2511,8 +2551,19 @@ impl ParticleWorld {
         }
     }
 
-    fn update_sleep_states(&mut self) {
+    fn update_sleep_states(&mut self, object_world: &ObjectWorld) {
         for i in 0..self.particle_count() {
+            // Keep object-owned particles active as a group.
+            // Per-particle sleep inside an object can desynchronize shape matching and
+            // create outlier particles that later inject large impulses.
+            if object_world.object_of_particle(i).is_some() {
+                self.activity_state[i] = ParticleActivityState::Active;
+                self.sleep_candidate_frames[i] = 0;
+                if self.active_hold_frames[i] == 0 {
+                    self.active_hold_frames[i] = 1;
+                }
+                continue;
+            }
             if self.pending_wake[i] {
                 continue;
             }
@@ -2643,16 +2694,25 @@ impl ParticleWorld {
             return;
         }
 
-        let (base_min_cell, base_max_cell) = terrain.loaded_cell_bounds().unwrap_or((
-            IVec2::new(
-                WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32,
-                WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32,
-            ),
-            IVec2::new(
-                (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1,
-                (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1,
-            ),
-        ));
+        let global_min_cell = IVec2::new(
+            WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32,
+            WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32,
+        );
+        let global_max_cell = IVec2::new(
+            (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1,
+            (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1,
+        );
+        let (loaded_min_cell, loaded_max_cell) = terrain
+            .loaded_cell_bounds()
+            .unwrap_or((global_min_cell, global_max_cell));
+        let base_min_cell = IVec2::new(
+            loaded_min_cell.x.min(global_min_cell.x),
+            loaded_min_cell.y.min(global_min_cell.y),
+        );
+        let base_max_cell = IVec2::new(
+            loaded_max_cell.x.max(global_max_cell.x),
+            loaded_max_cell.y.max(global_max_cell.y),
+        );
         let min_cell_x = base_min_cell.x - PARTICLE_ESCAPE_MARGIN_X_CELLS;
         let max_cell_x = base_max_cell.x + PARTICLE_ESCAPE_MARGIN_X_CELLS;
         let min_cell_y = base_min_cell.y - PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS;
@@ -3283,9 +3343,10 @@ mod tests {
         particles.pending_wake[index] = false;
         particles.vel[index] = Vec2::ZERO;
         particles.prev_pos[index] = particles.pos[index];
+        let object_world = ObjectWorld::default();
 
         for _ in 0..SLEEP_FRAMES {
-            particles.update_sleep_states();
+            particles.update_sleep_states(&object_world);
         }
 
         assert_eq!(
@@ -3322,7 +3383,7 @@ mod tests {
     #[test]
     fn sleeping_particle_skips_gravity_integration() {
         let terrain = TerrainWorld::default();
-        let object_field = ObjectPhysicsField::default();
+        let mut object_field = ObjectPhysicsField::default();
         let mut objects = ObjectWorld::default();
         let mut particles = ParticleWorld::default();
         clear_particles(&mut particles);
@@ -3338,7 +3399,17 @@ mod tests {
         particles.pending_wake[index] = false;
         let before = particles.pos[index];
 
-        particles.step_if_running(&terrain, &object_field, &mut objects, true);
+        for _ in 0..6 {
+            objects.update_physics_field(
+                particles.positions(),
+                particles.masses(),
+                &mut object_field,
+            );
+            particles.step_if_running(&terrain, &object_field, &mut objects, true);
+            if objects.objects().is_empty() {
+                break;
+            }
+        }
 
         assert!(
             particles.pos[index].distance(before) < 1e-6,
@@ -3675,11 +3746,7 @@ mod tests {
     }
 
     #[test]
-    fn solid_object_breaks_on_terrain_impact() {
-        let mut terrain = TerrainWorld::default();
-        terrain.reset_fixed_world();
-        terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
-
+    fn solid_object_breaks_on_explicit_fracture_command() {
         let mut particles = ParticleWorld::default();
         particles.pos.clear();
         particles.prev_pos.clear();
@@ -3698,9 +3765,7 @@ mod tests {
             Vec2::ZERO,
         );
         let index = indices[0];
-        particles.pos[index] = Vec2::new(0.0, 0.05);
-        particles.prev_pos[index] = particles.pos[index];
-        particles.vel[index] = Vec2::new(0.0, -10.0);
+        let center = particles.pos[index];
 
         let mut objects = ObjectWorld::default();
         let _ = objects
@@ -3712,14 +3777,12 @@ mod tests {
                 OBJECT_SHAPE_ITERS,
             )
             .expect("object should be created");
-        let mut object_field = ObjectPhysicsField::default();
-        objects.update_physics_field(particles.positions(), particles.masses(), &mut object_field);
-
-        particles.step_if_running(&terrain, &object_field, &mut objects, true);
+        let detached = particles.fracture_solid_particles_in_radius(center, CELL_SIZE_M);
+        objects.split_objects_after_detach(&detached, particles.positions(), particles.masses());
 
         assert!(
             objects.objects().is_empty(),
-            "object should fracture on terrain impact"
+            "object should detach completely after explicit fracture"
         );
         assert!(
             particles
@@ -4029,8 +4092,9 @@ mod tests {
 
         particles.vel[0] = Vec2::ZERO;
         particles.prev_pos[0] = particles.pos[0];
+        let object_world = ObjectWorld::default();
         for _ in 0..(SLEEP_FRAMES + 4) {
-            particles.update_sleep_states();
+            particles.update_sleep_states(&object_world);
             assert!(
                 particles.activity_state[0] == ParticleActivityState::Active,
                 "fracture sleep lock should keep fresh granular particle active"

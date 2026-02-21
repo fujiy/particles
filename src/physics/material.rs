@@ -180,7 +180,7 @@ const STONE_SOLID_PHASE: ParticlePhaseProperties = ParticlePhaseProperties {
     mass: particle_mass_from_cell_mass(STONE_SOLID_CELL_MASS, SOLID_PARTICLES_PER_CELL),
     radius_m: particle_radius_from_particles_per_cell(SOLID_PARTICLES_PER_CELL),
     terrain_push_radius_m: particle_radius_from_particles_per_cell(SOLID_PARTICLES_PER_CELL),
-    terrain_repulsion_stiffness: 0.35,
+    terrain_repulsion_stiffness: 0.85,
     object_push_radius_m: particle_radius_from_particles_per_cell(SOLID_PARTICLES_PER_CELL),
     object_repulsion_stiffness: 0.35,
     friction_static: 3.0,

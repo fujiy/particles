@@ -16,6 +16,9 @@ pub struct SimulationPerfMetrics {
 pub struct ResetSimulationRequest;
 
 #[derive(Message)]
+pub struct LoadDefaultWorldRequest;
+
+#[derive(Message)]
 pub struct SaveMapRequest {
     pub slot_name: String,
 }
