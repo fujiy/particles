@@ -27,6 +27,22 @@
 - 完了条件:
   - 代表シナリオで `final_state.json` / `metrics.json` / `final_state.png` が同一run_id配下に出力される。
 
+### [WGEN-00] OpenSimplex地表生成（石 + 表土）
+
+- Status: `Todo`
+- 背景:
+  - 無限地形生成の初期段階として、まず地表高低差と地層の最小ルールを確定して実装する。
+- スコープ:
+  - OpenSimplex ノイズで `surface_y(x)` を決定し、`Rock` と `Soil` を2層で生成する。
+- Subtasks:
+  - [ ] 地形生成パラメータを定義する（`WORLD_SEED`, `HEIGHT_NOISE_FREQ`, `HEIGHT_NOISE_AMP_CELLS`, `BASE_SURFACE_Y`, `SOIL_DEPTH_CELLS`）。
+  - [ ] ワールド座標 `x` から `surface_y(x)` を返す純関数を実装する（OpenSimplexベース）。
+  - [ ] 生成ルールを実装する（地表より上は `Empty`、地表付近は `Soil`、それより下は `Rock`）。
+  - [ ] チャンク境界で地形が不連続にならないことを確認する（隣接チャンク一致テスト）。
+  - [ ] 既存の差分セーブ/ロード経路と整合するよう、未変更チャンク再生成を確認する。
+- 完了条件:
+  - 同一seedで同じ地形が再生成され、全チャンクで地表連続性が保たれる。
+
 ### [WGEN-01] 決定論的チャンク生成と差分セーブ
 
 - Status: `Planned`
