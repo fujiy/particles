@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+use bevy::window::PrimaryWindow;
 
 use crate::physics::material::particle_properties;
 use crate::physics::object::{ObjectData, ObjectId, ObjectWorld};
@@ -10,10 +11,11 @@ use crate::physics::particle::{
     ParticleMaterial, ParticleWorld, REST_DENSITY, TERRAIN_BOUNDARY_RADIUS_M,
     nominal_particle_draw_radius_m,
 };
-use crate::physics::state::SimUpdateSet;
+use crate::physics::state::{SimUpdateSet, TerrainStreamingSettings};
 use crate::physics::terrain::{
-    CELL_PIXEL_SIZE, CELL_SIZE_M, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_SIZE_I32,
-    CHUNK_WORLD_SIZE_M, TerrainCell, TerrainChunk, TerrainMaterial, TerrainWorld, world_to_cell,
+    CELL_PIXEL_SIZE, CELL_SIZE_M, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M,
+    TerrainCell, TerrainChunk, TerrainMaterial, TerrainWorld, generated_cell_for_world,
+    world_to_cell,
 };
 
 #[derive(Resource, Default)]
@@ -21,10 +23,33 @@ pub struct TerrainRenderState {
     chunk_sprites: HashMap<IVec2, TerrainChunkSprite>,
 }
 
+#[derive(Resource)]
+pub struct TerrainLodPaletteCache {
+    levels: Vec<MaterialPalettes>,
+}
+
+#[derive(Resource, Default)]
+pub struct TerrainLodRenderState {
+    chunk_sprites: HashMap<LodTileKey, TerrainChunkSprite>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct LodTileKey {
+    origin_chunk: IVec2,
+    span_chunks: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LodRenderTile {
+    pub origin_chunk: IVec2,
+    pub span_chunks: i32,
+}
+
 #[derive(Resource, Default)]
 pub struct TerrainRenderDiagnostics {
     pub terrain_updated_chunk_highlight_frames: HashMap<IVec2, u8>,
     pub particle_updated_chunk_highlight_frames: HashMap<IVec2, u8>,
+    pub lod_visible_tiles: Vec<LodRenderTile>,
 }
 
 const UPDATED_CHUNK_HIGHLIGHT_FRAMES: u8 = 60;
@@ -63,6 +88,13 @@ struct OverlayChunkSprite {
     image: Handle<Image>,
 }
 
+#[derive(Clone, Copy)]
+struct MaterialPalettes {
+    stone: [[u8; 4]; 4],
+    sand: [[u8; 4]; 4],
+    soil: [[u8; 4]; 4],
+}
+
 #[derive(Component, Clone, Copy)]
 pub struct ObjectRenderHandle {
     #[allow(dead_code)]
@@ -78,13 +110,64 @@ const FREE_PARTICLE_RENDER_Z: f32 = 6.5;
 const OBJECT_DOT_SCALE: f32 = CELL_PIXEL_SIZE as f32 / CELL_SIZE_M;
 const OBJECT_RENDER_Z: f32 = 7.0;
 const OBJECT_PADDING_PX: u32 = 2;
+const LOD_RENDER_Z: f32 = -0.5;
+const LOD_LEVEL_RESOLUTION_DIV: i32 = 4;
+const LOD_LEVEL_DISTANCE_STEP_CHUNKS: i32 = 6;
+const LOD_PRECOMPUTED_LEVELS: u32 = 8;
+const PALETTE_COLOR_PROBS: [f32; 4] = [0.25, 0.25, 0.25, 0.25];
+const STONE_BASE_PALETTE: [[u8; 4]; 4] = [
+    [70, 67, 63, 255],
+    [83, 79, 74, 255],
+    [95, 90, 84, 255],
+    [108, 103, 96, 255],
+];
+const SAND_BASE_PALETTE: [[u8; 4]; 4] = [
+    [170, 150, 110, 255],
+    [186, 166, 124, 255],
+    [201, 181, 137, 255],
+    [216, 196, 150, 255],
+];
+const SOIL_BASE_PALETTE: [[u8; 4]; 4] = [
+    [105, 79, 56, 255],
+    [119, 91, 67, 255],
+    [133, 103, 78, 255],
+    [147, 115, 88, 255],
+];
 
+impl Default for TerrainLodPaletteCache {
+    fn default() -> Self {
+        let mut levels = Vec::with_capacity(LOD_PRECOMPUTED_LEVELS as usize + 1);
+        for lod_level in 0..=LOD_PRECOMPUTED_LEVELS {
+            levels.push(MaterialPalettes {
+                stone: build_lod_palette(STONE_BASE_PALETTE, lod_level),
+                sand: build_lod_palette(SAND_BASE_PALETTE, lod_level),
+                soil: build_lod_palette(SOIL_BASE_PALETTE, lod_level),
+            });
+        }
+        Self { levels }
+    }
+}
+
+impl TerrainLodPaletteCache {
+    fn palette_for(&self, material: TerrainMaterial, lod_level: u32) -> [[u8; 4]; 4] {
+        let max_level = self.levels.len().saturating_sub(1) as u32;
+        let level = lod_level.min(max_level) as usize;
+        let palettes = self.levels[level];
+        match material {
+            TerrainMaterial::Stone => palettes.stone,
+            TerrainMaterial::Sand => palettes.sand,
+            TerrainMaterial::Soil => palettes.soil,
+        }
+    }
+}
 
 pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainRenderState>()
+            .init_resource::<TerrainLodPaletteCache>()
+            .init_resource::<TerrainLodRenderState>()
             .init_resource::<TerrainRenderDiagnostics>()
             .init_resource::<WaterRenderState>()
             .init_resource::<ObjectRenderState>()
@@ -93,6 +176,7 @@ impl Plugin for RenderPlugin {
             .add_systems(
                 Update,
                 (
+                    sync_lod_chunks_to_render,
                     sync_dirty_terrain_chunks_to_render,
                     sync_water_dots_to_render,
                     sync_free_particles_to_render,
@@ -106,6 +190,93 @@ impl Plugin for RenderPlugin {
 
 pub fn bootstrap_terrain_chunks(mut terrain_world: ResMut<TerrainWorld>) {
     terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+}
+
+pub fn sync_lod_chunks_to_render(
+    mut commands: Commands,
+    streaming_settings: Res<TerrainStreamingSettings>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    lod_palette_cache: Res<TerrainLodPaletteCache>,
+    mut lod_state: ResMut<TerrainLodRenderState>,
+    mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some((min_chunk, max_chunk, center_chunk)) = visible_chunk_bounds(&windows, &cameras)
+    else {
+        let stale_tiles: Vec<_> = lod_state.chunk_sprites.keys().copied().collect();
+        for tile in stale_tiles {
+            if let Some(entry) = lod_state.chunk_sprites.remove(&tile) {
+                commands.entity(entry.entity).despawn();
+                images.remove(entry.image.id());
+            }
+        }
+        render_diagnostics.lod_visible_tiles.clear();
+        return;
+    };
+
+    let load_radius = streaming_settings.load_radius_chunks.max(0);
+    let mut target_tiles = HashSet::new();
+    for y in min_chunk.y..=max_chunk.y {
+        for x in min_chunk.x..=max_chunk.x {
+            let chunk_coord = IVec2::new(x, y);
+            let dx = (chunk_coord.x - center_chunk.x).abs();
+            let dy = (chunk_coord.y - center_chunk.y).abs();
+            let chebyshev_distance = dx.max(dy);
+            if chebyshev_distance <= load_radius {
+                continue;
+            }
+            let outside_distance = chebyshev_distance - load_radius;
+            let lod_level = lod_level_for_outside_distance(outside_distance);
+            let span_chunks = lod_span_chunks_for_level(lod_level);
+            let origin_chunk = align_chunk_to_lod_tile(chunk_coord, span_chunks);
+            target_tiles.insert(LodTileKey {
+                origin_chunk,
+                span_chunks,
+            });
+        }
+    }
+
+    let stale_tiles: Vec<_> = lod_state
+        .chunk_sprites
+        .keys()
+        .copied()
+        .filter(|tile| !target_tiles.contains(tile))
+        .collect();
+    for tile in stale_tiles {
+        if let Some(entry) = lod_state.chunk_sprites.remove(&tile) {
+            commands.entity(entry.entity).despawn();
+            images.remove(entry.image.id());
+        }
+    }
+
+    for &tile in &target_tiles {
+        if lod_state.chunk_sprites.contains_key(&tile) {
+            continue;
+        }
+        let lod_level = lod_level_for_span(tile.span_chunks);
+        let image_handle = images.add(build_lod_tile_image(tile, lod_level, &lod_palette_cache));
+        let mut sprite = Sprite::from_image(image_handle.clone());
+        sprite.custom_size = Some(Vec2::splat(CHUNK_WORLD_SIZE_M * tile.span_chunks as f32));
+        let center = lod_tile_to_world_center(tile);
+        let z = LOD_RENDER_Z - lod_level as f32 * 0.001;
+        let entity = commands
+            .spawn((sprite, Transform::from_xyz(center.x, center.y, z)))
+            .id();
+        lod_state
+            .chunk_sprites
+            .insert(tile, TerrainChunkSprite { entity, image: image_handle });
+    }
+
+    let mut diagnostic_tiles: Vec<_> = target_tiles
+        .iter()
+        .map(|tile| LodRenderTile {
+            origin_chunk: tile.origin_chunk,
+            span_chunks: tile.span_chunks,
+        })
+        .collect();
+    diagnostic_tiles.sort_by_key(|tile| (tile.span_chunks, tile.origin_chunk.y, tile.origin_chunk.x));
+    render_diagnostics.lod_visible_tiles = diagnostic_tiles;
 }
 
 pub fn sync_dirty_terrain_chunks_to_render(
@@ -250,7 +421,10 @@ pub fn sync_water_dots_to_render(
         if !matches!(particles.materials()[idx], ParticleMaterial::WaterLiquid) {
             continue;
         }
-        water_by_chunk.entry(chunk_coord_from_world(pos)).or_default().push(idx);
+        water_by_chunk
+            .entry(chunk_coord_from_world(pos))
+            .or_default()
+            .push(idx);
     }
 
     let draw_radius = nominal_particle_draw_radius_m();
@@ -580,6 +754,132 @@ pub fn sync_object_sprites_to_render(
     }
 }
 
+fn visible_chunk_bounds(
+    windows: &Query<&Window, With<PrimaryWindow>>,
+    cameras: &Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+) -> Option<(IVec2, IVec2, IVec2)> {
+    let window = windows.iter().next()?;
+    let (camera, camera_transform) = cameras.iter().next()?;
+
+    let viewport_corners = [
+        Vec2::new(0.0, 0.0),
+        Vec2::new(window.width(), 0.0),
+        Vec2::new(0.0, window.height()),
+        Vec2::new(window.width(), window.height()),
+    ];
+    let mut min_cell = IVec2::new(i32::MAX, i32::MAX);
+    let mut max_cell = IVec2::new(i32::MIN, i32::MIN);
+    for corner in viewport_corners {
+        let world = camera.viewport_to_world_2d(camera_transform, corner).ok()?;
+        let cell = world_to_cell(world);
+        min_cell.x = min_cell.x.min(cell.x);
+        min_cell.y = min_cell.y.min(cell.y);
+        max_cell.x = max_cell.x.max(cell.x);
+        max_cell.y = max_cell.y.max(cell.y);
+    }
+
+    let min_chunk = IVec2::new(
+        min_cell.x.div_euclid(CHUNK_SIZE_I32),
+        min_cell.y.div_euclid(CHUNK_SIZE_I32),
+    );
+    let max_chunk = IVec2::new(
+        max_cell.x.div_euclid(CHUNK_SIZE_I32),
+        max_cell.y.div_euclid(CHUNK_SIZE_I32),
+    );
+    let center_cell = world_to_cell(camera_transform.translation().truncate());
+    let center_chunk = IVec2::new(
+        center_cell.x.div_euclid(CHUNK_SIZE_I32),
+        center_cell.y.div_euclid(CHUNK_SIZE_I32),
+    );
+    Some((min_chunk, max_chunk, center_chunk))
+}
+
+fn lod_level_for_outside_distance(outside_distance_chunks: i32) -> u32 {
+    let distance_step = LOD_LEVEL_DISTANCE_STEP_CHUNKS.max(1);
+    let adjusted = outside_distance_chunks.max(1) - 1;
+    1 + adjusted.div_euclid(distance_step) as u32
+}
+
+fn lod_span_chunks_for_level(level: u32) -> i32 {
+    let mut span = 1_i32;
+    let div = LOD_LEVEL_RESOLUTION_DIV.max(2);
+    for _ in 0..level {
+        span = span.saturating_mul(div);
+    }
+    span.max(1)
+}
+
+fn lod_level_for_span(span_chunks: i32) -> u32 {
+    if span_chunks <= 1 {
+        return 0;
+    }
+    let div = LOD_LEVEL_RESOLUTION_DIV.max(2);
+    let mut span = 1_i32;
+    let mut level = 0_u32;
+    while span < span_chunks {
+        span = span.saturating_mul(div);
+        level = level.saturating_add(1);
+    }
+    level
+}
+
+fn align_chunk_to_lod_tile(chunk_coord: IVec2, span_chunks: i32) -> IVec2 {
+    IVec2::new(
+        chunk_coord.x.div_euclid(span_chunks) * span_chunks,
+        chunk_coord.y.div_euclid(span_chunks) * span_chunks,
+    )
+}
+
+fn lod_tile_to_world_center(tile: LodTileKey) -> Vec2 {
+    let span = tile.span_chunks as f32;
+    (tile.origin_chunk.as_vec2() + Vec2::splat(span * 0.5)) * CHUNK_WORLD_SIZE_M
+}
+
+fn build_lod_tile_image(
+    tile: LodTileKey,
+    lod_level: u32,
+    lod_palette_cache: &TerrainLodPaletteCache,
+) -> Image {
+    let mut pixels = vec![0_u8; (CHUNK_PIXEL_SIZE * CHUNK_PIXEL_SIZE * 4) as usize];
+    let tile_min_world = tile.origin_chunk.as_vec2() * CHUNK_WORLD_SIZE_M;
+    let tile_size_world = CHUNK_WORLD_SIZE_M * tile.span_chunks as f32;
+    let tex_size = CHUNK_PIXEL_SIZE as f32;
+
+    for py in 0..CHUNK_PIXEL_SIZE {
+        for px in 0..CHUNK_PIXEL_SIZE {
+            let sample_world = Vec2::new(
+                tile_min_world.x + ((px as f32 + 0.5) / tex_size) * tile_size_world,
+                tile_min_world.y + ((py as f32 + 0.5) / tex_size) * tile_size_world,
+            );
+            let sample_cell = world_to_cell(sample_world);
+            let sample_terrain = generated_cell_for_world(sample_cell);
+            let TerrainCell::Solid { material, .. } = sample_terrain else {
+                continue;
+            };
+            let palette = lod_palette_cache.palette_for(material, lod_level);
+
+            let palette_index = deterministic_palette_index(sample_cell.x, sample_cell.y);
+            let image_y = CHUNK_PIXEL_SIZE - 1 - py;
+            let offset = ((image_y * CHUNK_PIXEL_SIZE + px) * 4) as usize;
+            pixels[offset..offset + 4].copy_from_slice(&palette[palette_index]);
+        }
+    }
+
+    let mut image = Image::new_fill(
+        Extent3d {
+            width: CHUNK_PIXEL_SIZE,
+            height: CHUNK_PIXEL_SIZE,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        &[0, 0, 0, 0],
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    );
+    image.data = Some(pixels);
+    image
+}
+
 fn build_chunk_image(chunk_coord: IVec2, chunk: &TerrainChunk) -> Image {
     let mut pixels = vec![0_u8; (CHUNK_PIXEL_SIZE * CHUNK_PIXEL_SIZE * 4) as usize];
 
@@ -611,36 +911,78 @@ fn build_chunk_image(chunk_coord: IVec2, chunk: &TerrainChunk) -> Image {
     image
 }
 
+fn build_lod_palette(base_palette: [[u8; 4]; 4], lod_level: u32) -> [[u8; 4]; 4] {
+    if lod_level == 0 {
+        return base_palette;
+    }
+
+    let scale = 1.0 / (LOD_LEVEL_RESOLUTION_DIV.max(2) as f32).powi(lod_level as i32);
+    let mut mean = Vec3::ZERO;
+    for (i, color) in base_palette.iter().enumerate() {
+        let prob = PALETTE_COLOR_PROBS[i];
+        mean += srgb8_to_linear_vec3([color[0], color[1], color[2]]) * prob;
+    }
+
+    let mut lod_palette = [[0_u8; 4]; 4];
+    for (i, color) in base_palette.iter().enumerate() {
+        let linear = srgb8_to_linear_vec3([color[0], color[1], color[2]]);
+        let remapped = mean + (linear - mean) * scale;
+        let rgb = linear_vec3_to_srgb8(remapped);
+        lod_palette[i] = [rgb[0], rgb[1], rgb[2], color[3]];
+    }
+    lod_palette
+}
+
+fn srgb8_to_linear_vec3(rgb: [u8; 3]) -> Vec3 {
+    Vec3::new(
+        srgb_channel_to_linear(rgb[0]),
+        srgb_channel_to_linear(rgb[1]),
+        srgb_channel_to_linear(rgb[2]),
+    )
+}
+
+fn linear_vec3_to_srgb8(rgb: Vec3) -> [u8; 3] {
+    [
+        linear_channel_to_srgb8(rgb.x),
+        linear_channel_to_srgb8(rgb.y),
+        linear_channel_to_srgb8(rgb.z),
+    ]
+}
+
+fn srgb_channel_to_linear(channel: u8) -> f32 {
+    let x = channel as f32 / 255.0;
+    if x <= 0.04045 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_channel_to_srgb8(channel: f32) -> u8 {
+    let x = channel.clamp(0.0, 1.0);
+    let srgb = if x <= 0.003_130_8 {
+        12.92 * x
+    } else {
+        1.055 * x.powf(1.0 / 2.4) - 0.055
+    };
+    (srgb * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
 fn cell_palette(cell: TerrainCell) -> Option<[[u8; 4]; 4]> {
     match cell {
         TerrainCell::Empty => None,
         TerrainCell::Solid {
             material: TerrainMaterial::Stone,
             ..
-        } => Some([
-            [70, 67, 63, 255],
-            [83, 79, 74, 255],
-            [95, 90, 84, 255],
-            [108, 103, 96, 255],
-        ]),
+        } => Some(STONE_BASE_PALETTE),
         TerrainCell::Solid {
             material: TerrainMaterial::Sand,
             ..
-        } => Some([
-            [170, 150, 110, 255],
-            [186, 166, 124, 255],
-            [201, 181, 137, 255],
-            [216, 196, 150, 255],
-        ]),
+        } => Some(SAND_BASE_PALETTE),
         TerrainCell::Solid {
             material: TerrainMaterial::Soil,
             ..
-        } => Some([
-            [105, 79, 56, 255],
-            [119, 91, 67, 255],
-            [133, 103, 78, 255],
-            [147, 115, 88, 255],
-        ]),
+        } => Some(SOIL_BASE_PALETTE),
     }
 }
 
