@@ -452,3 +452,52 @@ fn validate_snapshot(snapshot: &SaveSnapshot) -> Result<(), String> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::physics::object::ObjectWorld;
+    use crate::physics::particle::ParticleWorld;
+    use crate::physics::terrain::generated_cell_for_world;
+
+    #[test]
+    fn load_uses_chunk_regeneration_when_terrain_cells_are_empty() {
+        let mut terrain = TerrainWorld::default();
+        let mut particles = ParticleWorld::default();
+        let mut objects = ObjectWorld::default();
+        let mut sim_state = SimulationState::default();
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("particles_load_regen_{nanos}.json"));
+        let json = format!(
+            "{{\"save_version\":{},\"simulation\":{{\"running\":false}},\"loaded_chunks\":[{{\"chunk\":[0,0]}}],\"terrain_cells\":[],\"particles\":[],\"objects\":[]}}",
+            SAVE_VERSION
+        );
+        fs::write(&path, json).expect("should write temporary save file");
+        load_from_path(
+            path.to_str().expect("temp path should be utf-8"),
+            &mut terrain,
+            &mut particles,
+            &mut objects,
+            &mut sim_state,
+        )
+        .expect("loading regeneration-only snapshot should succeed");
+
+        for local_y in 0..CHUNK_SIZE_I32 {
+            for local_x in 0..CHUNK_SIZE_I32 {
+                let cell = IVec2::new(local_x, local_y);
+                assert_eq!(
+                    terrain.get_loaded_cell_or_empty(cell),
+                    generated_cell_for_world(cell)
+                );
+            }
+        }
+
+        let _ = fs::remove_file(path);
+    }
+}

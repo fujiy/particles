@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use bevy::prelude::*;
+use noise::{NoiseFn, OpenSimplex};
 
 pub use super::material::TerrainMaterial;
 
@@ -15,6 +16,11 @@ pub const WORLD_MIN_CHUNK_X: i32 = -2;
 pub const WORLD_MAX_CHUNK_X: i32 = 1;
 pub const WORLD_MIN_CHUNK_Y: i32 = -2;
 pub const WORLD_MAX_CHUNK_Y: i32 = 1;
+pub const WORLD_SEED: u32 = 13_370;
+pub const HEIGHT_NOISE_FREQ: f64 = 0.035;
+pub const HEIGHT_NOISE_AMP_CELLS: i32 = 10;
+pub const BASE_SURFACE_Y: i32 = -4;
+pub const SOIL_DEPTH_CELLS: i32 = 4;
 pub const TERRAIN_SDF_SAMPLES_PER_CELL: i32 = 2;
 const SDF_INF: f32 = 1.0e9;
 const SDF_DIAGONAL_COST: f32 = std::f32::consts::SQRT_2;
@@ -59,15 +65,15 @@ impl TerrainChunk {
             dirty: true,
         };
 
-        for local_y in 0..CHUNK_SIZE_I32 {
-            let global_y = chunk_coord.y * CHUNK_SIZE_I32 + local_y;
-            if global_y > 0 {
-                continue;
-            }
-            for local_x in 0..CHUNK_SIZE_I32 {
+        let noise = OpenSimplex::new(WORLD_SEED);
+        for local_x in 0..CHUNK_SIZE_I32 {
+            let global_x = chunk_coord.x * CHUNK_SIZE_I32 + local_x;
+            let surface_y = surface_y_for_world_x_with_noise(global_x, &noise);
+            for local_y in 0..CHUNK_SIZE_I32 {
+                let global_y = chunk_coord.y * CHUNK_SIZE_I32 + local_y;
                 let local = IVec2::new(local_x, local_y);
-                let index = local_cell_to_index(local);
-                chunk.cells[index] = TerrainCell::stone();
+                chunk.cells[local_cell_to_index(local)] =
+                    generated_cell_from_surface(global_y, surface_y);
             }
         }
 
@@ -100,6 +106,15 @@ impl TerrainChunk {
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
     }
+}
+
+pub fn surface_y_for_world_x(world_x: i32) -> i32 {
+    let noise = OpenSimplex::new(WORLD_SEED);
+    surface_y_for_world_x_with_noise(world_x, &noise)
+}
+
+pub fn generated_cell_for_world(global_cell: IVec2) -> TerrainCell {
+    generated_cell_from_surface(global_cell.y, surface_y_for_world_x(global_cell.x))
 }
 
 #[derive(Resource, Debug, Default)]
@@ -485,6 +500,21 @@ fn local_cell_to_index(local_cell: IVec2) -> usize {
     (local_cell.y as usize) * CHUNK_SIZE + (local_cell.x as usize)
 }
 
+fn surface_y_for_world_x_with_noise(world_x: i32, noise: &OpenSimplex) -> i32 {
+    let n = noise.get([world_x as f64 * HEIGHT_NOISE_FREQ, 0.0]);
+    BASE_SURFACE_Y + (n * HEIGHT_NOISE_AMP_CELLS as f64).round() as i32
+}
+
+fn generated_cell_from_surface(global_y: i32, surface_y: i32) -> TerrainCell {
+    if global_y > surface_y {
+        return TerrainCell::Empty;
+    }
+    if global_y > surface_y - SOIL_DEPTH_CELLS {
+        return TerrainCell::solid(TerrainMaterial::Soil);
+    }
+    TerrainCell::solid(TerrainMaterial::Stone)
+}
+
 fn sdf_index(width: usize, x: usize, y: usize) -> usize {
     y * width + x
 }
@@ -562,20 +592,60 @@ mod tests {
 
     #[test]
     fn generated_chunk_fills_cells_below_surface() {
-        let chunk_above = TerrainChunk::generated(IVec2::new(0, 1));
-        assert!(chunk_above.is_empty());
+        let chunk = TerrainChunk::generated(IVec2::new(0, 0));
+        for local_y in 0..CHUNK_SIZE_I32 {
+            for local_x in 0..CHUNK_SIZE_I32 {
+                let world_x = local_x;
+                let world_y = local_y;
+                let expected = generated_cell_for_world(IVec2::new(world_x, world_y));
+                assert_eq!(chunk.get(IVec2::new(local_x, local_y)), expected);
+            }
+        }
+    }
 
-        let chunk_surface = TerrainChunk::generated(IVec2::new(0, 0));
+    #[test]
+    fn generated_cell_uses_soil_layer_near_surface() {
+        let x = 10;
+        let surface_y = surface_y_for_world_x(x);
         assert!(matches!(
-            chunk_surface.get(IVec2::new(0, 0)),
-            TerrainCell::Solid { .. }
+            generated_cell_for_world(IVec2::new(x, surface_y)),
+            TerrainCell::Solid {
+                material: TerrainMaterial::Soil,
+                ..
+            }
         ));
+        assert!(matches!(
+            generated_cell_for_world(IVec2::new(x, surface_y - SOIL_DEPTH_CELLS)),
+            TerrainCell::Solid {
+                material: TerrainMaterial::Stone,
+                ..
+            }
+        ));
+    }
 
-        let chunk_below = TerrainChunk::generated(IVec2::new(0, -1));
-        assert!(matches!(
-            chunk_below.get(IVec2::new(0, CHUNK_SIZE_I32 - 1)),
-            TerrainCell::Solid { .. }
-        ));
+    #[test]
+    fn generation_rule_is_continuous_across_chunk_boundaries() {
+        let left_chunk = TerrainChunk::generated(IVec2::new(-1, 0));
+        let right_chunk = TerrainChunk::generated(IVec2::new(0, 0));
+        for local_y in 0..CHUNK_SIZE_I32 {
+            let left_world = IVec2::new(-1, 0) * CHUNK_SIZE_I32 + IVec2::new(CHUNK_SIZE_I32 - 1, local_y);
+            let right_world = IVec2::new(0, 0) * CHUNK_SIZE_I32 + IVec2::new(0, local_y);
+            assert_eq!(
+                left_chunk.get(IVec2::new(CHUNK_SIZE_I32 - 1, local_y)),
+                generated_cell_for_world(left_world)
+            );
+            assert_eq!(
+                right_chunk.get(IVec2::new(0, local_y)),
+                generated_cell_for_world(right_world)
+            );
+        }
+    }
+
+    #[test]
+    fn surface_function_is_deterministic() {
+        for x in -256..=256 {
+            assert_eq!(surface_y_for_world_x(x), surface_y_for_world_x(x));
+        }
     }
 
     #[test]
@@ -608,8 +678,9 @@ mod tests {
         terrain.reset_fixed_world();
         terrain.rebuild_static_particles_if_dirty(0.25);
 
-        let inside_ground = Vec2::new(0.0, 0.1);
-        let above_ground = Vec2::new(0.0, 0.8);
+        let surface_y = surface_y_for_world_x(0);
+        let inside_ground = cell_to_world_center(IVec2::new(0, surface_y - 1));
+        let above_ground = cell_to_world_center(IVec2::new(0, surface_y + 2));
         let d_inside = terrain
             .sample_signed_distance_and_normal(inside_ground)
             .map(|(d, _)| d)

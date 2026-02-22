@@ -3806,7 +3806,9 @@ fn terrain_ghost_neighbor_vector(
 mod tests {
     use super::*;
     use crate::physics::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA};
-    use crate::physics::terrain::{CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MIN_CHUNK_X};
+    use crate::physics::terrain::{
+        CELL_SIZE_M, CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MIN_CHUNK_X, surface_y_for_world_x,
+    };
 
     fn clear_particles(particles: &mut ParticleWorld) {
         particles.pos.clear();
@@ -4037,8 +4039,9 @@ mod tests {
         let mut terrain = TerrainWorld::default();
         terrain.reset_fixed_world();
         terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+        let surface_y = surface_y_for_world_x(0) as f32 * CELL_SIZE_M;
         let mut particles = ParticleWorld::default();
-        particles.pos = vec![Vec2::new(0.1, 0.6)];
+        particles.pos = vec![Vec2::new(0.1, surface_y + 1.0)];
         particles.prev_pos = particles.pos.clone();
         particles.vel = vec![Vec2::new(0.0, -8.0)];
         particles.mass = vec![default_particle_mass()];
@@ -4052,10 +4055,15 @@ mod tests {
         }
 
         let p = particles.pos[0];
+        let d = terrain
+            .sample_signed_distance_and_normal(p)
+            .map(|(distance, _)| distance)
+            .unwrap_or(0.0);
         assert!(
-            p.y > -0.25,
-            "particle tunneled too deep into terrain: y={}",
-            p.y
+            d > -0.08,
+            "particle tunneled too deep into terrain: y={}, signed_distance={}",
+            p.y,
+            d
         );
     }
 
