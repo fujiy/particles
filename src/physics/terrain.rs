@@ -281,10 +281,28 @@ impl TerrainWorld {
     }
 
     pub fn clear_loaded_cells(&mut self) {
-        let Some((min_cell, max_cell)) = self.loaded_cell_bounds() else {
+        if self.chunks.is_empty() {
             return;
-        };
-        self.fill_rect(min_cell, max_cell, TerrainCell::Empty);
+        }
+        let loaded_chunks: Vec<IVec2> = self.chunks.keys().copied().collect();
+        for chunk_coord in loaded_chunks {
+            let Some(chunk) = self.chunks.get_mut(&chunk_coord) else {
+                continue;
+            };
+            let mut changed = false;
+            for local_y in 0..CHUNK_SIZE_I32 {
+                for local_x in 0..CHUNK_SIZE_I32 {
+                    let local_cell = IVec2::new(local_x, local_y);
+                    if chunk.set(local_cell, TerrainCell::Empty) {
+                        changed = true;
+                    }
+                }
+            }
+            if changed {
+                self.dirty_chunks.insert(chunk_coord);
+            }
+        }
+        self.static_particles_dirty = true;
     }
 
     #[allow(dead_code)]
@@ -750,5 +768,26 @@ mod tests {
 
         terrain.unload_pristine_chunks_outside_radius(IVec2::new(0, 0), 1);
         assert!(terrain.chunk(IVec2::new(5, 0)).is_some());
+    }
+
+    #[test]
+    fn clear_loaded_cells_only_clears_existing_loaded_chunks() {
+        let mut terrain = TerrainWorld::default();
+        let chunk_a = IVec2::new(0, 0);
+        let chunk_b = IVec2::new(3, 0);
+        terrain.ensure_chunk_loaded(chunk_a);
+        terrain.ensure_chunk_loaded(chunk_b);
+
+        let before = terrain.loaded_chunk_coords();
+        assert_eq!(before.len(), 2);
+
+        terrain.clear_loaded_cells();
+
+        let after = terrain.loaded_chunk_coords();
+        assert_eq!(after.len(), 2);
+        assert!(after.contains(&chunk_a));
+        assert!(after.contains(&chunk_b));
+        assert!(terrain.chunk(IVec2::new(1, 0)).is_none());
+        assert!(terrain.chunk(IVec2::new(2, 0)).is_none());
     }
 }

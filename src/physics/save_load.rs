@@ -13,8 +13,7 @@ use super::object::{ObjectSnapshotData, ObjectWorld};
 use super::particle::{ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M};
 use super::state::SimulationState;
 use super::terrain::{
-    CHUNK_SIZE_I32, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
-    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
+    CHUNK_SIZE_I32, TerrainCell, TerrainWorld,
 };
 
 pub const SAVE_VERSION: u32 = 1;
@@ -394,41 +393,29 @@ pub fn load_from_path(
 }
 
 fn collect_terrain_cells(terrain: &TerrainWorld) -> Vec<TerrainCellSnapshot> {
-    let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32;
-    let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1;
-    let min_cell_y = WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32;
-    let max_cell_y = (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1;
     let mut cells = Vec::new();
-    for y in min_cell_y..=max_cell_y {
-        for x in min_cell_x..=max_cell_x {
-            let cell_coord = IVec2::new(x, y);
-            let TerrainCell::Solid { material, hp } = terrain.get_loaded_cell_or_empty(cell_coord)
-            else {
-                continue;
-            };
-            cells.push(TerrainCellSnapshot {
-                cell: [x, y],
-                material: material.into(),
-                hp,
-            });
+    for chunk in terrain.loaded_chunk_coords() {
+        let base_cell = chunk * CHUNK_SIZE_I32;
+        for local_y in 0..CHUNK_SIZE_I32 {
+            for local_x in 0..CHUNK_SIZE_I32 {
+                let cell_coord = base_cell + IVec2::new(local_x, local_y);
+                let TerrainCell::Solid { material, hp } =
+                    terrain.get_loaded_cell_or_empty(cell_coord)
+                else {
+                    continue;
+                };
+                cells.push(TerrainCellSnapshot {
+                    cell: [cell_coord.x, cell_coord.y],
+                    material: material.into(),
+                    hp,
+                });
+            }
         }
     }
     cells
 }
 
 fn validate_snapshot(snapshot: &SaveSnapshot) -> Result<(), String> {
-    let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32;
-    let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1;
-    let min_cell_y = WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32;
-    let max_cell_y = (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1;
-
-    for cell in &snapshot.terrain_cells {
-        let [x, y] = cell.cell;
-        if x < min_cell_x || x > max_cell_x || y < min_cell_y || y > max_cell_y {
-            return Err(format!("terrain cell out of bounds: [{x}, {y}]"));
-        }
-    }
-
     for (index, particle) in snapshot.particles.iter().enumerate() {
         if !particle.position[0].is_finite()
             || !particle.position[1].is_finite()
@@ -539,6 +526,62 @@ mod tests {
         )
         .expect_err("mismatched generator version should fail");
         assert!(error.contains("incompatible terrain generator version"));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn save_and_load_restores_modified_terrain_outside_fixed_bounds() {
+        let mut terrain = TerrainWorld::default();
+        let particles = ParticleWorld::default();
+        let objects = ObjectWorld::default();
+        let sim_state = SimulationState::default();
+
+        let far_chunk = IVec2::new(12, -9);
+        terrain.ensure_chunk_loaded(far_chunk);
+        let far_cell = far_chunk * CHUNK_SIZE_I32 + IVec2::new(3, 7);
+        assert!(terrain.set_cell(
+            far_cell,
+            TerrainCell::Solid {
+                material: TerrainMaterial::Sand,
+                hp: 777,
+            }
+        ));
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("particles_far_chunk_save_{nanos}.json"));
+        save_to_path(
+            path.to_str().expect("temp path should be utf-8"),
+            &terrain,
+            &particles,
+            &objects,
+            &sim_state,
+        )
+        .expect("saving snapshot should succeed");
+
+        let mut loaded_terrain = TerrainWorld::default();
+        let mut loaded_particles = ParticleWorld::default();
+        let mut loaded_objects = ObjectWorld::default();
+        let mut loaded_sim_state = SimulationState::default();
+        load_from_path(
+            path.to_str().expect("temp path should be utf-8"),
+            &mut loaded_terrain,
+            &mut loaded_particles,
+            &mut loaded_objects,
+            &mut loaded_sim_state,
+        )
+        .expect("loading snapshot should succeed");
+
+        assert_eq!(
+            loaded_terrain.get_loaded_cell_or_empty(far_cell),
+            TerrainCell::Solid {
+                material: TerrainMaterial::Sand,
+                hp: 777,
+            }
+        );
+
         let _ = fs::remove_file(path);
     }
 }

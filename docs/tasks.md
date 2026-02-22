@@ -48,6 +48,23 @@
 
 - 物理統合テスト（headless scenario tests）のケース追加・閾値変更・ベースライン更新は、実装前にユーザー承認を取る。
 
+## Design Feedback (from Impl sessions)
+
+- 物理演算領域の定義を明文化したい:
+  - `active` は「カメラ中心チャンクから `active_radius_chunks` 以内」を基準に構築し、遠方 `Active` 粒子で領域が肥大しないこと。
+- `halo` と境界バッファの仕様を分離して明文化したい:
+  - `halo` は「凍結（位置更新なし）だが速度は保持」。
+  - 境界バッファ投入は「`active -> halo` へ越境した瞬間」のみ。
+  - `active` 縮小で結果的に `halo` になった粒子は境界バッファへ再投入しない。
+- `active/halo/inactive` の3層と far-field キュー条件を仕様化したい:
+  - `active+halo` は常駐対象、`live`/`freeze` 外のみ退避対象とする現在挙動を仕様へ反映。
+- 水境界の扱いを仕様化したい:
+  - `halo` 水は接触押し返しではなく、`lambda` 計算対象として SPH 圧力境界として扱う。
+- 近傍探索グリッドの安全策を仕様化したい:
+  - 粒子散乱時に密配列確保が暴走しないよう、セルスパン上限超過時は sparse グリッドへフォールバックする。
+- Overlay仕様の反映が必要:
+  - `particle overlay` では `halo` 粒子を表示し、地形粒子は「物理演算範囲 + halo」内のみ表示する。
+
 ## Done
 
 - [x] [TST-01] 物理統合テスト artifact 可視化出力
@@ -255,6 +272,3 @@
 - [x] 水-岩干渉を `boundary_push` のみに切り替え（岩のSPH寄与は無効化）
 - [x] 岩境界干渉をSDFベースの押し戻しへ置換（地形粒子近傍ループを廃止し、法線方向へ連続押し戻し）
 - [x] 描画時に岩セル上の水ドット生成/描画を抑制し、重なり時は岩ドットを優先表示
-
-## Design Feedback (from Impl sessions)
-- (No open feedback items)
