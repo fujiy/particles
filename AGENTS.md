@@ -6,6 +6,13 @@
   - Do not delete completed tasks.
   - Move completed items to the `Done` section.
 
+## Design/Task Documentation Policy
+- `docs/design.md` must contain only the latest target specification/state.
+  - Do not keep change history, migration notes, or "how it changed" narratives in `design.md`.
+- All update context (background, transition plan, implementation sequencing) must be tracked in `docs/tasks.md`.
+- `docs/tasks.md` should be organized by implementation unit (Work Unit), not a flat short checklist.
+  - Each Work Unit should include: background, scope, subtasks, and completion criteria.
+
 ## Session Types
 - `Design session`
   - Purpose: design discussion, specification updates, task creation.
