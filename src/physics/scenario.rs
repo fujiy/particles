@@ -180,23 +180,46 @@ struct FinalStateJson {
 }
 
 pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
+    let world_min_cell: i32 = -32;
+    let world_max_cell: i32 = 31;
+    let loaded_chunk_min = IVec2::new(
+        world_min_cell.div_euclid(CHUNK_SIZE_I32),
+        world_min_cell.div_euclid(CHUNK_SIZE_I32),
+    );
+    let loaded_chunk_max = IVec2::new(
+        world_max_cell.div_euclid(CHUNK_SIZE_I32),
+        world_max_cell.div_euclid(CHUNK_SIZE_I32),
+    );
+    let wall_thickness = 2;
+    let left_wall_max = world_min_cell + wall_thickness - 1;
+    let right_wall_min = world_max_cell - wall_thickness + 1;
+
     vec![
         ScenarioSpec {
             name: "objects_drop".to_string(),
             reset_fixed_world: false,
-            loaded_chunk_min: Some(IVec2::new(-1, -1)),
-            loaded_chunk_max: Some(IVec2::new(0, 0)),
+            loaded_chunk_min: Some(loaded_chunk_min),
+            loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
                 TerrainFillSpec {
-                    rect: CellRect::new(IVec2::new(-32, -32), IVec2::new(31, -31)),
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(world_max_cell, world_min_cell + wall_thickness - 1),
+                    ),
                     material: TerrainMaterial::Stone,
                 },
                 TerrainFillSpec {
-                    rect: CellRect::new(IVec2::new(-32, -32), IVec2::new(-31, 31)),
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(left_wall_max, world_max_cell),
+                    ),
                     material: TerrainMaterial::Stone,
                 },
                 TerrainFillSpec {
-                    rect: CellRect::new(IVec2::new(30, -32), IVec2::new(31, 31)),
+                    rect: CellRect::new(
+                        IVec2::new(right_wall_min, world_min_cell),
+                        IVec2::new(world_max_cell, world_max_cell),
+                    ),
                     material: TerrainMaterial::Stone,
                 },
             ],
@@ -244,19 +267,28 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
         ScenarioSpec {
             name: "water_drop".to_string(),
             reset_fixed_world: false,
-            loaded_chunk_min: Some(IVec2::new(-1, -1)),
-            loaded_chunk_max: Some(IVec2::new(0, 0)),
+            loaded_chunk_min: Some(loaded_chunk_min),
+            loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
                 TerrainFillSpec {
-                    rect: CellRect::new(IVec2::new(-32, -32), IVec2::new(31, -31)),
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(world_max_cell, world_min_cell + wall_thickness - 1),
+                    ),
                     material: TerrainMaterial::Stone,
                 },
                 TerrainFillSpec {
-                    rect: CellRect::new(IVec2::new(-32, -32), IVec2::new(-31, 31)),
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(left_wall_max, world_max_cell),
+                    ),
                     material: TerrainMaterial::Stone,
                 },
                 TerrainFillSpec {
-                    rect: CellRect::new(IVec2::new(30, -32), IVec2::new(31, 31)),
+                    rect: CellRect::new(
+                        IVec2::new(right_wall_min, world_min_cell),
+                        IVec2::new(world_max_cell, world_max_cell),
+                    ),
                     material: TerrainMaterial::Stone,
                 },
             ],
@@ -274,27 +306,36 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
             },
             water_surface_assertion: Some(WaterSurfaceAssertionSpec {
                 active_after_seconds: 8.0,
-                basin_min_x: -30,
-                basin_max_x: 29,
+                basin_min_x: world_min_cell + wall_thickness,
+                basin_max_x: right_wall_min - 1,
                 margin_cells: 2,
             }),
         },
         ScenarioSpec {
             name: "terrain_contact_stability".to_string(),
             reset_fixed_world: false,
-            loaded_chunk_min: Some(IVec2::new(-1, -1)),
-            loaded_chunk_max: Some(IVec2::new(0, 0)),
+            loaded_chunk_min: Some(loaded_chunk_min),
+            loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
                 TerrainFillSpec {
-                    rect: CellRect::new(IVec2::new(-32, -32), IVec2::new(31, -31)),
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(world_max_cell, world_min_cell + wall_thickness - 1),
+                    ),
                     material: TerrainMaterial::Stone,
                 },
                 TerrainFillSpec {
-                    rect: CellRect::new(IVec2::new(-32, -32), IVec2::new(-31, 31)),
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(left_wall_max, world_max_cell),
+                    ),
                     material: TerrainMaterial::Stone,
                 },
                 TerrainFillSpec {
-                    rect: CellRect::new(IVec2::new(30, -32), IVec2::new(31, 31)),
+                    rect: CellRect::new(
+                        IVec2::new(right_wall_min, world_min_cell),
+                        IVec2::new(world_max_cell, world_max_cell),
+                    ),
                     material: TerrainMaterial::Stone,
                 },
                 TerrainFillSpec {

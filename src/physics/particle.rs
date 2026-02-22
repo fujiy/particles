@@ -70,6 +70,7 @@ pub use super::material::{
     PARTICLE_RADIUS_M, PARTICLE_SPACING_M, PARTICLE_SPEED_LIMIT_MPS, REST_DENSITY,
     TERRAIN_BOUNDARY_RADIUS_M, WATER_KERNEL_RADIUS_M,
 };
+pub const NEIGHBOR_LIST_SKIN_M: f32 = WATER_KERNEL_RADIUS_M * 0.25;
 
 pub fn nominal_particle_draw_radius_m() -> f32 {
     (default_particle_mass() / (std::f32::consts::PI * REST_DENSITY)).sqrt()
@@ -433,6 +434,7 @@ impl GranularSolver {
                     tracing::info_span!("physics::granular_substep_rebuild", substep).entered();
                 particles.neighbor_grid.rebuild(&particles.pos);
                 particles.rebuild_neighbor_cache(false);
+                particles.mark_neighbor_cache_anchor();
             }
 
             for iter in 0..GRANULAR_ITERS {
@@ -710,12 +712,13 @@ impl GranularSolver {
                     }
                 }
 
-                {
+                if iter + 1 < GRANULAR_ITERS && particles.neighbor_cache_requires_rebuild() {
                     let _span =
                         tracing::info_span!("physics::granular_iter_rebuild", substep, iter)
                             .entered();
                     particles.neighbor_grid.rebuild(&particles.pos);
                     particles.rebuild_neighbor_cache(false);
+                    particles.mark_neighbor_cache_anchor();
                 }
             }
         }
@@ -831,6 +834,8 @@ pub struct ParticleWorld {
     initial_vel: Vec<Vec2>,
     neighbor_grid: NeighborGrid,
     neighbor_cache: Vec<Vec<usize>>,
+    neighbor_cache_anchor_pos: Vec<Vec2>,
+    neighbor_cache_anchor_valid: bool,
     viscosity_work: Vec<Vec2>,
     object_peak_strain: HashMap<ObjectId, f32>,
     object_peak_strain_particle: HashMap<ObjectId, usize>,
@@ -864,6 +869,8 @@ impl Default for ParticleWorld {
             initial_vel,
             neighbor_grid: NeighborGrid::default(),
             neighbor_cache: Vec::new(),
+            neighbor_cache_anchor_pos: Vec::new(),
+            neighbor_cache_anchor_valid: false,
             viscosity_work: Vec::new(),
             object_peak_strain: HashMap::new(),
             object_peak_strain_particle: HashMap::new(),
@@ -1395,11 +1402,18 @@ impl ParticleWorld {
         breakdown.rebuild_neighbor_grid_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
         phase_wall_start = Instant::now();
         phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
+        let mut refresh_density_neighbors = true;
         for iter in 0..SOLVER_ITERS {
             let _iter_span =
                 tracing::info_span!("physics::solve_density_constraints", iter).entered();
-            let max_density_error =
-                self.solve_density_constraints(terrain, object_field, object_world, dt_sub);
+            let max_density_error = self.solve_density_constraints(
+                terrain,
+                object_field,
+                object_world,
+                dt_sub,
+                refresh_density_neighbors,
+            );
+            refresh_density_neighbors = self.neighbor_cache_requires_rebuild();
             if iter + 1 >= SOLVER_MIN_ITERS && max_density_error <= SOLVER_ERROR_TOLERANCE {
                 break;
             }
@@ -1547,15 +1561,17 @@ impl ParticleWorld {
         object_field: &ObjectPhysicsField,
         object_world: &mut ObjectWorld,
         dt_sub: f32,
+        refresh_neighbors: bool,
     ) -> f32 {
         let _span = tracing::info_span!("physics::density_constraint_pass").entered();
         let h_ww = WATER_KERNEL_RADIUS_M;
         let inv_dt = 1.0 / dt_sub.max(1e-6);
         let use_parallel = self.particle_count() >= PARALLEL_PARTICLE_THRESHOLD;
 
-        {
+        if refresh_neighbors {
             let _span = tracing::info_span!("physics::rebuild_neighbor_cache").entered();
             self.rebuild_neighbor_cache(use_parallel);
+            self.mark_neighbor_cache_anchor();
         }
 
         let max_density_error = {
@@ -1604,6 +1620,30 @@ impl ParticleWorld {
                     .gather(self.pos[i], &mut self.neighbor_cache[i]);
             }
         }
+    }
+
+    fn mark_neighbor_cache_anchor(&mut self) {
+        self.neighbor_cache_anchor_pos.clone_from(&self.pos);
+        self.neighbor_cache_anchor_valid = true;
+    }
+
+    fn neighbor_cache_requires_rebuild(&self) -> bool {
+        if !self.neighbor_cache_anchor_valid
+            || self.neighbor_cache_anchor_pos.len() != self.particle_count()
+        {
+            return true;
+        }
+        let threshold = (NEIGHBOR_LIST_SKIN_M * 0.5).max(1e-5);
+        let threshold2 = threshold * threshold;
+        for i in 0..self.particle_count() {
+            if !self.is_active_particle(i) {
+                continue;
+            }
+            if self.pos[i].distance_squared(self.neighbor_cache_anchor_pos[i]) > threshold2 {
+                return true;
+            }
+        }
+        false
     }
 
     fn solve_density_lambda_sequential(&mut self, terrain: &TerrainWorld, h_ww: f32) -> f32 {
@@ -2162,27 +2202,65 @@ impl ParticleWorld {
 
     fn apply_xsph_viscosity(&mut self) {
         let _span = tracing::info_span!("physics::xsph_pass").entered();
-        let mut neighbors = Vec::new();
         self.viscosity_work.clone_from(&self.vel);
+        let count = self.particle_count();
+        let use_parallel = count >= PARALLEL_PARTICLE_THRESHOLD;
 
-        for i in 0..self.particle_count() {
-            if !self.is_active_particle(i) || !is_water_particle(self.material[i]) {
-                self.viscosity_work[i] = self.vel[i];
-                continue;
-            }
-            self.neighbor_grid.gather(self.pos[i], &mut neighbors);
+        if use_parallel {
+            let positions = &self.pos;
+            let velocities = &self.vel;
+            let materials = &self.material;
+            let activity = &self.activity_state;
+            let neighbor_grid = &self.neighbor_grid;
+            self.viscosity_work
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(i, out)| {
+                    let active = activity
+                        .get(i)
+                        .copied()
+                        .unwrap_or(ParticleActivityState::Active)
+                        == ParticleActivityState::Active;
+                    if !active || !is_water_particle(materials[i]) {
+                        *out = velocities[i];
+                        return;
+                    }
+                    let mut neighbors = Vec::new();
+                    neighbor_grid.gather(positions[i], &mut neighbors);
 
-            let mut correction = Vec2::ZERO;
-            for &j in &neighbors {
-                if i == j || !is_water_particle(self.material[j]) {
+                    let mut correction = Vec2::ZERO;
+                    for &j in &neighbors {
+                        if i == j || !is_water_particle(materials[j]) {
+                            continue;
+                        }
+                        let r = positions[i] - positions[j];
+                        let w = kernel_poly6(r.length_squared(), WATER_KERNEL_RADIUS_M);
+                        correction += (velocities[j] - velocities[i]) * w;
+                    }
+                    let viscosity = particle_properties(materials[i]).xsph_viscosity;
+                    *out = velocities[i] + viscosity * correction;
+                });
+        } else {
+            let mut neighbors = Vec::new();
+            for i in 0..count {
+                if !self.is_active_particle(i) || !is_water_particle(self.material[i]) {
+                    self.viscosity_work[i] = self.vel[i];
                     continue;
                 }
-                let r = self.pos[i] - self.pos[j];
-                let w = kernel_poly6(r.length_squared(), WATER_KERNEL_RADIUS_M);
-                correction += (self.vel[j] - self.vel[i]) * w;
+                self.neighbor_grid.gather(self.pos[i], &mut neighbors);
+
+                let mut correction = Vec2::ZERO;
+                for &j in &neighbors {
+                    if i == j || !is_water_particle(self.material[j]) {
+                        continue;
+                    }
+                    let r = self.pos[i] - self.pos[j];
+                    let w = kernel_poly6(r.length_squared(), WATER_KERNEL_RADIUS_M);
+                    correction += (self.vel[j] - self.vel[i]) * w;
+                }
+                let viscosity = particle_properties(self.material[i]).xsph_viscosity;
+                self.viscosity_work[i] = self.vel[i] + viscosity * correction;
             }
-            let viscosity = particle_properties(self.material[i]).xsph_viscosity;
-            self.viscosity_work[i] = self.vel[i] + viscosity * correction;
         }
 
         self.vel.clone_from(&self.viscosity_work);
@@ -2852,83 +2930,216 @@ impl ParticleWorld {
         object_field: &ObjectPhysicsField,
         object_world: &ObjectWorld,
     ) {
-        let mut neighbors = Vec::new();
-        let mut object_contacts = Vec::new();
-        for i in 0..self.particle_count() {
-            if !self.is_active_particle(i) {
-                continue;
-            }
-            let displacement_i = self.pos[i] - self.prev_pos[i];
-            if displacement_i.length() > WAKE_DISP_THRESHOLD {
-                self.request_wake(i);
-            }
+        let count = self.particle_count();
+        if count == 0 {
+            return;
+        }
 
-            self.neighbor_grid.gather(self.pos[i], &mut neighbors);
-            for &j in &neighbors {
-                if i == j || self.is_active_particle(j) {
+        #[derive(Default)]
+        struct WakeDetectAccum {
+            neighbors: Vec<usize>,
+            object_contacts: Vec<ObjectId>,
+            wake_indices: Vec<usize>,
+            wake_centers: Vec<Vec2>,
+        }
+
+        let use_parallel = count >= PARALLEL_PARTICLE_THRESHOLD;
+        let mut wake_indices = Vec::new();
+        let mut wake_centers = Vec::new();
+        if use_parallel {
+            let positions = &self.pos;
+            let prev_positions = &self.prev_pos;
+            let materials = &self.material;
+            let activity = &self.activity_state;
+            let neighbor_grid = &self.neighbor_grid;
+            let object_particles_by_id: HashMap<ObjectId, Vec<usize>> = object_world
+                .objects()
+                .iter()
+                .map(|object| (object.id, object.particle_indices.clone()))
+                .collect();
+            let reduced = (0..count)
+                .into_par_iter()
+                .fold(WakeDetectAccum::default, |mut local, i| {
+                    let active = activity
+                        .get(i)
+                        .copied()
+                        .unwrap_or(ParticleActivityState::Active)
+                        == ParticleActivityState::Active;
+                    if !active {
+                        return local;
+                    }
+
+                    let displacement_i = positions[i] - prev_positions[i];
+                    if displacement_i.length() > WAKE_DISP_THRESHOLD {
+                        local.wake_indices.push(i);
+                    }
+
+                    neighbor_grid.gather(positions[i], &mut local.neighbors);
+                    for &j in &local.neighbors {
+                        let neighbor_active = activity
+                            .get(j)
+                            .copied()
+                            .unwrap_or(ParticleActivityState::Active)
+                            == ParticleActivityState::Active;
+                        if i == j || neighbor_active {
+                            continue;
+                        }
+                        let r = positions[i] - positions[j];
+                        let contact_radius = particle_properties(materials[i]).radius_m
+                            + particle_properties(materials[j]).radius_m;
+                        let dist2 = r.length_squared();
+                        if dist2 <= 1e-12 || dist2 >= contact_radius * contact_radius {
+                            continue;
+                        }
+                        let dist = dist2.sqrt();
+                        let normal = r / dist;
+                        let displacement_j = positions[j] - prev_positions[j];
+                        let relative_normal_displacement =
+                            (displacement_i - displacement_j).dot(normal).abs();
+                        if relative_normal_displacement > WAKE_DISP_THRESHOLD {
+                            local.wake_indices.push(i);
+                            local.wake_indices.push(j);
+                        }
+                    }
+                    local.neighbors.clear();
+
+                    if let Some((signed_distance, normal)) =
+                        terrain.sample_signed_distance_and_normal(positions[i])
+                    {
+                        let props = particle_properties(materials[i]);
+                        let penetration = props.terrain_push_radius_m - signed_distance;
+                        if penetration > 0.0 {
+                            let normal_displacement = displacement_i.dot(normal).abs();
+                            if normal_displacement > WAKE_DISP_THRESHOLD {
+                                local.wake_indices.push(i);
+                                local.wake_centers.push(positions[i]);
+                            }
+                        }
+                    }
+
+                    let self_object = object_world.object_of_particle(i);
+                    object_field
+                        .gather_candidate_object_ids(positions[i], &mut local.object_contacts);
+                    for &object_id in &local.object_contacts {
+                        if self_object == Some(object_id) {
+                            continue;
+                        }
+                        let Some(sample) = object_world.evaluate_object_sdf(object_id, positions[i])
+                        else {
+                            continue;
+                        };
+                        let props = particle_properties(materials[i]);
+                        let penetration = props.object_push_radius_m - sample.distance_m;
+                        if penetration <= 0.0 {
+                            continue;
+                        }
+                        let normal_displacement = displacement_i.dot(sample.normal_world).abs();
+                        if normal_displacement <= WAKE_DISP_THRESHOLD {
+                            continue;
+                        }
+                        local.wake_indices.push(i);
+                        if let Some(target_particles) = object_particles_by_id.get(&object_id) {
+                            local.wake_indices.extend(target_particles.iter().copied());
+                        }
+                    }
+                    local.object_contacts.clear();
+                    local
+                })
+                .reduce(WakeDetectAccum::default, |mut a, mut b| {
+                    a.wake_indices.append(&mut b.wake_indices);
+                    a.wake_centers.append(&mut b.wake_centers);
+                    a
+                });
+            wake_indices = reduced.wake_indices;
+            wake_centers = reduced.wake_centers;
+        } else {
+            let mut neighbors = Vec::new();
+            let mut object_contacts = Vec::new();
+            let object_particles_by_id: HashMap<ObjectId, Vec<usize>> = object_world
+                .objects()
+                .iter()
+                .map(|object| (object.id, object.particle_indices.clone()))
+                .collect();
+            for i in 0..count {
+                if !self.is_active_particle(i) {
                     continue;
                 }
-                let r = self.pos[i] - self.pos[j];
-                let contact_radius = particle_properties(self.material[i]).radius_m
-                    + particle_properties(self.material[j]).radius_m;
-                let dist2 = r.length_squared();
-                if dist2 <= 1e-12 || dist2 >= contact_radius * contact_radius {
-                    continue;
+                let displacement_i = self.pos[i] - self.prev_pos[i];
+                if displacement_i.length() > WAKE_DISP_THRESHOLD {
+                    wake_indices.push(i);
                 }
-                let dist = dist2.sqrt();
-                let normal = r / dist;
-                let displacement_j = self.pos[j] - self.prev_pos[j];
-                let relative_normal_displacement =
-                    (displacement_i - displacement_j).dot(normal).abs();
-                if relative_normal_displacement > WAKE_DISP_THRESHOLD {
-                    self.request_wake(i);
-                    self.request_wake(j);
-                }
-            }
 
-            if let Some((signed_distance, normal)) =
-                terrain.sample_signed_distance_and_normal(self.pos[i])
-            {
-                let props = particle_properties(self.material[i]);
-                let penetration = props.terrain_push_radius_m - signed_distance;
-                if penetration > 0.0 {
-                    let normal_displacement = displacement_i.dot(normal).abs();
-                    if normal_displacement > WAKE_DISP_THRESHOLD {
-                        self.request_wake(i);
-                        self.request_wake_near(self.pos[i], WAKE_RADIUS);
+                self.neighbor_grid.gather(self.pos[i], &mut neighbors);
+                for &j in &neighbors {
+                    if i == j || self.is_active_particle(j) {
+                        continue;
+                    }
+                    let r = self.pos[i] - self.pos[j];
+                    let contact_radius = particle_properties(self.material[i]).radius_m
+                        + particle_properties(self.material[j]).radius_m;
+                    let dist2 = r.length_squared();
+                    if dist2 <= 1e-12 || dist2 >= contact_radius * contact_radius {
+                        continue;
+                    }
+                    let dist = dist2.sqrt();
+                    let normal = r / dist;
+                    let displacement_j = self.pos[j] - self.prev_pos[j];
+                    let relative_normal_displacement =
+                        (displacement_i - displacement_j).dot(normal).abs();
+                    if relative_normal_displacement > WAKE_DISP_THRESHOLD {
+                        wake_indices.push(i);
+                        wake_indices.push(j);
                     }
                 }
-            }
 
-            let self_object = object_world.object_of_particle(i);
-            object_field.gather_candidate_object_ids(self.pos[i], &mut object_contacts);
-            for &object_id in &object_contacts {
-                if self_object == Some(object_id) {
-                    continue;
-                }
-                let Some(sample) = object_world.evaluate_object_sdf(object_id, self.pos[i]) else {
-                    continue;
-                };
-                let props = particle_properties(self.material[i]);
-                let penetration = props.object_push_radius_m - sample.distance_m;
-                if penetration <= 0.0 {
-                    continue;
-                }
-                let normal_displacement = displacement_i.dot(sample.normal_world).abs();
-                if normal_displacement <= WAKE_DISP_THRESHOLD {
-                    continue;
-                }
-                self.request_wake(i);
-                if let Some(target_object) = object_world
-                    .objects()
-                    .iter()
-                    .find(|object| object.id == object_id)
+                if let Some((signed_distance, normal)) =
+                    terrain.sample_signed_distance_and_normal(self.pos[i])
                 {
-                    for &index in &target_object.particle_indices {
-                        self.request_wake(index);
+                    let props = particle_properties(self.material[i]);
+                    let penetration = props.terrain_push_radius_m - signed_distance;
+                    if penetration > 0.0 {
+                        let normal_displacement = displacement_i.dot(normal).abs();
+                        if normal_displacement > WAKE_DISP_THRESHOLD {
+                            wake_indices.push(i);
+                            wake_centers.push(self.pos[i]);
+                        }
+                    }
+                }
+
+                let self_object = object_world.object_of_particle(i);
+                object_field.gather_candidate_object_ids(self.pos[i], &mut object_contacts);
+                for &object_id in &object_contacts {
+                    if self_object == Some(object_id) {
+                        continue;
+                    }
+                    let Some(sample) = object_world.evaluate_object_sdf(object_id, self.pos[i])
+                    else {
+                        continue;
+                    };
+                    let props = particle_properties(self.material[i]);
+                    let penetration = props.object_push_radius_m - sample.distance_m;
+                    if penetration <= 0.0 {
+                        continue;
+                    }
+                    let normal_displacement = displacement_i.dot(sample.normal_world).abs();
+                    if normal_displacement <= WAKE_DISP_THRESHOLD {
+                        continue;
+                    }
+                    wake_indices.push(i);
+                    if let Some(target_particles) = object_particles_by_id.get(&object_id) {
+                        wake_indices.extend(target_particles.iter().copied());
                     }
                 }
             }
+        }
+
+        wake_indices.sort_unstable();
+        wake_indices.dedup();
+        for index in wake_indices {
+            self.request_wake(index);
+        }
+        for center in wake_centers {
+            self.request_wake_near(center, WAKE_RADIUS);
         }
     }
 
@@ -3051,6 +3262,8 @@ impl ParticleWorld {
         self.sleep_lock_frames.resize(count, 0);
         self.pending_wake.resize(count, false);
         self.neighbor_cache.resize_with(count, Vec::new);
+        self.neighbor_cache_anchor_pos.resize(count, Vec2::ZERO);
+        self.neighbor_cache_anchor_valid = false;
         self.viscosity_work.resize(count, Vec2::ZERO);
     }
 

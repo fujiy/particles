@@ -5,7 +5,7 @@ use bevy::prelude::*;
 pub use super::material::TerrainMaterial;
 
 pub const CELL_SIZE_M: f32 = 0.25;
-pub const CHUNK_SIZE: usize = 32;
+pub const CHUNK_SIZE: usize = 16;
 pub const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
 pub const CELL_PIXEL_SIZE: u32 = 8;
 pub const CHUNK_PIXEL_SIZE: u32 = (CHUNK_SIZE as u32) * CELL_PIXEL_SIZE;
@@ -557,7 +557,7 @@ mod tests {
     fn global_to_chunk_local_handles_negative_cells() {
         let (chunk, local) = global_to_chunk_local(IVec2::new(-1, -1));
         assert_eq!(chunk, IVec2::new(-1, -1));
-        assert_eq!(local, IVec2::new(31, 31));
+        assert_eq!(local, IVec2::new(CHUNK_SIZE_I32 - 1, CHUNK_SIZE_I32 - 1));
     }
 
     #[test]
@@ -573,7 +573,7 @@ mod tests {
 
         let chunk_below = TerrainChunk::generated(IVec2::new(0, -1));
         assert!(matches!(
-            chunk_below.get(IVec2::new(0, 31)),
+            chunk_below.get(IVec2::new(0, CHUNK_SIZE_I32 - 1)),
             TerrainCell::Solid { .. }
         ));
     }

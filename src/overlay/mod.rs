@@ -10,13 +10,16 @@ use crate::physics::terrain::{
     CELL_SIZE_M, CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
     WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };
+use crate::render::TerrainRenderDiagnostics;
 
 const BUTTON_BG_OFF: Color = Color::srgba(0.17, 0.18, 0.22, 0.95);
 const BUTTON_BG_ON: Color = Color::srgba(0.16, 0.30, 0.46, 0.95);
 const BUTTON_BG_HOVER: Color = Color::srgba(0.24, 0.25, 0.30, 0.98);
 const BUTTON_BG_PRESS: Color = Color::srgba(0.38, 0.40, 0.48, 0.98);
 const GRID_NEIGHBOR_COLOR: Color = Color::srgba(0.27, 0.75, 0.98, 0.28);
-const GRID_CHUNK_COLOR: Color = Color::srgba(0.98, 0.78, 0.25, 0.75);
+const GRID_CHUNK_COLOR: Color = Color::srgba(0.52, 0.52, 0.52, 0.45);
+const GRID_TERRAIN_UPDATED_COLOR: Color = Color::srgba(0.13, 0.85, 0.92, 1.00);
+const GRID_PARTICLE_UPDATED_COLOR: Color = Color::srgba(1.00, 0.08, 0.78, 1.00);
 const GRID_OBJECT_COLOR: Color = Color::srgba(0.92, 0.36, 0.12, 0.70);
 const GRID_OBJECT_CENTER_COLOR: Color = Color::srgba(0.98, 0.98, 0.98, 0.90);
 const GRID_OBJECT_LOCAL_X_COLOR: Color = Color::srgba(0.95, 0.26, 0.21, 0.95);
@@ -185,15 +188,20 @@ fn handle_grid_overlay_button(
 
 fn update_grid_overlay_button_label(
     overlay_state: Res<GridOverlayState>,
+    render_diagnostics: Res<TerrainRenderDiagnostics>,
     mut labels: Query<&mut Text, With<GridOverlayToggleButtonLabel>>,
 ) {
-    if !overlay_state.is_changed() {
+    if !overlay_state.is_changed() && !render_diagnostics.is_changed() {
         return;
     }
 
     for mut label in &mut labels {
         label.0 = if overlay_state.enabled {
-            "Grid Overlay: ON".to_string()
+            format!(
+                "Grid Overlay: ON (T:{} P:{})",
+                render_diagnostics.terrain_updated_chunk_highlight_frames.len(),
+                render_diagnostics.particle_updated_chunk_highlight_frames.len(),
+            )
         } else {
             "Grid Overlay: OFF".to_string()
         };
@@ -220,6 +228,7 @@ fn update_particle_overlay_button_label(
 fn draw_grid_overlay(
     mut gizmos: Gizmos,
     overlay_state: Res<GridOverlayState>,
+    render_diagnostics: Res<TerrainRenderDiagnostics>,
     object_world: Res<ObjectWorld>,
     particle_world: Res<ParticleWorld>,
 ) {
@@ -262,6 +271,32 @@ fn draw_grid_overlay(
     for chunk_y in WORLD_MIN_CHUNK_Y..=(WORLD_MAX_CHUNK_Y + 1) {
         let y = chunk_y as f32 * CHUNK_WORLD_SIZE_M;
         gizmos.line_2d(Vec2::new(min_x, y), Vec2::new(max_x, y), GRID_CHUNK_COLOR);
+    }
+    for &chunk in render_diagnostics
+        .terrain_updated_chunk_highlight_frames
+        .keys()
+    {
+        let x0 = chunk.x as f32 * CHUNK_WORLD_SIZE_M;
+        let x1 = (chunk.x as f32 + 1.0) * CHUNK_WORLD_SIZE_M;
+        let y0 = chunk.y as f32 * CHUNK_WORLD_SIZE_M;
+        let y1 = (chunk.y as f32 + 1.0) * CHUNK_WORLD_SIZE_M;
+        gizmos.line_2d(Vec2::new(x0, y0), Vec2::new(x1, y0), GRID_TERRAIN_UPDATED_COLOR);
+        gizmos.line_2d(Vec2::new(x1, y0), Vec2::new(x1, y1), GRID_TERRAIN_UPDATED_COLOR);
+        gizmos.line_2d(Vec2::new(x1, y1), Vec2::new(x0, y1), GRID_TERRAIN_UPDATED_COLOR);
+        gizmos.line_2d(Vec2::new(x0, y1), Vec2::new(x0, y0), GRID_TERRAIN_UPDATED_COLOR);
+    }
+    for &chunk in render_diagnostics
+        .particle_updated_chunk_highlight_frames
+        .keys()
+    {
+        let x0 = chunk.x as f32 * CHUNK_WORLD_SIZE_M;
+        let x1 = (chunk.x as f32 + 1.0) * CHUNK_WORLD_SIZE_M;
+        let y0 = chunk.y as f32 * CHUNK_WORLD_SIZE_M;
+        let y1 = (chunk.y as f32 + 1.0) * CHUNK_WORLD_SIZE_M;
+        gizmos.line_2d(Vec2::new(x0, y0), Vec2::new(x1, y0), GRID_PARTICLE_UPDATED_COLOR);
+        gizmos.line_2d(Vec2::new(x1, y0), Vec2::new(x1, y1), GRID_PARTICLE_UPDATED_COLOR);
+        gizmos.line_2d(Vec2::new(x1, y1), Vec2::new(x0, y1), GRID_PARTICLE_UPDATED_COLOR);
+        gizmos.line_2d(Vec2::new(x0, y1), Vec2::new(x0, y0), GRID_PARTICLE_UPDATED_COLOR);
     }
 
     let particle_positions = particle_world.positions();

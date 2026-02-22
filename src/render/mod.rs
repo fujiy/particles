@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
@@ -12,15 +12,23 @@ use crate::physics::particle::{
 };
 use crate::physics::state::SimUpdateSet;
 use crate::physics::terrain::{
-    CELL_PIXEL_SIZE, CELL_SIZE_M, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_WORLD_SIZE_M, TerrainCell,
-    TerrainChunk, TerrainMaterial, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
-    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, world_to_cell,
+    CELL_PIXEL_SIZE, CELL_SIZE_M, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_SIZE_I32,
+    CHUNK_WORLD_SIZE_M, TerrainCell, TerrainChunk, TerrainMaterial, TerrainWorld,
+    WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, world_to_cell,
 };
 
 #[derive(Resource, Default)]
 pub struct TerrainRenderState {
     chunk_sprites: HashMap<IVec2, TerrainChunkSprite>,
 }
+
+#[derive(Resource, Default)]
+pub struct TerrainRenderDiagnostics {
+    pub terrain_updated_chunk_highlight_frames: HashMap<IVec2, u8>,
+    pub particle_updated_chunk_highlight_frames: HashMap<IVec2, u8>,
+}
+
+const UPDATED_CHUNK_HIGHLIGHT_FRAMES: u8 = 60;
 
 #[derive(Resource, Default)]
 pub struct WaterRenderState {
@@ -78,6 +86,7 @@ pub struct RenderPlugin;
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainRenderState>()
+            .init_resource::<TerrainRenderDiagnostics>()
             .init_resource::<WaterRenderState>()
             .init_resource::<ObjectRenderState>()
             .init_resource::<FreeParticleRenderState>()
@@ -104,6 +113,7 @@ pub fn sync_dirty_terrain_chunks_to_render(
     mut commands: Commands,
     mut terrain_world: ResMut<TerrainWorld>,
     mut render_state: ResMut<TerrainRenderState>,
+    mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let stale_chunks: Vec<_> = render_state
@@ -120,8 +130,27 @@ pub fn sync_dirty_terrain_chunks_to_render(
     }
 
     let dirty_chunks = terrain_world.take_dirty_chunks();
+    render_diagnostics
+        .terrain_updated_chunk_highlight_frames
+        .retain(|_, frames_left| {
+            if *frames_left > 0 {
+                *frames_left -= 1;
+            }
+            *frames_left > 0
+        });
+    render_diagnostics
+        .particle_updated_chunk_highlight_frames
+        .retain(|_, frames_left| {
+            if *frames_left > 0 {
+                *frames_left -= 1;
+            }
+            *frames_left > 0
+        });
 
     for chunk_coord in dirty_chunks {
+        render_diagnostics
+            .terrain_updated_chunk_highlight_frames
+            .insert(chunk_coord, UPDATED_CHUNK_HIGHLIGHT_FRAMES);
         let Some(chunk) = terrain_world.chunk(chunk_coord) else {
             continue;
         };
@@ -170,13 +199,16 @@ pub fn sync_water_dots_to_render(
     particles: Res<ParticleWorld>,
     terrain: Res<TerrainWorld>,
     mut water_state: ResMut<WaterRenderState>,
+    mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let center = world_center();
     let world_size = world_size();
+    let mut created_image = false;
     let image_handle = if let Some(handle) = &water_state.image {
         handle.clone()
     } else {
+        created_image = true;
         let image = blank_water_image();
         let handle = images.add(image);
         let mut sprite = Sprite::from_image(handle.clone());
@@ -191,6 +223,11 @@ pub fn sync_water_dots_to_render(
         water_state.image = Some(handle.clone());
         handle
     };
+
+    let should_update = created_image || particles.is_changed() || terrain.is_changed();
+    if !should_update {
+        return;
+    }
 
     let mut pixels = vec![0_u8; (WATER_IMAGE_WIDTH * WATER_IMAGE_HEIGHT * 4) as usize];
     water_state
@@ -208,6 +245,7 @@ pub fn sync_water_dots_to_render(
     let draw_radius_px = (draw_radius * WATER_DOT_SCALE).ceil() as i32;
     let dot_threshold = REST_DENSITY * WATER_DOT_THRESHOLD_REST_DENSITY_RATIO;
 
+    let mut updated_chunks = HashSet::new();
     for (particle_index, &pos) in particles.positions().iter().enumerate() {
         if !matches!(
             particles.materials()[particle_index],
@@ -215,6 +253,7 @@ pub fn sync_water_dots_to_render(
         ) {
             continue;
         }
+        updated_chunks.insert(chunk_coord_from_world(pos));
         let particle_mass = particles.masses()[particle_index];
         let px_center = world_to_water_pixel(pos);
         for py in (px_center.y - draw_radius_px)..=(px_center.y + draw_radius_px) {
@@ -282,6 +321,9 @@ pub fn sync_water_dots_to_render(
     if let Some(image) = images.get_mut(&image_handle) {
         image.data = Some(pixels);
     }
+    for chunk in updated_chunks {
+        mark_particle_chunk_updated(&mut render_diagnostics, chunk);
+    }
 }
 
 pub fn sync_free_particles_to_render(
@@ -290,13 +332,16 @@ pub fn sync_free_particles_to_render(
     object_world: Res<ObjectWorld>,
     terrain: Res<TerrainWorld>,
     mut free_state: ResMut<FreeParticleRenderState>,
+    mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let center = world_center();
     let world_size = world_size();
+    let mut created_image = false;
     let image_handle = if let Some(handle) = &free_state.image {
         handle.clone()
     } else {
+        created_image = true;
         let image = blank_water_image();
         let handle = images.add(image);
         let mut sprite = Sprite::from_image(handle.clone());
@@ -312,7 +357,16 @@ pub fn sync_free_particles_to_render(
         handle
     };
 
+    let should_update = created_image
+        || particles.is_changed()
+        || object_world.is_changed()
+        || terrain.is_changed();
+    if !should_update {
+        return;
+    }
+
     let mut pixels = vec![0_u8; (WATER_IMAGE_WIDTH * WATER_IMAGE_HEIGHT * 4) as usize];
+    let mut updated_chunks = HashSet::new();
     for (particle_index, &pos) in particles.positions().iter().enumerate() {
         let material = particles.materials()[particle_index];
         if matches!(material, ParticleMaterial::WaterLiquid) {
@@ -321,6 +375,7 @@ pub fn sync_free_particles_to_render(
         if object_world.object_of_particle(particle_index).is_some() {
             continue;
         }
+        updated_chunks.insert(chunk_coord_from_world(pos));
 
         let radius_m = particle_properties(material).radius_m;
         let radius_px = (radius_m * WATER_DOT_SCALE).ceil().max(1.0) as i32;
@@ -351,6 +406,9 @@ pub fn sync_free_particles_to_render(
     if let Some(image) = images.get_mut(&image_handle) {
         image.data = Some(pixels);
     }
+    for chunk in updated_chunks {
+        mark_particle_chunk_updated(&mut render_diagnostics, chunk);
+    }
 }
 
 pub fn sync_object_sprites_to_render(
@@ -358,18 +416,29 @@ pub fn sync_object_sprites_to_render(
     mut object_world: ResMut<ObjectWorld>,
     particles: Res<ParticleWorld>,
     mut render_state: ResMut<ObjectRenderState>,
+    mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    if !particles.is_changed() && !object_world.is_changed() {
+        return;
+    }
+
     let positions = particles.positions();
     let masses = particles.masses();
     let materials = particles.materials();
     let mut live_ids = Vec::new();
+    let mut updated_chunks = HashSet::new();
 
     for object in object_world.objects_mut() {
         let Some((center, theta)) = object_pose(object, positions, masses) else {
             continue;
         };
         live_ids.push(object.id);
+        for &index in &object.particle_indices {
+            if index < positions.len() {
+                updated_chunks.insert(chunk_coord_from_world(positions[index]));
+            }
+        }
 
         let transform = Transform::from_xyz(center.x, center.y, OBJECT_RENDER_Z)
             .with_rotation(Quat::from_rotation_z(theta));
@@ -425,6 +494,9 @@ pub fn sync_object_sprites_to_render(
             commands.entity(entry.entity).despawn();
             images.remove(entry.image.id());
         }
+    }
+    for chunk in updated_chunks {
+        mark_particle_chunk_updated(&mut render_diagnostics, chunk);
     }
 }
 
@@ -537,6 +609,20 @@ fn deterministic_palette_index(x: i32, y: i32) -> usize {
 
 fn chunk_to_world_center(chunk_coord: IVec2) -> Vec2 {
     (chunk_coord.as_vec2() + Vec2::splat(0.5)) * CHUNK_WORLD_SIZE_M
+}
+
+fn chunk_coord_from_world(world_pos: Vec2) -> IVec2 {
+    let cell = world_to_cell(world_pos);
+    IVec2::new(
+        cell.x.div_euclid(CHUNK_SIZE_I32),
+        cell.y.div_euclid(CHUNK_SIZE_I32),
+    )
+}
+
+fn mark_particle_chunk_updated(render_diagnostics: &mut TerrainRenderDiagnostics, chunk: IVec2) {
+    render_diagnostics
+        .particle_updated_chunk_highlight_frames
+        .insert(chunk, UPDATED_CHUNK_HIGHLIGHT_FRAMES);
 }
 
 fn blank_water_image() -> Image {

@@ -13,8 +13,8 @@ use crate::physics::object::{
     OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectPhysicsField, ObjectWorld,
 };
 use crate::physics::particle::{
-    PARTICLE_SPEED_LIMIT_MPS, ParticleMaterial, ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M,
-    WAKE_RADIUS,
+    FIXED_DT, PARTICLE_SPEED_LIMIT_MPS, ParticleMaterial, ParticleWorld,
+    TERRAIN_BOUNDARY_RADIUS_M, WAKE_RADIUS,
 };
 use crate::physics::save_load;
 use crate::physics::scenario::{
@@ -2040,9 +2040,14 @@ fn update_step_profiler_panel(
         return;
     }
     if profiler.total_duration_ms > 0.0 {
-        label_text.0 = format!("Physics Step: {:.2} ms", profiler.total_duration_ms);
+        let baseline_frame_ms = FIXED_DT as f64 * 1000.0;
+        let physics_load_percent = profiler.total_duration_ms / baseline_frame_ms * 100.0;
+        label_text.0 = format!(
+            "Physics Step: {:.2} ms ({:.1}%)",
+            profiler.total_duration_ms, physics_load_percent
+        );
     } else {
-        label_text.0 = "Physics Step: -- ms".to_string();
+        label_text.0 = "Physics Step: -- ms (--%)".to_string();
     }
 
     clear_children_recursive(&mut commands, *bar_track_entity, &children_query);
