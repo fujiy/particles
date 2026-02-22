@@ -36,6 +36,11 @@ impl Default for TerrainStreamingSettings {
 pub struct PhysicsRegionSettings {
     pub enabled: bool,
     pub active_radius_chunks: i32,
+    pub active_halo_chunks: i32,
+    pub far_field_freeze_margin_chunks: i32,
+    pub far_field_release_particles_per_frame: usize,
+    pub far_field_release_clearance_radius_m: f32,
+    pub far_field_release_clearance_max_wait_frames: u16,
 }
 
 impl Default for PhysicsRegionSettings {
@@ -43,6 +48,11 @@ impl Default for PhysicsRegionSettings {
         Self {
             enabled: true,
             active_radius_chunks: 2,
+            active_halo_chunks: 1,
+            far_field_freeze_margin_chunks: 3,
+            far_field_release_particles_per_frame: 24,
+            far_field_release_clearance_radius_m: 0.35,
+            far_field_release_clearance_max_wait_frames: 30,
         }
     }
 }

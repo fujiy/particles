@@ -2,10 +2,10 @@ use bevy::prelude::*;
 
 use crate::physics::object::{ObjectData, ObjectWorld};
 use crate::physics::particle::{
-    PARTICLE_RADIUS_M, ParticleActivityState, ParticleMaterial, ParticleWorld,
-    WATER_KERNEL_RADIUS_M, nominal_particle_draw_radius_m,
+    PARTICLE_RADIUS_M, ParticleMaterial, ParticleWorld, WATER_KERNEL_RADIUS_M,
+    nominal_particle_draw_radius_m,
 };
-use crate::physics::state::{PhysicsActiveRegion, SimUpdateSet};
+use crate::physics::state::{PhysicsActiveRegion, PhysicsRegionSettings, SimUpdateSet};
 use crate::physics::terrain::{
     CELL_SIZE_M, CHUNK_WORLD_SIZE_M, TerrainWorld,
 };
@@ -18,6 +18,7 @@ const BUTTON_BG_PRESS: Color = Color::srgba(0.38, 0.40, 0.48, 0.98);
 const GRID_NEIGHBOR_COLOR: Color = Color::srgba(0.27, 0.75, 0.98, 0.28);
 const GRID_CHUNK_BOUNDARY_COLOR: Color = Color::srgba(0.90, 0.90, 0.94, 0.32);
 const GRID_ACTIVE_CHUNK_COLOR: Color = Color::srgba(1.00, 0.08, 0.78, 0.95);
+const GRID_HALO_CHUNK_COLOR: Color = Color::srgba(0.16, 0.88, 0.60, 0.72);
 const GRID_PHYSICS_REGION_COLOR: Color = Color::srgba(0.96, 0.72, 0.12, 0.98);
 const GRID_TERRAIN_UPDATED_COLOR: Color = Color::srgba(0.13, 0.85, 0.92, 1.00);
 const GRID_PARTICLE_UPDATED_COLOR: Color = Color::srgba(0.76, 0.56, 0.98, 1.00);
@@ -264,6 +265,7 @@ fn draw_grid_overlay(
     mut gizmos: Gizmos,
     overlay_state: Res<GridOverlayState>,
     active_region: Res<PhysicsActiveRegion>,
+    region_settings: Res<PhysicsRegionSettings>,
     terrain_world: Res<TerrainWorld>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     object_world: Res<ObjectWorld>,
@@ -311,6 +313,21 @@ fn draw_grid_overlay(
 
     for &chunk in &active_region.active_chunks {
         draw_chunk_outline(&mut gizmos, chunk, GRID_ACTIVE_CHUNK_COLOR);
+    }
+
+    let halo_chunks = region_settings.active_halo_chunks.max(0);
+    if halo_chunks > 0 {
+        let halo_min = min_chunk - IVec2::splat(halo_chunks);
+        let halo_max = max_chunk + IVec2::splat(halo_chunks);
+        for y in halo_min.y..=halo_max.y {
+            for x in halo_min.x..=halo_max.x {
+                let chunk = IVec2::new(x, y);
+                if x >= min_chunk.x && x <= max_chunk.x && y >= min_chunk.y && y <= max_chunk.y {
+                    continue;
+                }
+                draw_chunk_outline(&mut gizmos, chunk, GRID_HALO_CHUNK_COLOR);
+            }
+        }
     }
 
     for &chunk in render_diagnostics
@@ -463,14 +480,16 @@ fn draw_particle_overlay(
     }
     for (index, pos) in particle_world.positions().iter().enumerate() {
         let is_object_particle = object_world.object_of_particle(index).is_some();
-        let is_active = particle_world.activity_states().get(index).copied()
-            == Some(ParticleActivityState::Active);
-        if !is_object_particle && !is_active {
+        let is_active = particle_world.is_particle_active_in_region(index);
+        let is_halo = particle_world.is_particle_in_halo_region(index);
+        if !is_object_particle && !is_active && !is_halo {
             continue;
         }
         let color = if is_object_particle {
             let alpha = if is_active { 0.95 } else { 0.55 };
             Color::srgba(0.98, 0.90, 0.38, alpha)
+        } else if is_halo {
+            Color::srgba(0.22, 0.92, 0.62, 0.82)
         } else {
             match particle_world.materials()[index] {
                 ParticleMaterial::WaterLiquid => Color::srgba(0.10, 0.80, 0.95, 0.85),

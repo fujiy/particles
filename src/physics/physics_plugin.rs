@@ -113,6 +113,8 @@ fn step_water_particles(
     let should_step = sim_state.running || sim_state.step_once;
     if replay_state.enabled || !region_settings.enabled {
         particle_world.set_active_chunk_region_bounds(None, None);
+        particle_world.set_active_halo_chunks(0);
+        particle_world.configure_far_field_queue(None, 0, 0, 0, 0.0, 0);
         active_region.active_chunks.clear();
         active_region.chunk_min = None;
         active_region.chunk_max = None;
@@ -121,6 +123,20 @@ fn step_water_particles(
         let center_chunk = IVec2::new(
             center_cell.x.div_euclid(CHUNK_SIZE_I32),
             center_cell.y.div_euclid(CHUNK_SIZE_I32),
+        );
+        let release_radius = region_settings.active_radius_chunks.max(0);
+        let halo_chunks = region_settings.active_halo_chunks.max(0);
+        particle_world.set_active_halo_chunks(halo_chunks);
+        let live_radius = release_radius + halo_chunks;
+        let freeze_radius = (live_radius + region_settings.far_field_freeze_margin_chunks.max(0))
+            .max(live_radius + 1);
+        particle_world.configure_far_field_queue(
+            Some(center_chunk),
+            freeze_radius,
+            release_radius,
+            region_settings.far_field_release_particles_per_frame,
+            region_settings.far_field_release_clearance_radius_m,
+            region_settings.far_field_release_clearance_max_wait_frames,
         );
         let mut active_chunks = Vec::new();
         let mut min_chunk = IVec2::new(i32::MAX, i32::MAX);
@@ -138,6 +154,11 @@ fn step_water_particles(
                 cell.x.div_euclid(CHUNK_SIZE_I32),
                 cell.y.div_euclid(CHUNK_SIZE_I32),
             );
+            if (chunk.x - center_chunk.x).abs() > release_radius
+                || (chunk.y - center_chunk.y).abs() > release_radius
+            {
+                continue;
+            }
             active_chunks.push(chunk);
             min_chunk.x = min_chunk.x.min(chunk.x);
             min_chunk.y = min_chunk.y.min(chunk.y);
@@ -151,12 +172,18 @@ fn step_water_particles(
             max_chunk = center_chunk;
             active_chunks.push(center_chunk);
         }
+        let halo_chunks = region_settings.active_halo_chunks.max(0);
+        let load_min_chunk = min_chunk - IVec2::splat(halo_chunks);
+        let load_max_chunk = max_chunk + IVec2::splat(halo_chunks);
+        ensure_chunks_loaded_in_rect(&mut terrain_world, load_min_chunk, load_max_chunk);
         particle_world.set_active_chunk_region_bounds(Some(min_chunk), Some(max_chunk));
         active_region.active_chunks = active_chunks;
         active_region.chunk_min = Some(min_chunk);
         active_region.chunk_max = Some(max_chunk);
     } else {
         particle_world.set_active_chunk_region_bounds(None, None);
+        particle_world.set_active_halo_chunks(0);
+        particle_world.configure_far_field_queue(None, 0, 0, 0, 0.0, 0);
         active_region.active_chunks.clear();
         active_region.chunk_min = None;
         active_region.chunk_max = None;
@@ -531,6 +558,18 @@ fn apply_save_load_requests(
 
 fn finalize_frame_metrics(mut perf_metrics: ResMut<SimulationPerfMetrics>) {
     perf_metrics.physics_time_this_frame_secs = 0.0;
+}
+
+fn ensure_chunks_loaded_in_rect(
+    terrain_world: &mut TerrainWorld,
+    min_chunk: IVec2,
+    max_chunk: IVec2,
+) {
+    for y in min_chunk.y..=max_chunk.y {
+        for x in min_chunk.x..=max_chunk.x {
+            terrain_world.ensure_chunk_loaded(IVec2::new(x, y));
+        }
+    }
 }
 
 fn step_simulation_once(
