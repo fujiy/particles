@@ -22,8 +22,8 @@ use crate::physics::scenario::{
     evaluate_scenario_state,
 };
 use crate::physics::state::{
-    LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest, ReplayState,
-    ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationPerfMetrics, SimulationState,
+    LoadDefaultWorldRequest, LoadMapRequest, PhysicsStepProfiler, ReplayLoadScenarioRequest,
+    ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationState,
 };
 use crate::physics::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, WORLD_MAX_CHUNK_X,
@@ -59,6 +59,28 @@ const DIALOG_SLOT_BUTTON_HEIGHT_PX: f32 = 30.0;
 const TEST_ASSERT_PANEL_TOP_PX: f32 = 260.0;
 const TEST_ASSERT_PANEL_RIGHT_PX: f32 = 10.0;
 const TEST_ASSERT_PANEL_WIDTH_PX: f32 = 360.0;
+const HUD_PANEL_WIDTH_PX: f32 = 360.0;
+const STEP_PROFILER_BAR_HEIGHT_PX: f32 = 100.0;
+const STEP_PROFILER_BAR_MS_TO_PX: f32 = 16.0;
+const STEP_PROFILER_PARALLELISM_TO_PX: f32 = 8.0;
+const STEP_PROFILER_MAX_PARALLELISM_DISPLAY: f32 = 12.0;
+const STEP_PROFILER_TOOLTIP_OFFSET_X: f32 = 12.0;
+const STEP_PROFILER_TOOLTIP_OFFSET_Y: f32 = 18.0;
+const STEP_PROFILER_FLUID_COLORS: [Color; 3] = [
+    Color::srgba(0.21, 0.66, 0.95, 0.95),
+    Color::srgba(0.32, 0.74, 0.98, 0.95),
+    Color::srgba(0.14, 0.58, 0.88, 0.95),
+];
+const STEP_PROFILER_GRANULAR_COLORS: [Color; 3] = [
+    Color::srgba(0.96, 0.66, 0.24, 0.95),
+    Color::srgba(0.93, 0.57, 0.18, 0.95),
+    Color::srgba(0.98, 0.74, 0.30, 0.95),
+];
+const STEP_PROFILER_OBJECT_COLORS: [Color; 3] = [
+    Color::srgba(0.42, 0.79, 0.41, 0.95),
+    Color::srgba(0.33, 0.70, 0.33, 0.95),
+    Color::srgba(0.52, 0.86, 0.51, 0.95),
+];
 const DRAG_VELOCITY_BRUSH_RADIUS_M: f32 = 0.55;
 const DRAG_VELOCITY_GAIN: f32 = 0.9;
 const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
@@ -186,6 +208,8 @@ impl Plugin for InterfacePlugin {
                     update_test_assert_panel,
                     update_world_tool_tooltip,
                     update_simulation_hud,
+                    update_step_profiler_panel,
+                    update_step_profiler_tooltip,
                 )
                     .chain()
                     .in_set(SimUpdateSet::Ui),
@@ -194,7 +218,10 @@ impl Plugin for InterfacePlugin {
 }
 
 #[derive(Component)]
-struct SimulationHudText;
+struct SimulationHudFpsText;
+
+#[derive(Component)]
+struct SimulationHudStatsText;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum WorldTool {
@@ -381,6 +408,25 @@ struct TestAssertTitleText;
 #[derive(Component)]
 struct TestAssertList;
 
+#[derive(Component)]
+struct StepProfilerMsText;
+
+#[derive(Component)]
+struct StepProfilerBarTrack;
+
+#[derive(Component, Clone)]
+struct StepProfilerBarSegment {
+    step_name: String,
+    wall_duration_ms: f64,
+    cpu_duration_ms: f64,
+}
+
+#[derive(Component)]
+struct StepProfilerTooltip;
+
+#[derive(Component)]
+struct StepProfilerTooltipText;
+
 fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let icon_set = create_world_tool_icon_set(&mut images);
     commands.insert_resource(icon_set.clone());
@@ -391,17 +437,70 @@ fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>
                 position_type: PositionType::Absolute,
                 left: px(10.0),
                 top: px(10.0),
+                width: px(HUD_PANEL_WIDTH_PX),
                 padding: UiRect::axes(px(10.0), px(6.0)),
+                row_gap: px(6.0),
+                flex_direction: FlexDirection::Column,
                 ..default()
             },
             BackgroundColor(HUD_BG_COLOR),
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("FPS: --\nPotential Max FPS: --"),
+                Text::new("FPS: --"),
                 TextFont::from_font_size(14.0),
                 TextColor(Color::WHITE),
-                SimulationHudText,
+                SimulationHudFpsText,
+            ));
+            parent.spawn((
+                Text::new("Physics Step: -- ms"),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::WHITE),
+                StepProfilerMsText,
+            ));
+            parent.spawn((
+                Node {
+                    width: percent(100.0),
+                    height: px(STEP_PROFILER_BAR_HEIGHT_PX),
+                    align_items: AlignItems::End,
+                    overflow: Overflow::clip_x(),
+                    border: UiRect::all(px(1.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.10, 0.12, 0.16, 0.95)),
+                BorderColor::all(BUTTON_BORDER_OFF),
+                StepProfilerBarTrack,
+            ));
+            parent.spawn((
+                Text::new(
+                    "Sim: --\nWater(L): --\nStone(S): --\nStone(G): --\nSoil(S): --\nSoil(G): --\nSand(S): --\nSand(G): --",
+                ),
+                TextFont::from_font_size(14.0),
+                TextColor(Color::WHITE),
+                SimulationHudStatsText,
+            ));
+        });
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                display: Display::None,
+                left: px(0.0),
+                top: px(0.0),
+                padding: UiRect::axes(px(8.0), px(4.0)),
+                ..default()
+            },
+            BackgroundColor(TOOLTIP_BG_COLOR),
+            GlobalZIndex(TOOLTIP_GLOBAL_Z_INDEX),
+            StepProfilerTooltip,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new(""),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::WHITE),
+                StepProfilerTooltipText,
             ));
         });
 
@@ -1878,71 +1977,177 @@ fn update_simulation_hud(
     diagnostics: Res<DiagnosticsStore>,
     sim_state: Res<SimulationState>,
     particles: Res<ParticleWorld>,
-    mut perf_metrics: ResMut<SimulationPerfMetrics>,
-    mut texts: Query<&mut Text, With<SimulationHudText>>,
+    mut hud_texts: ParamSet<(
+        Single<&mut Text, With<SimulationHudFpsText>>,
+        Single<&mut Text, With<SimulationHudStatsText>>,
+    )>,
 ) {
     let fps = diagnostics
         .get(&FrameTimeDiagnosticsPlugin::FPS)
         .and_then(|diag| diag.smoothed())
         .unwrap_or(0.0);
+    hud_texts.p0().0 = format!("FPS: {fps:.1}");
 
-    let potential = if perf_metrics.physics_time_this_frame_secs > 0.0 {
-        1.0 / perf_metrics.physics_time_this_frame_secs
-    } else {
-        f64::INFINITY
-    };
-    perf_metrics.potential_max_fps = potential;
+    let sim_status = if sim_state.running { "Running" } else { "Paused" };
+    let water_count = particles
+        .materials()
+        .iter()
+        .filter(|&&m| matches!(m, ParticleMaterial::WaterLiquid))
+        .count();
+    let stone_solid_count = particles
+        .materials()
+        .iter()
+        .filter(|&&m| matches!(m, ParticleMaterial::StoneSolid))
+        .count();
+    let stone_granular_count = particles
+        .materials()
+        .iter()
+        .filter(|&&m| matches!(m, ParticleMaterial::StoneGranular))
+        .count();
+    let soil_solid_count = particles
+        .materials()
+        .iter()
+        .filter(|&&m| matches!(m, ParticleMaterial::SoilSolid))
+        .count();
+    let soil_granular_count = particles
+        .materials()
+        .iter()
+        .filter(|&&m| matches!(m, ParticleMaterial::SoilGranular))
+        .count();
+    let sand_solid_count = particles
+        .materials()
+        .iter()
+        .filter(|&&m| matches!(m, ParticleMaterial::SandSolid))
+        .count();
+    let sand_granular_count = particles
+        .materials()
+        .iter()
+        .filter(|&&m| matches!(m, ParticleMaterial::SandGranular))
+        .count();
+    hud_texts.p1().0 = format!(
+        "Sim: {sim_status}\nWater(L): {water_count}\nStone(S): {stone_solid_count}\nStone(G): {stone_granular_count}\nSoil(S): {soil_solid_count}\nSoil(G): {soil_granular_count}\nSand(S): {sand_solid_count}\nSand(G): {sand_granular_count}"
+    );
+}
 
-    for mut text in &mut texts {
-        let sim_status = if sim_state.running {
-            "Running"
-        } else {
-            "Paused"
-        };
-        let water_count = particles
-            .materials()
-            .iter()
-            .filter(|&&m| matches!(m, ParticleMaterial::WaterLiquid))
-            .count();
-        let stone_solid_count = particles
-            .materials()
-            .iter()
-            .filter(|&&m| matches!(m, ParticleMaterial::StoneSolid))
-            .count();
-        let stone_granular_count = particles
-            .materials()
-            .iter()
-            .filter(|&&m| matches!(m, ParticleMaterial::StoneGranular))
-            .count();
-        let soil_solid_count = particles
-            .materials()
-            .iter()
-            .filter(|&&m| matches!(m, ParticleMaterial::SoilSolid))
-            .count();
-        let soil_granular_count = particles
-            .materials()
-            .iter()
-            .filter(|&&m| matches!(m, ParticleMaterial::SoilGranular))
-            .count();
-        let sand_solid_count = particles
-            .materials()
-            .iter()
-            .filter(|&&m| matches!(m, ParticleMaterial::SandSolid))
-            .count();
-        let sand_granular_count = particles
-            .materials()
-            .iter()
-            .filter(|&&m| matches!(m, ParticleMaterial::SandGranular))
-            .count();
-        let potential_str = if potential.is_finite() {
-            format!("{potential:.1}")
-        } else {
-            "INF".to_string()
-        };
-        text.0 = format!(
-            "FPS: {fps:.1}\nPotential Max FPS: {potential_str}\nSim: {sim_status}\nWater(L): {water_count}\nStone(S): {stone_solid_count}\nStone(G): {stone_granular_count}\nSoil(S): {soil_solid_count}\nSoil(G): {soil_granular_count}\nSand(S): {sand_solid_count}\nSand(G): {sand_granular_count}"
-        );
+fn update_step_profiler_panel(
+    mut commands: Commands,
+    profiler: Res<PhysicsStepProfiler>,
+    mut label_text: Single<&mut Text, With<StepProfilerMsText>>,
+    bar_track_entity: Single<Entity, With<StepProfilerBarTrack>>,
+    children_query: Query<&Children>,
+) {
+    if !profiler.is_changed() {
+        return;
     }
+    if profiler.total_duration_ms > 0.0 {
+        label_text.0 = format!("Physics Step: {:.2} ms", profiler.total_duration_ms);
+    } else {
+        label_text.0 = "Physics Step: -- ms".to_string();
+    }
+
+    clear_children_recursive(&mut commands, *bar_track_entity, &children_query);
+    let mut fluid_index = 0usize;
+    let mut granular_index = 0usize;
+    let mut object_index = 0usize;
+    commands.entity(*bar_track_entity).with_children(|parent| {
+        for segment in &profiler.segments {
+            if segment.wall_duration_ms <= 0.0 {
+                continue;
+            }
+            let category = classify_profiler_segment(&segment.name);
+            let color = match category {
+                StepProfilerCategory::Fluid => {
+                    let color = STEP_PROFILER_FLUID_COLORS[fluid_index % STEP_PROFILER_FLUID_COLORS.len()];
+                    fluid_index += 1;
+                    color
+                }
+                StepProfilerCategory::Granular => {
+                    let color = STEP_PROFILER_GRANULAR_COLORS
+                        [granular_index % STEP_PROFILER_GRANULAR_COLORS.len()];
+                    granular_index += 1;
+                    color
+                }
+                StepProfilerCategory::Object => {
+                    let color = STEP_PROFILER_OBJECT_COLORS[object_index % STEP_PROFILER_OBJECT_COLORS.len()];
+                    object_index += 1;
+                    color
+                }
+            };
+            parent.spawn((
+                Button,
+                Node {
+                    width: px((segment.wall_duration_ms as f32 * STEP_PROFILER_BAR_MS_TO_PX).max(1.0)),
+                    height: px(
+                        ((segment.cpu_duration_ms as f32
+                            / segment.wall_duration_ms.max(1e-6) as f32)
+                            .clamp(0.05, STEP_PROFILER_MAX_PARALLELISM_DISPLAY))
+                            * STEP_PROFILER_PARALLELISM_TO_PX,
+                    ),
+                    ..default()
+                },
+                BackgroundColor(color),
+                StepProfilerBarSegment {
+                    step_name: segment.name.clone(),
+                    wall_duration_ms: segment.wall_duration_ms,
+                    cpu_duration_ms: segment.cpu_duration_ms,
+                },
+            ));
+        }
+    });
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StepProfilerCategory {
+    Fluid,
+    Granular,
+    Object,
+}
+
+fn classify_profiler_segment(step_name: &str) -> StepProfilerCategory {
+    if step_name.starts_with("particle_step::granular_")
+        || step_name.starts_with("particle_step::contact_velocity_response")
+    {
+        return StepProfilerCategory::Granular;
+    }
+    if step_name.starts_with("object_field_")
+        || step_name.starts_with("terrain_")
+        || step_name.starts_with("particle_step::shape_")
+        || step_name.starts_with("particle_step::apply_object_reaction")
+        || step_name.starts_with("particle_step::fracture_")
+        || step_name == "step_overhead"
+    {
+        return StepProfilerCategory::Object;
+    }
+    StepProfilerCategory::Fluid
+}
+
+fn update_step_profiler_tooltip(
+    window: Single<&Window, With<PrimaryWindow>>,
+    hovered: Query<(&Interaction, &StepProfilerBarSegment), With<Button>>,
+    mut tooltip_node: Single<&mut Node, With<StepProfilerTooltip>>,
+    mut tooltip_text: Single<&mut Text, With<StepProfilerTooltipText>>,
+) {
+    let hovered_segment = hovered
+        .iter()
+        .find(|(interaction, _)| **interaction == Interaction::Hovered)
+        .map(|(_, segment)| segment.clone());
+    let Some(segment) = hovered_segment else {
+        tooltip_node.display = Display::None;
+        return;
+    };
+
+    let Some(cursor) = window.cursor_position() else {
+        tooltip_node.display = Display::None;
+        return;
+    };
+    tooltip_node.display = Display::Flex;
+    tooltip_node.left = px(cursor.x + STEP_PROFILER_TOOLTIP_OFFSET_X);
+    tooltip_node.top = px(cursor.y + STEP_PROFILER_TOOLTIP_OFFSET_Y);
+    let parallelism = segment.cpu_duration_ms / segment.wall_duration_ms.max(1e-6);
+    tooltip_text.0 = format!(
+        "{}\nwall: {:.2} ms\ncpu: {:.2} ms\ncpu/wall: {:.2}",
+        segment.step_name, segment.wall_duration_ms, segment.cpu_duration_ms, parallelism
+    );
 }
 
 fn cursor_world_position(

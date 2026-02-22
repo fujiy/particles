@@ -4,16 +4,17 @@ use bevy::log::tracing;
 use bevy::prelude::*;
 
 use super::object::{ObjectPhysicsField, ObjectWorld};
-use super::particle::{ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M};
+use super::particle::{ParticleStepBreakdown, ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M};
+use super::profiler::process_cpu_time_seconds;
 use super::save_load;
 use super::scenario::{
     apply_scenario_spec, count_solid_cells, default_scenario_spec_by_name,
     write_scenario_artifacts_for_state,
 };
 use super::state::{
-    LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest, ReplaySaveArtifactRequest,
-    ReplayState, ResetSimulationRequest, SaveMapRequest, SimFixedSet, SimUpdateSet,
-    SimulationPerfMetrics, SimulationState,
+    LoadDefaultWorldRequest, LoadMapRequest, PhysicsStepProfileSegment, PhysicsStepProfiler,
+    ReplayLoadScenarioRequest, ReplaySaveArtifactRequest, ReplayState, ResetSimulationRequest,
+    SaveMapRequest, SimFixedSet, SimUpdateSet, SimulationPerfMetrics, SimulationState,
 };
 use super::terrain::TerrainWorld;
 
@@ -41,6 +42,7 @@ impl Plugin for PhysicsPlugin {
             .init_resource::<SimulationState>()
             .init_resource::<ReplayState>()
             .init_resource::<SimulationPerfMetrics>()
+            .init_resource::<PhysicsStepProfiler>()
             .add_message::<ResetSimulationRequest>()
             .add_message::<LoadDefaultWorldRequest>()
             .add_message::<SaveMapRequest>()
@@ -94,9 +96,12 @@ fn step_water_particles(
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
     mut perf_metrics: ResMut<SimulationPerfMetrics>,
+    mut step_profiler: ResMut<PhysicsStepProfiler>,
 ) {
     let _step_span = tracing::info_span!("physics::fixed_step").entered();
     let should_step = sim_state.running || sim_state.step_once;
+    let object_update_start = Instant::now();
+    let object_update_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
     {
         let _span = tracing::info_span!("physics::object_field_update").entered();
         object_world.update_physics_field(
@@ -105,25 +110,105 @@ fn step_water_particles(
             &mut object_field,
         );
     }
+    let object_update_secs = object_update_start.elapsed().as_secs_f64();
+    let object_update_cpu_secs =
+        (process_cpu_time_seconds().unwrap_or(object_update_cpu_start) - object_update_cpu_start)
+            .max(0.0);
     if should_step {
+        let terrain_rebuild_start = Instant::now();
+        let terrain_rebuild_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
         {
             let _span = tracing::info_span!("physics::terrain_rebuild_if_dirty").entered();
             terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         }
+        let terrain_rebuild_secs = terrain_rebuild_start.elapsed().as_secs_f64();
+        let terrain_rebuild_cpu_secs = (process_cpu_time_seconds()
+            .unwrap_or(terrain_rebuild_cpu_start)
+            - terrain_rebuild_cpu_start)
+            .max(0.0);
         let start = Instant::now();
-        step_simulation_once(
+        let cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
+        let sim_step = step_simulation_once(
             &mut terrain_world,
             &mut particle_world,
             &mut object_world,
             &mut object_field,
         );
-        perf_metrics.physics_time_this_frame_secs += start.elapsed().as_secs_f64();
+        let total_secs = start.elapsed().as_secs_f64();
+        let total_cpu_secs =
+            (process_cpu_time_seconds().unwrap_or(cpu_start) - cpu_start).max(0.0);
+        perf_metrics.physics_time_this_frame_secs += total_secs;
+        if sim_state.running {
+            step_profiler.total_duration_ms = total_secs * 1000.0;
+            step_profiler.segments = vec![
+                PhysicsStepProfileSegment {
+                    name: "object_field_update".to_string(),
+                    wall_duration_ms: object_update_secs * 1000.0,
+                    cpu_duration_ms: object_update_cpu_secs * 1000.0,
+                },
+                PhysicsStepProfileSegment {
+                    name: "terrain_rebuild_if_dirty".to_string(),
+                    wall_duration_ms: terrain_rebuild_secs * 1000.0,
+                    cpu_duration_ms: terrain_rebuild_cpu_secs * 1000.0,
+                },
+            ];
+            for phase in sim_step.particle_breakdown.phases() {
+                if phase.wall_duration_secs <= 0.0 {
+                    continue;
+                }
+                step_profiler.segments.push(PhysicsStepProfileSegment {
+                    name: format!("particle_step::{}", phase.name),
+                    wall_duration_ms: phase.wall_duration_secs * 1000.0,
+                    cpu_duration_ms: phase.cpu_duration_secs * 1000.0,
+                });
+            }
+            let particle_other_ms = ((sim_step.particle_step_secs
+                - sim_step.particle_breakdown.total_wall_secs())
+            .max(0.0))
+                * 1000.0;
+            let particle_other_cpu_ms = ((sim_step.particle_step_cpu_secs
+                - sim_step.particle_breakdown.total_cpu_secs())
+            .max(0.0))
+                * 1000.0;
+            if particle_other_ms > 0.001 {
+                step_profiler.segments.push(PhysicsStepProfileSegment {
+                    name: "particle_step::other".to_string(),
+                    wall_duration_ms: particle_other_ms,
+                    cpu_duration_ms: particle_other_cpu_ms,
+                });
+            }
+            step_profiler.segments.push(PhysicsStepProfileSegment {
+                name: "terrain_fracture_commit".to_string(),
+                wall_duration_ms: sim_step.terrain_fracture_commit_secs * 1000.0,
+                cpu_duration_ms: sim_step.terrain_fracture_commit_cpu_secs * 1000.0,
+            });
+            let known_wall_ms: f64 = step_profiler
+                .segments
+                .iter()
+                .map(|segment| segment.wall_duration_ms)
+                .sum();
+            let known_cpu_ms: f64 = step_profiler
+                .segments
+                .iter()
+                .map(|segment| segment.cpu_duration_ms)
+                .sum();
+            let unaccounted_wall_ms = (total_secs * 1000.0 - known_wall_ms).max(0.0);
+            let unaccounted_cpu_ms = (total_cpu_secs * 1000.0 - known_cpu_ms).max(0.0);
+            if unaccounted_wall_ms > 0.001 {
+                step_profiler.segments.push(PhysicsStepProfileSegment {
+                    name: "step_overhead".to_string(),
+                    wall_duration_ms: unaccounted_wall_ms,
+                    cpu_duration_ms: unaccounted_cpu_ms,
+                });
+            }
+        }
         if replay_state.enabled {
             replay_state.current_step = replay_state.current_step.saturating_add(1);
         }
     } else {
         let _span = tracing::info_span!("physics::particle_step").entered();
-        particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, false);
+        let _ =
+            particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, false);
     }
     sim_state.step_once = false;
 }
@@ -219,7 +304,7 @@ fn handle_replay_requests(
             sim_state.running = false;
             sim_state.step_once = false;
             while replay_state.current_step < spec.step_count {
-                step_simulation_once(
+                let _ = step_simulation_once(
                     &mut terrain_world,
                     &mut particle_world,
                     &mut object_world,
@@ -363,15 +448,42 @@ fn step_simulation_once(
     particle_world: &mut ParticleWorld,
     object_world: &mut ObjectWorld,
     object_field: &mut ObjectPhysicsField,
-) {
-    {
+) -> StepSimulationTiming {
+    let particle_step_start = Instant::now();
+    let particle_step_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
+    let particle_breakdown = {
         let _span = tracing::info_span!("physics::particle_step").entered();
-        particle_world.step_if_running(terrain_world, object_field, object_world, true);
-    }
+        particle_world.step_if_running(terrain_world, object_field, object_world, true)
+    };
+    let particle_step_secs = particle_step_start.elapsed().as_secs_f64();
+    let particle_step_cpu_secs =
+        (process_cpu_time_seconds().unwrap_or(particle_step_cpu_start) - particle_step_cpu_start)
+            .max(0.0);
+    let terrain_fracture_start = Instant::now();
+    let terrain_fracture_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
     {
         let _span = tracing::info_span!("physics::terrain_fracture_commit").entered();
         if particle_world.apply_pending_terrain_fractures(terrain_world, object_world) {
             terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         }
     }
+    StepSimulationTiming {
+        particle_step_secs,
+        particle_step_cpu_secs,
+        particle_breakdown,
+        terrain_fracture_commit_secs: terrain_fracture_start.elapsed().as_secs_f64(),
+        terrain_fracture_commit_cpu_secs: (process_cpu_time_seconds()
+            .unwrap_or(terrain_fracture_cpu_start)
+            - terrain_fracture_cpu_start)
+            .max(0.0),
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct StepSimulationTiming {
+    particle_step_secs: f64,
+    particle_step_cpu_secs: f64,
+    particle_breakdown: ParticleStepBreakdown,
+    terrain_fracture_commit_secs: f64,
+    terrain_fracture_commit_cpu_secs: f64,
 }

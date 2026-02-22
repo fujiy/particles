@@ -9,7 +9,19 @@ pub struct SimulationState {
 #[derive(Resource, Debug, Default)]
 pub struct SimulationPerfMetrics {
     pub physics_time_this_frame_secs: f64,
-    pub potential_max_fps: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PhysicsStepProfileSegment {
+    pub name: String,
+    pub wall_duration_ms: f64,
+    pub cpu_duration_ms: f64,
+}
+
+#[derive(Resource, Debug, Default)]
+pub struct PhysicsStepProfiler {
+    pub total_duration_ms: f64,
+    pub segments: Vec<PhysicsStepProfileSegment>,
 }
 
 #[derive(Message)]

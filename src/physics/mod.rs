@@ -2,6 +2,7 @@ pub mod connectivity;
 pub mod material;
 pub mod object;
 pub mod particle;
+pub mod profiler;
 mod physics_plugin;
 pub mod save_load;
 pub mod scenario;

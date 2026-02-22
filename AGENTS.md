@@ -27,6 +27,13 @@
 - After code changes, run compile checks and tests.
 - Continue fixing until errors are resolved as a rule.
 
+## Test Change Approval Rule
+- Unit tests:
+  - The agent may add/update/remove unit tests without prior approval.
+- Physics integration tests (headless scenario tests):
+  - Adding or changing test cases, pass/fail thresholds, or golden/snapshot baselines requires explicit user approval before editing.
+  - Bug fixes for test harness infrastructure (runner, serializer, CLI wiring) are allowed, but behavior-affecting scenario changes still require approval.
+
 ## Commit Command Rule
 - When the user says `commit`, run `git commit` with an appropriate commit message.
 - Commits are basically performed in `Impl session`.

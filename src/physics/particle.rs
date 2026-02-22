@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use bevy::log::tracing;
 use bevy::prelude::*;
@@ -13,6 +14,7 @@ use super::material::{
 use super::object::{
     OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectId, ObjectPhysicsField, ObjectWorld,
 };
+use super::profiler::process_cpu_time_seconds;
 use super::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
     WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, cell_to_world_center, world_to_cell,
@@ -30,10 +32,10 @@ pub const TERRAIN_GHOST_DELTA_SCALE: f32 = 1.0;
 pub const PARALLEL_PARTICLE_THRESHOLD: usize = 512;
 pub const PARTICLE_CONTACT_PUSH_FACTOR: f32 = 0.5;
 pub const DETACH_FLOOD_FILL_MAX_CELLS: usize = 128;
-pub const SLEEP_DISP_THRESHOLD: f32 = 0.0020;
-pub const SLEEP_VEL_THRESHOLD: f32 = 0.10;
+pub const SLEEP_DISP_THRESHOLD: f32 = 0.001;
+pub const SLEEP_VEL_THRESHOLD: f32 = 0.01;
 pub const SLEEP_FRAMES: u16 = 30;
-pub const WAKE_DISP_THRESHOLD: f32 = 0.0040;
+pub const WAKE_DISP_THRESHOLD: f32 = 0.001;
 pub const WAKE_RADIUS: f32 = CELL_SIZE_M * 1.75;
 pub const ACTIVE_MIN_FRAMES: u16 = 8;
 pub const GRANULAR_SUBSTEPS: usize = 1;
@@ -71,6 +73,157 @@ pub use super::material::{
 
 pub fn nominal_particle_draw_radius_m() -> f32 {
     (default_particle_mass() / (std::f32::consts::PI * REST_DENSITY)).sqrt()
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ParticleStepPhaseTiming {
+    pub name: &'static str,
+    pub wall_duration_secs: f64,
+    pub cpu_duration_secs: f64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ParticleStepBreakdown {
+    pub clear_reaction_impulses_secs: f64,
+    pub clear_reaction_impulses_cpu_secs: f64,
+    pub predict_positions_secs: f64,
+    pub predict_positions_cpu_secs: f64,
+    pub cull_escaped_particles_secs: f64,
+    pub cull_escaped_particles_cpu_secs: f64,
+    pub rebuild_neighbor_grid_secs: f64,
+    pub rebuild_neighbor_grid_cpu_secs: f64,
+    pub solve_density_constraints_secs: f64,
+    pub solve_density_constraints_cpu_secs: f64,
+    pub granular_solver_secs: f64,
+    pub granular_solver_cpu_secs: f64,
+    pub shape_matching_secs: f64,
+    pub shape_matching_cpu_secs: f64,
+    pub shape_contact_projection_secs: f64,
+    pub shape_contact_projection_cpu_secs: f64,
+    pub update_velocity_secs: f64,
+    pub update_velocity_cpu_secs: f64,
+    pub granular_restitution_secs: f64,
+    pub granular_restitution_cpu_secs: f64,
+    pub contact_velocity_response_secs: f64,
+    pub contact_velocity_response_cpu_secs: f64,
+    pub xsph_viscosity_secs: f64,
+    pub xsph_viscosity_cpu_secs: f64,
+    pub apply_object_reaction_secs: f64,
+    pub apply_object_reaction_cpu_secs: f64,
+    pub final_velocity_clamp_secs: f64,
+    pub final_velocity_clamp_cpu_secs: f64,
+    pub wake_detection_secs: f64,
+    pub wake_detection_cpu_secs: f64,
+    pub fracture_detection_secs: f64,
+    pub fracture_detection_cpu_secs: f64,
+    pub sleep_update_secs: f64,
+    pub sleep_update_cpu_secs: f64,
+}
+
+impl ParticleStepBreakdown {
+    pub fn total_wall_secs(&self) -> f64 {
+        self.phases()
+            .iter()
+            .map(|phase| phase.wall_duration_secs)
+            .sum::<f64>()
+    }
+
+    pub fn total_cpu_secs(&self) -> f64 {
+        self.phases()
+            .iter()
+            .map(|phase| phase.cpu_duration_secs)
+            .sum::<f64>()
+    }
+
+    pub fn phases(&self) -> [ParticleStepPhaseTiming; 17] {
+        [
+            ParticleStepPhaseTiming {
+                name: "clear_reaction_impulses",
+                wall_duration_secs: self.clear_reaction_impulses_secs,
+                cpu_duration_secs: self.clear_reaction_impulses_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "predict_positions",
+                wall_duration_secs: self.predict_positions_secs,
+                cpu_duration_secs: self.predict_positions_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "cull_escaped_particles",
+                wall_duration_secs: self.cull_escaped_particles_secs,
+                cpu_duration_secs: self.cull_escaped_particles_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "rebuild_neighbor_grid",
+                wall_duration_secs: self.rebuild_neighbor_grid_secs,
+                cpu_duration_secs: self.rebuild_neighbor_grid_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "solve_density_constraints",
+                wall_duration_secs: self.solve_density_constraints_secs,
+                cpu_duration_secs: self.solve_density_constraints_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "granular_solver",
+                wall_duration_secs: self.granular_solver_secs,
+                cpu_duration_secs: self.granular_solver_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "shape_matching",
+                wall_duration_secs: self.shape_matching_secs,
+                cpu_duration_secs: self.shape_matching_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "shape_contact_projection",
+                wall_duration_secs: self.shape_contact_projection_secs,
+                cpu_duration_secs: self.shape_contact_projection_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "update_velocity",
+                wall_duration_secs: self.update_velocity_secs,
+                cpu_duration_secs: self.update_velocity_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "granular_restitution",
+                wall_duration_secs: self.granular_restitution_secs,
+                cpu_duration_secs: self.granular_restitution_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "contact_velocity_response",
+                wall_duration_secs: self.contact_velocity_response_secs,
+                cpu_duration_secs: self.contact_velocity_response_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "xsph_viscosity",
+                wall_duration_secs: self.xsph_viscosity_secs,
+                cpu_duration_secs: self.xsph_viscosity_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "apply_object_reaction",
+                wall_duration_secs: self.apply_object_reaction_secs,
+                cpu_duration_secs: self.apply_object_reaction_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "final_velocity_clamp",
+                wall_duration_secs: self.final_velocity_clamp_secs,
+                cpu_duration_secs: self.final_velocity_clamp_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "wake_detection",
+                wall_duration_secs: self.wake_detection_secs,
+                cpu_duration_secs: self.wake_detection_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "fracture_detection",
+                wall_duration_secs: self.fracture_detection_secs,
+                cpu_duration_secs: self.fracture_detection_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "sleep_update",
+                wall_duration_secs: self.sleep_update_secs,
+                cpu_duration_secs: self.sleep_update_cpu_secs,
+            },
+        ]
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1160,10 +1313,11 @@ impl ParticleWorld {
         object_field: &ObjectPhysicsField,
         object_world: &mut ObjectWorld,
         running: bool,
-    ) {
+    ) -> ParticleStepBreakdown {
         if running {
-            self.step_substeps(terrain, object_field, object_world);
+            return self.step_substeps(terrain, object_field, object_world);
         }
+        ParticleStepBreakdown::default()
     }
 
     pub fn step_substeps(
@@ -1171,13 +1325,15 @@ impl ParticleWorld {
         terrain: &TerrainWorld,
         object_field: &ObjectPhysicsField,
         object_world: &mut ObjectWorld,
-    ) {
+    ) -> ParticleStepBreakdown {
         let _span = tracing::info_span!("physics::step_substeps").entered();
         let dt_sub = FIXED_DT / SUBSTEPS as f32;
+        let mut breakdown = ParticleStepBreakdown::default();
         for substep in 0..SUBSTEPS {
             let _substep_span = tracing::info_span!("physics::substep", substep).entered();
-            self.step_single_substep(terrain, object_field, object_world, dt_sub);
+            self.step_single_substep(terrain, object_field, object_world, dt_sub, &mut breakdown);
         }
+        breakdown
     }
 
     fn step_single_substep(
@@ -1186,14 +1342,22 @@ impl ParticleWorld {
         object_field: &ObjectPhysicsField,
         object_world: &mut ObjectWorld,
         dt_sub: f32,
+        breakdown: &mut ParticleStepBreakdown,
     ) {
         self.terrain_load_substep_counter = self.terrain_load_substep_counter.wrapping_add(1);
         self.object_peak_strain.clear();
         self.object_peak_strain_particle.clear();
+        let mut phase_wall_start = Instant::now();
+        let mut phase_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
         {
             let _span = tracing::info_span!("physics::clear_reaction_impulses").entered();
             object_world.clear_reaction_impulses();
         }
+        breakdown.clear_reaction_impulses_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.clear_reaction_impulses_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::predict_positions").entered();
             for i in 0..self.particle_count() {
@@ -1207,15 +1371,30 @@ impl ParticleWorld {
                 self.pos[i] += self.vel[i] * dt_sub;
             }
         }
+        breakdown.predict_positions_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.predict_positions_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::cull_escaped_particles").entered();
             self.cull_escaped_particles(terrain, object_world);
         }
+        breakdown.cull_escaped_particles_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.cull_escaped_particles_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
 
         {
             let _span = tracing::info_span!("physics::rebuild_neighbor_grid").entered();
             self.neighbor_grid.rebuild(&self.pos);
         }
+        breakdown.rebuild_neighbor_grid_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.rebuild_neighbor_grid_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         for iter in 0..SOLVER_ITERS {
             let _iter_span =
                 tracing::info_span!("physics::solve_density_constraints", iter).entered();
@@ -1225,6 +1404,11 @@ impl ParticleWorld {
                 break;
             }
         }
+        breakdown.solve_density_constraints_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.solve_density_constraints_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::granular_solver").entered();
             let reaction_impulses =
@@ -1233,14 +1417,29 @@ impl ParticleWorld {
                 object_world.accumulate_reaction_impulse(object_id, impulse);
             }
         }
+        breakdown.granular_solver_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.granular_solver_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::shape_matching").entered();
             self.solve_shape_matching_constraints(object_world);
         }
+        breakdown.shape_matching_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.shape_matching_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::shape_contact_projection").entered();
             self.project_solids_out_of_terrain(terrain);
         }
+        breakdown.shape_contact_projection_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.shape_contact_projection_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
 
         {
             let _span = tracing::info_span!("physics::update_velocity").entered();
@@ -1254,23 +1453,49 @@ impl ParticleWorld {
                 self.vel[i] = self.vel[i].clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
             }
         }
+        breakdown.update_velocity_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.update_velocity_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::granular_restitution").entered();
             GranularSolver::apply_restitution(self, dt_sub);
         }
+        breakdown.granular_restitution_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.granular_restitution_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::contact_velocity_response").entered();
             self.apply_contact_velocity_response(terrain, object_field, object_world);
         }
+        breakdown.contact_velocity_response_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.contact_velocity_response_cpu_secs +=
+            (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
 
         {
             let _span = tracing::info_span!("physics::xsph_viscosity").entered();
             self.apply_xsph_viscosity();
         }
+        breakdown.xsph_viscosity_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.xsph_viscosity_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::apply_object_reaction").entered();
             self.apply_object_reaction_impulses(object_world);
         }
+        breakdown.apply_object_reaction_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.apply_object_reaction_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::final_velocity_clamp").entered();
             for i in 0..self.particle_count() {
@@ -1281,21 +1506,39 @@ impl ParticleWorld {
                 }
             }
         }
+        breakdown.final_velocity_clamp_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.final_velocity_clamp_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::wake_detection").entered();
             self.neighbor_grid.rebuild(&self.pos);
             self.detect_wake_events(terrain, object_field, object_world);
             self.propagate_and_apply_wake_requests();
         }
+        breakdown.wake_detection_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.wake_detection_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::fracture_detection").entered();
             self.detect_fracture_candidates(terrain, object_field, object_world);
             self.apply_object_fractures(object_world);
         }
+        breakdown.fracture_detection_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.fracture_detection_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        phase_wall_start = Instant::now();
+        phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
         {
             let _span = tracing::info_span!("physics::sleep_update").entered();
             self.update_sleep_states(object_world);
         }
+        breakdown.sleep_update_secs += phase_wall_start.elapsed().as_secs_f64();
+        let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+        breakdown.sleep_update_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
     }
 
     fn solve_density_constraints(
