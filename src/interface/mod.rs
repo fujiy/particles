@@ -23,7 +23,8 @@ use crate::physics::scenario::{
 };
 use crate::physics::state::{
     LoadDefaultWorldRequest, LoadMapRequest, PhysicsStepProfiler, ReplayLoadScenarioRequest,
-    ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationState,
+    ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet,
+    SimulationParallelSettings, SimulationState,
 };
 use crate::physics::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, WORLD_MAX_CHUNK_X,
@@ -182,6 +183,7 @@ impl Plugin for InterfacePlugin {
                     handle_save_load_reset_button_interaction,
                     handle_sim_play_pause_button_interaction,
                     handle_sim_step_button_interaction,
+                    handle_sim_parallel_button_interaction,
                     handle_save_load_name_input_button_interaction,
                     handle_save_load_dialog_buttons,
                     handle_save_load_slot_button_interaction,
@@ -201,7 +203,9 @@ impl Plugin for InterfacePlugin {
                     update_save_load_reset_button_visuals,
                     update_sim_play_pause_button_visuals,
                     update_sim_step_button_visuals,
+                    update_sim_parallel_button_visuals,
                     update_sim_play_pause_button_label,
+                    update_sim_parallel_button_label,
                     update_save_load_name_input_button_visuals,
                     update_save_load_slot_button_visuals,
                     update_save_load_dialog,
@@ -365,6 +369,12 @@ struct SimPlayPauseButtonText;
 
 #[derive(Component)]
 struct SimStepButton;
+
+#[derive(Component)]
+struct SimParallelButton;
+
+#[derive(Component)]
+struct SimParallelButtonText;
 
 #[derive(Component)]
 struct SaveLoadDialogRoot;
@@ -557,6 +567,30 @@ fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>
                         Text::new("Step"),
                         TextFont::from_font_size(14.0),
                         TextColor(Color::WHITE),
+                    ));
+                });
+
+            parent
+                .spawn((
+                    Button,
+                    Node {
+                        width: px(120.0),
+                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        align_items: AlignItems::Center,
+                        justify_content: JustifyContent::Center,
+                        border: UiRect::all(px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(BUTTON_BG_OFF),
+                    BorderColor::all(BUTTON_BORDER_OFF),
+                    SimParallelButton,
+                ))
+                .with_children(|button| {
+                    button.spawn((
+                        Text::new("Parallel: ON"),
+                        TextFont::from_font_size(14.0),
+                        TextColor(Color::WHITE),
+                        SimParallelButtonText,
                     ));
                 });
 
@@ -959,6 +993,20 @@ fn handle_sim_step_button_interaction(
     }
 }
 
+fn handle_sim_parallel_button_interaction(
+    mut interactions: Query<
+        &Interaction,
+        (Changed<Interaction>, With<SimParallelButton>, With<Button>),
+    >,
+    mut parallel_settings: ResMut<SimulationParallelSettings>,
+) {
+    for interaction in &mut interactions {
+        if *interaction == Interaction::Pressed {
+            parallel_settings.enabled = !parallel_settings.enabled;
+        }
+    }
+}
+
 fn handle_save_load_name_input_button_interaction(
     mut interactions: Query<
         &Interaction,
@@ -1238,6 +1286,28 @@ fn update_sim_step_button_visuals(
     }
 }
 
+fn update_sim_parallel_button_visuals(
+    parallel_settings: Res<SimulationParallelSettings>,
+    mut buttons: Query<
+        (&Interaction, &mut BackgroundColor, &mut BorderColor),
+        (With<Button>, With<SimParallelButton>),
+    >,
+) {
+    for (interaction, mut bg, mut border_color) in &mut buttons {
+        let selected = parallel_settings.enabled;
+        *bg = match *interaction {
+            Interaction::Pressed => BUTTON_BG_PRESS.into(),
+            Interaction::Hovered => BUTTON_BG_HOVER.into(),
+            Interaction::None => toggle_button_bg(selected),
+        };
+        *border_color = if selected {
+            BorderColor::all(BUTTON_BORDER_ON)
+        } else {
+            BorderColor::all(BUTTON_BORDER_OFF)
+        };
+    }
+}
+
 fn update_sim_play_pause_button_label(
     sim_state: Res<SimulationState>,
     mut labels: Query<&mut Text, With<SimPlayPauseButtonText>>,
@@ -1250,6 +1320,22 @@ fn update_sim_play_pause_button_label(
             "Pause".to_string()
         } else {
             "Play".to_string()
+        };
+    }
+}
+
+fn update_sim_parallel_button_label(
+    parallel_settings: Res<SimulationParallelSettings>,
+    mut labels: Query<&mut Text, With<SimParallelButtonText>>,
+) {
+    if !parallel_settings.is_changed() {
+        return;
+    }
+    for mut label in &mut labels {
+        label.0 = if parallel_settings.enabled {
+            "Parallel: ON".to_string()
+        } else {
+            "Parallel: OFF".to_string()
         };
     }
 }

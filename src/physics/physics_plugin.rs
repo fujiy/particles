@@ -14,7 +14,8 @@ use super::scenario::{
 use super::state::{
     LoadDefaultWorldRequest, LoadMapRequest, PhysicsStepProfileSegment, PhysicsStepProfiler,
     ReplayLoadScenarioRequest, ReplaySaveArtifactRequest, ReplayState, ResetSimulationRequest,
-    SaveMapRequest, SimFixedSet, SimUpdateSet, SimulationPerfMetrics, SimulationState,
+    SaveMapRequest, SimFixedSet, SimUpdateSet, SimulationParallelSettings, SimulationPerfMetrics,
+    SimulationState,
 };
 use super::terrain::TerrainWorld;
 
@@ -40,6 +41,7 @@ impl Plugin for PhysicsPlugin {
             .init_resource::<ObjectWorld>()
             .init_resource::<ObjectPhysicsField>()
             .init_resource::<SimulationState>()
+            .init_resource::<SimulationParallelSettings>()
             .init_resource::<ReplayState>()
             .init_resource::<SimulationPerfMetrics>()
             .init_resource::<PhysicsStepProfiler>()
@@ -90,6 +92,7 @@ fn initialize_default_world(
 
 fn step_water_particles(
     mut sim_state: ResMut<SimulationState>,
+    parallel_settings: Res<SimulationParallelSettings>,
     mut replay_state: ResMut<ReplayState>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
@@ -114,6 +117,7 @@ fn step_water_particles(
     let object_update_cpu_secs =
         (process_cpu_time_seconds().unwrap_or(object_update_cpu_start) - object_update_cpu_start)
             .max(0.0);
+    particle_world.set_parallel_enabled(parallel_settings.enabled);
     if should_step {
         let terrain_rebuild_start = Instant::now();
         let terrain_rebuild_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
@@ -133,6 +137,7 @@ fn step_water_particles(
             &mut particle_world,
             &mut object_world,
             &mut object_field,
+            parallel_settings.enabled,
         );
         let total_secs = start.elapsed().as_secs_f64();
         let total_cpu_secs =
@@ -207,8 +212,7 @@ fn step_water_particles(
         }
     } else {
         let _span = tracing::info_span!("physics::particle_step").entered();
-        let _ =
-            particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, false);
+        let _ = particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, false);
     }
     sim_state.step_once = false;
 }
@@ -254,6 +258,7 @@ fn handle_replay_requests(
     mut particle_world: ResMut<ParticleWorld>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
+    parallel_settings: Res<SimulationParallelSettings>,
 ) {
     for request in load_reader.read() {
         let Some(spec) = default_scenario_spec_by_name(&request.scenario_name) else {
@@ -309,6 +314,7 @@ fn handle_replay_requests(
                     &mut particle_world,
                     &mut object_world,
                     &mut object_field,
+                    parallel_settings.enabled,
                 );
                 replay_state.current_step = replay_state.current_step.saturating_add(1);
             }
@@ -448,7 +454,9 @@ fn step_simulation_once(
     particle_world: &mut ParticleWorld,
     object_world: &mut ObjectWorld,
     object_field: &mut ObjectPhysicsField,
+    parallel_enabled: bool,
 ) -> StepSimulationTiming {
+    particle_world.set_parallel_enabled(parallel_enabled);
     let particle_step_start = Instant::now();
     let particle_step_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
     let particle_breakdown = {

@@ -6,6 +6,17 @@ pub struct SimulationState {
     pub step_once: bool,
 }
 
+#[derive(Resource, Debug)]
+pub struct SimulationParallelSettings {
+    pub enabled: bool,
+}
+
+impl Default for SimulationParallelSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 #[derive(Resource, Debug, Default)]
 pub struct SimulationPerfMetrics {
     pub physics_time_this_frame_secs: f64,
