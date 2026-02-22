@@ -3857,6 +3857,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "directories",
+ "image",
  "libc",
  "rayon",
  "serde",

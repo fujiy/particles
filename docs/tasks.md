@@ -12,21 +12,6 @@
 
 ## Active Work Units
 
-### [TST-01] 物理統合テスト artifact 可視化出力
-
-- Status: `Todo`
-- 背景:
-  - headless統合テストの数値判定は整備済みだが、目視比較のための画像artifact出力が未完了。
-- スコープ:
-  - 既存シナリオランナーの終了状態から画像を生成し、JSON artifactと同じ出力規約で保存する。
-- Subtasks:
-  - [ ] `final_state.png` の生成処理を実装する。
-  - [ ] 画像出力の有効/無効をテスト実行引数または設定で切り替え可能にする。
-  - [ ] 出力画像の解像度・パレット・背景色の規約を定義する。
-  - [ ] READMEに画像artifact確認手順を追記する。
-- 完了条件:
-  - 代表シナリオで `final_state.json` / `metrics.json` / `final_state.png` が同一run_id配下に出力される。
-
 ### [WGEN-00] OpenSimplex地表生成（石 + 表土）
 
 - Status: `Todo`
@@ -80,6 +65,19 @@
 - 物理統合テスト（headless scenario tests）のケース追加・閾値変更・ベースライン更新は、実装前にユーザー承認を取る。
 
 ## Done
+
+- [x] [TST-01] 物理統合テスト artifact 可視化出力
+  - 背景:
+    - headless統合テストの数値判定は整備済みだが、目視比較のための画像artifact出力が未完了。
+  - スコープ:
+    - 既存シナリオランナーの終了状態から画像を生成し、JSON artifactと同じ出力規約で保存する。
+  - Subtasks:
+    - [x] `final_state.png` の生成処理を実装する。
+    - [x] 画像出力の有効/無効をテスト実行引数または設定で切り替え可能にする。
+    - [x] 出力画像の解像度・パレット・背景色の規約を定義する。
+    - [x] READMEに画像artifact確認手順を追記する。
+  - 完了条件:
+    - 代表シナリオで `final_state.json` / `metrics.json` / `final_state.png` が同一run_id配下に出力される。
 
 - Legacy Checklist
 - (Keep completed tasks here; do not delete history)

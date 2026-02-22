@@ -54,6 +54,19 @@ cargo test --test physics_scenarios -- --nocapture
 
 - `artifacts/tests/<scenario>/<run_id>/final_state.json`
 - `artifacts/tests/<scenario>/<run_id>/metrics.json`
+- `artifacts/tests/<scenario>/<run_id>/final_state.png`
+
+`final_state.png` は既定で有効です。無効化する場合は環境変数を指定します。
+
+```bash
+PARTICLES_SCENARIO_ARTIFACT_PNG=0 cargo test --test physics_scenarios -- --nocapture
+```
+
+`final_state.png` の規約:
+
+- 解像度: 固定ワールド全域を `1セル=8px` でラスタライズ
+- パレット: 地形/粒子とも4色パレット（既存描画と同系統の色）
+- 背景色: `RGBA(14, 18, 24, 255)` の不透明単色
 
 `metrics.json` の閾値判定に失敗した場合は、テストログにscenario名とartifactパスが表示されます。
 
@@ -70,3 +83,4 @@ cargo test --test physics_scenarios -- --nocapture
 
 - `artifacts/tests/<scenario>/<run_id>/final_state.json`
 - `artifacts/tests/<scenario>/<run_id>/metrics.json`
+- `artifacts/tests/<scenario>/<run_id>/final_state.png`

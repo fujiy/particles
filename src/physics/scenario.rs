@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bevy::prelude::*;
+use image::{ColorType, ImageFormat};
 use serde::Serialize;
 
 use super::material::{ParticleMaterial, TerrainMaterial};
@@ -10,13 +11,17 @@ use super::object::{
     OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectPhysicsField, ObjectWorld,
 };
 use super::particle::{FIXED_DT, ParticleActivityState, ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M};
+use super::terrain::world_to_cell;
 use super::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
     WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };
 
 pub const TEST_ARTIFACT_ROOT: &str = "artifacts/tests";
+pub const SCENARIO_ARTIFACT_PNG_ENV: &str = "PARTICLES_SCENARIO_ARTIFACT_PNG";
 const DEFAULT_PENETRATION_EPSILON_M: f32 = 1.0e-3;
+const FINAL_STATE_PNG_CELL_RESOLUTION: u32 = 8;
+const FINAL_STATE_PNG_BACKGROUND: [u8; 4] = [14, 18, 24, 255];
 
 #[derive(Clone, Copy, Debug)]
 pub struct CellRect {
@@ -124,6 +129,34 @@ pub struct ScenarioRunOutput {
     pub metrics: ScenarioMetrics,
     pub violations: Vec<String>,
     pub artifact_dir: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ScenarioArtifactOptions {
+    pub write_final_state_png: bool,
+}
+
+impl Default for ScenarioArtifactOptions {
+    fn default() -> Self {
+        Self {
+            write_final_state_png: true,
+        }
+    }
+}
+
+impl ScenarioArtifactOptions {
+    pub fn from_env() -> Self {
+        match std::env::var(SCENARIO_ARTIFACT_PNG_ENV) {
+            Ok(raw) => {
+                let mut options = Self::default();
+                if let Some(enabled) = parse_toggle_value(&raw) {
+                    options.write_final_state_png = enabled;
+                }
+                options
+            }
+            Err(_) => Self::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -441,6 +474,26 @@ pub fn write_scenario_artifacts_for_state(
     objects: &ObjectWorld,
     object_field: &ObjectPhysicsField,
 ) -> Result<PathBuf, String> {
+    write_scenario_artifacts_for_state_with_options(
+        spec,
+        step_count,
+        terrain,
+        particles,
+        objects,
+        object_field,
+        ScenarioArtifactOptions::from_env(),
+    )
+}
+
+pub fn write_scenario_artifacts_for_state_with_options(
+    spec: &ScenarioSpec,
+    step_count: usize,
+    terrain: &TerrainWorld,
+    particles: &ParticleWorld,
+    objects: &ObjectWorld,
+    object_field: &ObjectPhysicsField,
+    options: ScenarioArtifactOptions,
+) -> Result<PathBuf, String> {
     let metrics = compute_metrics(spec, step_count, terrain, particles, objects, object_field);
     let artifact_dir = artifact_dir_for_scenario(&spec.name);
     fs::create_dir_all(&artifact_dir)
@@ -448,6 +501,9 @@ pub fn write_scenario_artifacts_for_state(
     let final_state = capture_final_state_json(spec, step_count, terrain, particles, objects);
     write_json_file(&artifact_dir.join("final_state.json"), &final_state)?;
     write_json_file(&artifact_dir.join("metrics.json"), &metrics)?;
+    if options.write_final_state_png {
+        write_final_state_png(&artifact_dir.join("final_state.png"), terrain, particles)?;
+    }
     Ok(artifact_dir)
 }
 
@@ -836,6 +892,201 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     fs::write(path, json).map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
+fn write_final_state_png(
+    path: &Path,
+    terrain: &TerrainWorld,
+    particles: &ParticleWorld,
+) -> Result<(), String> {
+    let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32;
+    let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1;
+    let min_cell_y = WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32;
+    let max_cell_y = (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1;
+
+    let cell_width = (max_cell_x - min_cell_x + 1) as u32;
+    let cell_height = (max_cell_y - min_cell_y + 1) as u32;
+    let width = cell_width * FINAL_STATE_PNG_CELL_RESOLUTION;
+    let height = cell_height * FINAL_STATE_PNG_CELL_RESOLUTION;
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    for chunk in pixels.chunks_exact_mut(4) {
+        chunk.copy_from_slice(&FINAL_STATE_PNG_BACKGROUND);
+    }
+
+    for y in min_cell_y..=max_cell_y {
+        for x in min_cell_x..=max_cell_x {
+            let TerrainCell::Solid { material, .. } = terrain.get_loaded_cell_or_empty(IVec2::new(x, y))
+            else {
+                continue;
+            };
+            let palette = terrain_palette(material);
+            let color = palette[deterministic_palette_index(x, y)];
+            let local_x = (x - min_cell_x) as u32;
+            let local_y = (y - min_cell_y) as u32;
+            fill_cell_rect(
+                &mut pixels,
+                width,
+                height,
+                local_x,
+                local_y,
+                FINAL_STATE_PNG_CELL_RESOLUTION,
+                color,
+            );
+        }
+    }
+
+    let particle_radius_px_min = (FINAL_STATE_PNG_CELL_RESOLUTION as f32 * 0.35).max(1.0);
+    for (&position, &material) in particles.positions().iter().zip(particles.materials().iter()) {
+        let cell = world_to_cell(position);
+        let color = particle_palette(material)[deterministic_palette_index(cell.x, cell.y)];
+        let rel_x = (position.x / CELL_SIZE_M) - min_cell_x as f32;
+        let rel_y = (position.y / CELL_SIZE_M) - min_cell_y as f32;
+        let center_x = rel_x * FINAL_STATE_PNG_CELL_RESOLUTION as f32;
+        let center_y = rel_y * FINAL_STATE_PNG_CELL_RESOLUTION as f32;
+        let world_radius_px =
+            (particle_draw_radius_in_cells(material) * FINAL_STATE_PNG_CELL_RESOLUTION as f32)
+                .max(particle_radius_px_min);
+        draw_disc(
+            &mut pixels,
+            width,
+            height,
+            center_x,
+            center_y,
+            world_radius_px,
+            color,
+        );
+    }
+
+    image::save_buffer_with_format(path, &pixels, width, height, ColorType::Rgba8, ImageFormat::Png)
+        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+}
+
+fn fill_cell_rect(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    cell_x: u32,
+    cell_y: u32,
+    scale: u32,
+    color: [u8; 4],
+) {
+    let start_x = cell_x.saturating_mul(scale);
+    let end_x = (start_x + scale).min(width);
+    let start_y = cell_y.saturating_mul(scale);
+    let end_y = (start_y + scale).min(height);
+    for py in start_y..end_y {
+        for px in start_x..end_x {
+            blend_pixel(pixels, width, height, px as i32, py as i32, color);
+        }
+    }
+}
+
+fn draw_disc(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    center_x: f32,
+    center_y: f32,
+    radius_px: f32,
+    color: [u8; 4],
+) {
+    let min_x = (center_x - radius_px).floor() as i32;
+    let max_x = (center_x + radius_px).ceil() as i32;
+    let min_y = (center_y - radius_px).floor() as i32;
+    let max_y = (center_y + radius_px).ceil() as i32;
+    let r2 = radius_px * radius_px;
+    for py in min_y..=max_y {
+        for px in min_x..=max_x {
+            let dx = px as f32 - center_x;
+            let dy = py as f32 - center_y;
+            if dx * dx + dy * dy > r2 {
+                continue;
+            }
+            blend_pixel(pixels, width, height, px, py, color);
+        }
+    }
+}
+
+fn blend_pixel(pixels: &mut [u8], width: u32, height: u32, px: i32, py: i32, src: [u8; 4]) {
+    if px < 0 || py < 0 || px >= width as i32 || py >= height as i32 {
+        return;
+    }
+    let image_y = (height as i32 - 1 - py) as u32;
+    let idx = ((image_y * width + px as u32) * 4) as usize;
+    let dst = &mut pixels[idx..idx + 4];
+    let src_a = src[3] as f32 / 255.0;
+    let inv_a = 1.0 - src_a;
+    dst[0] = (src[0] as f32 * src_a + dst[0] as f32 * inv_a)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    dst[1] = (src[1] as f32 * src_a + dst[1] as f32 * inv_a)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    dst[2] = (src[2] as f32 * src_a + dst[2] as f32 * inv_a)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    dst[3] = 255;
+}
+
+fn terrain_palette(material: TerrainMaterial) -> [[u8; 4]; 4] {
+    match material {
+        TerrainMaterial::Stone => [
+            [70, 67, 63, 255],
+            [83, 79, 74, 255],
+            [95, 90, 84, 255],
+            [108, 103, 96, 255],
+        ],
+        TerrainMaterial::Soil => [
+            [105, 79, 56, 255],
+            [119, 91, 67, 255],
+            [133, 103, 78, 255],
+            [147, 115, 88, 255],
+        ],
+        TerrainMaterial::Sand => [
+            [170, 150, 110, 255],
+            [186, 166, 124, 255],
+            [201, 181, 137, 255],
+            [216, 196, 150, 255],
+        ],
+    }
+}
+
+fn particle_palette(material: ParticleMaterial) -> [[u8; 4]; 4] {
+    match material {
+        ParticleMaterial::WaterLiquid => [
+            [42, 120, 202, 235],
+            [52, 136, 218, 240],
+            [65, 152, 228, 245],
+            [78, 167, 238, 250],
+        ],
+        ParticleMaterial::StoneSolid | ParticleMaterial::StoneGranular => terrain_palette(TerrainMaterial::Stone),
+        ParticleMaterial::SoilSolid | ParticleMaterial::SoilGranular => terrain_palette(TerrainMaterial::Soil),
+        ParticleMaterial::SandSolid | ParticleMaterial::SandGranular => terrain_palette(TerrainMaterial::Sand),
+    }
+}
+
+fn particle_draw_radius_in_cells(material: ParticleMaterial) -> f32 {
+    super::material::particle_properties(material).radius_m / CELL_SIZE_M
+}
+
+fn deterministic_palette_index(x: i32, y: i32) -> usize {
+    let mut state = (x as u32).wrapping_mul(0x45d9_f3b);
+    state ^= (y as u32).wrapping_mul(0x27d4_eb2d);
+    state ^= 0xa53c_9e4d;
+    state ^= state >> 16;
+    state = state.wrapping_mul(0x7feb_352d);
+    state ^= state >> 15;
+    state = state.wrapping_mul(0x846c_a68b);
+    state ^= state >> 16;
+    (state & 0b11) as usize
+}
+
+fn parse_toggle_value(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 fn artifact_dir_for_scenario(scenario_name: &str) -> PathBuf {
     let run_id = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -886,5 +1137,31 @@ fn activity_label(state: ParticleActivityState) -> &'static str {
     match state {
         ParticleActivityState::Active => "Active",
         ParticleActivityState::Sleeping => "Sleeping",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_toggle_value;
+
+    #[test]
+    fn parse_toggle_value_true_variants() {
+        for raw in ["1", "true", "yes", "on", " TRUE "] {
+            assert_eq!(parse_toggle_value(raw), Some(true));
+        }
+    }
+
+    #[test]
+    fn parse_toggle_value_false_variants() {
+        for raw in ["0", "false", "no", "off", " Off "] {
+            assert_eq!(parse_toggle_value(raw), Some(false));
+        }
+    }
+
+    #[test]
+    fn parse_toggle_value_invalid() {
+        for raw in ["", "maybe", "2", "enable"] {
+            assert_eq!(parse_toggle_value(raw), None);
+        }
     }
 }
