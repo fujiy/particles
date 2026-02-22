@@ -13,11 +13,12 @@ use super::scenario::{
 };
 use super::state::{
     LoadDefaultWorldRequest, LoadMapRequest, PhysicsStepProfileSegment, PhysicsStepProfiler,
+    PhysicsActiveRegion, PhysicsRegionSettings,
     ReplayLoadScenarioRequest, ReplaySaveArtifactRequest, ReplayState, ResetSimulationRequest,
     SaveMapRequest, SimFixedSet, SimUpdateSet, SimulationParallelSettings, SimulationPerfMetrics,
-    SimulationState,
+    SimulationState, TerrainStreamingSettings,
 };
-use super::terrain::TerrainWorld;
+use super::terrain::{CHUNK_SIZE_I32, TerrainWorld, world_to_cell};
 
 pub struct PhysicsPlugin;
 
@@ -42,6 +43,9 @@ impl Plugin for PhysicsPlugin {
             .init_resource::<ObjectPhysicsField>()
             .init_resource::<SimulationState>()
             .init_resource::<SimulationParallelSettings>()
+            .init_resource::<PhysicsRegionSettings>()
+            .init_resource::<PhysicsActiveRegion>()
+            .init_resource::<TerrainStreamingSettings>()
             .init_resource::<ReplayState>()
             .init_resource::<SimulationPerfMetrics>()
             .init_resource::<PhysicsStepProfiler>()
@@ -61,6 +65,7 @@ impl Plugin for PhysicsPlugin {
                 (
                     handle_sim_controls,
                     apply_sim_reset,
+                    stream_terrain_around_camera,
                     handle_replay_requests,
                     apply_save_load_requests,
                 )
@@ -93,6 +98,8 @@ fn initialize_default_world(
 fn step_water_particles(
     mut sim_state: ResMut<SimulationState>,
     parallel_settings: Res<SimulationParallelSettings>,
+    region_settings: Res<PhysicsRegionSettings>,
+    mut active_region: ResMut<PhysicsActiveRegion>,
     mut replay_state: ResMut<ReplayState>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
@@ -100,9 +107,60 @@ fn step_water_particles(
     mut object_field: ResMut<ObjectPhysicsField>,
     mut perf_metrics: ResMut<SimulationPerfMetrics>,
     mut step_profiler: ResMut<PhysicsStepProfiler>,
+    camera_transforms: Query<&Transform, With<Camera2d>>,
 ) {
     let _step_span = tracing::info_span!("physics::fixed_step").entered();
     let should_step = sim_state.running || sim_state.step_once;
+    if replay_state.enabled || !region_settings.enabled {
+        particle_world.set_active_chunk_region_bounds(None, None);
+        active_region.active_chunks.clear();
+        active_region.chunk_min = None;
+        active_region.chunk_max = None;
+    } else if let Some(camera_transform) = camera_transforms.iter().next() {
+        let center_cell = world_to_cell(camera_transform.translation.truncate());
+        let center_chunk = IVec2::new(
+            center_cell.x.div_euclid(CHUNK_SIZE_I32),
+            center_cell.y.div_euclid(CHUNK_SIZE_I32),
+        );
+        let mut active_chunks = Vec::new();
+        let mut min_chunk = IVec2::new(i32::MAX, i32::MAX);
+        let mut max_chunk = IVec2::new(i32::MIN, i32::MIN);
+        for (&pos, &activity) in particle_world
+            .positions()
+            .iter()
+            .zip(particle_world.activity_states().iter())
+        {
+            if activity != super::particle::ParticleActivityState::Active {
+                continue;
+            }
+            let cell = world_to_cell(pos);
+            let chunk = IVec2::new(
+                cell.x.div_euclid(CHUNK_SIZE_I32),
+                cell.y.div_euclid(CHUNK_SIZE_I32),
+            );
+            active_chunks.push(chunk);
+            min_chunk.x = min_chunk.x.min(chunk.x);
+            min_chunk.y = min_chunk.y.min(chunk.y);
+            max_chunk.x = max_chunk.x.max(chunk.x);
+            max_chunk.y = max_chunk.y.max(chunk.y);
+        }
+        active_chunks.sort_by_key(|chunk| (chunk.y, chunk.x));
+        active_chunks.dedup();
+        if active_chunks.is_empty() {
+            min_chunk = center_chunk;
+            max_chunk = center_chunk;
+            active_chunks.push(center_chunk);
+        }
+        particle_world.set_active_chunk_region_bounds(Some(min_chunk), Some(max_chunk));
+        active_region.active_chunks = active_chunks;
+        active_region.chunk_min = Some(min_chunk);
+        active_region.chunk_max = Some(max_chunk);
+    } else {
+        particle_world.set_active_chunk_region_bounds(None, None);
+        active_region.active_chunks.clear();
+        active_region.chunk_min = None;
+        active_region.chunk_max = None;
+    }
     let object_update_start = Instant::now();
     let object_update_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
     {
@@ -247,6 +305,32 @@ fn handle_sim_controls(
             slot_name: save_load::DEFAULT_QUICK_SAVE_SLOT.to_string(),
         });
     }
+}
+
+fn stream_terrain_around_camera(
+    mut terrain_world: ResMut<TerrainWorld>,
+    replay_state: Res<ReplayState>,
+    streaming_settings: Res<TerrainStreamingSettings>,
+    camera_transforms: Query<&Transform, With<Camera2d>>,
+) {
+    if replay_state.enabled || !streaming_settings.enabled {
+        return;
+    }
+    let Some(camera_transform) = camera_transforms.iter().next() else {
+        return;
+    };
+    let center_cell = world_to_cell(camera_transform.translation.truncate());
+    let center_chunk = IVec2::new(
+        center_cell.x.div_euclid(CHUNK_SIZE_I32),
+        center_cell.y.div_euclid(CHUNK_SIZE_I32),
+    );
+    let radius = streaming_settings.load_radius_chunks.max(0);
+    for y in (center_chunk.y - radius)..=(center_chunk.y + radius) {
+        for x in (center_chunk.x - radius)..=(center_chunk.x + radius) {
+            terrain_world.ensure_chunk_loaded(IVec2::new(x, y));
+        }
+    }
+    terrain_world.unload_pristine_chunks_outside_radius(center_chunk, radius + 1);
 }
 
 fn handle_replay_requests(

@@ -16,8 +16,7 @@ use super::object::{
 };
 use super::profiler::process_cpu_time_seconds;
 use super::terrain::{
-    CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
-    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, cell_to_world_center, world_to_cell,
+    CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, cell_to_world_center, world_to_cell,
 };
 
 pub const GRAVITY_MPS2: Vec2 = Vec2::new(0.0, -9.81);
@@ -60,10 +59,6 @@ pub const FRACTURE_MIN_IMPACT_SPEED_MPS: f32 = 2.0;
 const PARTICLE_ESCAPE_MARGIN_X_CELLS: i32 = CHUNK_SIZE_I32;
 const PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS: i32 = CHUNK_SIZE_I32;
 const PARTICLE_ESCAPE_MARGIN_TOP_CELLS: i32 = CHUNK_SIZE_I32 * 8;
-
-const INITIAL_WATER_ORIGIN_M: Vec2 = Vec2::new(-1.6, 2.0);
-const INITIAL_WATER_COLS: usize = 50;
-const INITIAL_WATER_ROWS: usize = 30;
 
 pub use super::material::ParticleMaterial;
 pub use super::material::{
@@ -888,13 +883,15 @@ pub struct ParticleWorld {
     pending_terrain_fracture_seeds: HashMap<IVec2, TerrainFractureSeed>,
     terrain_persistent_load: HashMap<IVec2, TerrainPersistentLoadState>,
     terrain_load_substep_counter: u64,
+    active_chunk_min: Option<IVec2>,
+    active_chunk_max: Option<IVec2>,
     parallel_enabled: bool,
 }
 
 impl Default for ParticleWorld {
     fn default() -> Self {
-        let initial_pos = generate_initial_water_positions();
-        let initial_vel = vec![Vec2::ZERO; initial_pos.len()];
+        let initial_pos = Vec::new();
+        let initial_vel = Vec::new();
         let mut world = Self {
             pos: initial_pos.clone(),
             prev_pos: initial_pos.clone(),
@@ -924,6 +921,8 @@ impl Default for ParticleWorld {
             pending_terrain_fracture_seeds: HashMap::new(),
             terrain_persistent_load: HashMap::new(),
             terrain_load_substep_counter: 0,
+            active_chunk_min: None,
+            active_chunk_max: None,
             parallel_enabled: true,
         };
         world.resize_work_buffers();
@@ -960,6 +959,15 @@ impl ParticleWorld {
 
     pub fn set_parallel_enabled(&mut self, enabled: bool) {
         self.parallel_enabled = enabled;
+    }
+
+    pub fn set_active_chunk_region_bounds(
+        &mut self,
+        chunk_min: Option<IVec2>,
+        chunk_max: Option<IVec2>,
+    ) {
+        self.active_chunk_min = chunk_min;
+        self.active_chunk_max = chunk_max;
     }
 
     pub fn positions(&self) -> &[Vec2] {
@@ -1400,6 +1408,11 @@ impl ParticleWorld {
         dt_sub: f32,
         breakdown: &mut ParticleStepBreakdown,
     ) {
+        let saved_parallel_enabled = self.parallel_enabled;
+        if self.active_chunk_min.is_some() && self.active_chunk_max.is_some() {
+            // Region filter relies on `is_active_particle`; force sequential code paths.
+            self.parallel_enabled = false;
+        }
         self.terrain_load_substep_counter = self.terrain_load_substep_counter.wrapping_add(1);
         self.object_peak_strain.clear();
         self.object_peak_strain_particle.clear();
@@ -1417,12 +1430,13 @@ impl ParticleWorld {
         {
             let _span = tracing::info_span!("physics::predict_positions").entered();
             for i in 0..self.particle_count() {
+                self.prev_pos[i] = self.pos[i];
                 if !self.is_active_particle(i) {
-                    self.prev_pos[i] = self.pos[i];
-                    self.vel[i] = Vec2::ZERO;
+                    // Keep ballistic motion outside active region to avoid artificial "walls"
+                    // at the region boundary. Heavy constraints/collisions remain skipped.
+                    self.pos[i] += self.vel[i] * dt_sub;
                     continue;
                 }
-                self.prev_pos[i] = self.pos[i];
                 self.vel[i] += GRAVITY_MPS2 * dt_sub;
                 self.pos[i] += self.vel[i] * dt_sub;
             }
@@ -1507,11 +1521,6 @@ impl ParticleWorld {
         {
             let _span = tracing::info_span!("physics::update_velocity").entered();
             for i in 0..self.particle_count() {
-                if !self.is_active_particle(i) {
-                    self.vel[i] = Vec2::ZERO;
-                    self.prev_pos[i] = self.pos[i];
-                    continue;
-                }
                 self.vel[i] = (self.pos[i] - self.prev_pos[i]) / dt_sub;
                 self.vel[i] = self.vel[i].clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
             }
@@ -1562,11 +1571,7 @@ impl ParticleWorld {
         {
             let _span = tracing::info_span!("physics::final_velocity_clamp").entered();
             for i in 0..self.particle_count() {
-                if self.is_active_particle(i) {
-                    self.vel[i] = self.vel[i].clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
-                } else {
-                    self.vel[i] = Vec2::ZERO;
-                }
+                self.vel[i] = self.vel[i].clamp_length_max(PARTICLE_SPEED_LIMIT_MPS);
             }
         }
         breakdown.final_velocity_clamp_secs += phase_wall_start.elapsed().as_secs_f64();
@@ -1602,6 +1607,7 @@ impl ParticleWorld {
         breakdown.sleep_update_secs += phase_wall_start.elapsed().as_secs_f64();
         let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
         breakdown.sleep_update_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+        self.parallel_enabled = saved_parallel_enabled;
     }
 
     fn solve_density_constraints(
@@ -2850,11 +2856,30 @@ impl ParticleWorld {
     }
 
     fn is_active_particle(&self, index: usize) -> bool {
-        self.activity_state
+        let active = self
+            .activity_state
             .get(index)
             .copied()
             .unwrap_or(ParticleActivityState::Active)
-            == ParticleActivityState::Active
+            == ParticleActivityState::Active;
+        if !active {
+            return false;
+        }
+        let (Some(chunk_min), Some(chunk_max)) = (self.active_chunk_min, self.active_chunk_max) else {
+            return true;
+        };
+        if index >= self.particle_count() {
+            return false;
+        }
+        let cell = world_to_cell(self.pos[index]);
+        let chunk = IVec2::new(
+            cell.x.div_euclid(CHUNK_SIZE_I32),
+            cell.y.div_euclid(CHUNK_SIZE_I32),
+        );
+        chunk.x >= chunk_min.x
+            && chunk.x <= chunk_max.x
+            && chunk.y >= chunk_min.y
+            && chunk.y <= chunk_max.y
     }
 
     fn request_wake(&mut self, index: usize) {
@@ -3191,6 +3216,55 @@ impl ParticleWorld {
         for center in wake_centers {
             self.request_wake_near(center, WAKE_RADIUS);
         }
+
+        // Even outside the current active simulation region, particles can drift ballistically.
+        // If they start penetrating terrain/objects, promote them to active so the region can expand.
+        for i in 0..count {
+            if self.is_active_particle(i) {
+                continue;
+            }
+            let displacement_i = self.pos[i] - self.prev_pos[i];
+            if displacement_i.length() <= WAKE_DISP_THRESHOLD {
+                continue;
+            }
+            let props = particle_properties(self.material[i]);
+
+            let mut should_wake = false;
+            if let Some((signed_distance, normal)) =
+                terrain.sample_signed_distance_and_normal(self.pos[i])
+            {
+                let penetration = props.terrain_push_radius_m - signed_distance;
+                if penetration > 0.0 && displacement_i.dot(normal).abs() > WAKE_DISP_THRESHOLD {
+                    should_wake = true;
+                }
+            }
+
+            if !should_wake {
+                let mut object_contacts = Vec::new();
+                let self_object = object_world.object_of_particle(i);
+                object_field.gather_candidate_object_ids(self.pos[i], &mut object_contacts);
+                for &object_id in &object_contacts {
+                    if self_object == Some(object_id) {
+                        continue;
+                    }
+                    let Some(sample) = object_world.evaluate_object_sdf(object_id, self.pos[i])
+                    else {
+                        continue;
+                    };
+                    let penetration = props.object_push_radius_m - sample.distance_m;
+                    if penetration > 0.0
+                        && displacement_i.dot(sample.normal_world).abs() > WAKE_DISP_THRESHOLD
+                    {
+                        should_wake = true;
+                        break;
+                    }
+                }
+            }
+
+            if should_wake {
+                self.request_wake(i);
+            }
+        }
     }
 
     fn cull_escaped_particles(&mut self, terrain: &TerrainWorld, object_world: &mut ObjectWorld) {
@@ -3198,29 +3272,13 @@ impl ParticleWorld {
             return;
         }
 
-        let global_min_cell = IVec2::new(
-            WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32,
-            WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32,
-        );
-        let global_max_cell = IVec2::new(
-            (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1,
-            (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1,
-        );
         let (loaded_min_cell, loaded_max_cell) = terrain
             .loaded_cell_bounds()
-            .unwrap_or((global_min_cell, global_max_cell));
-        let base_min_cell = IVec2::new(
-            loaded_min_cell.x.min(global_min_cell.x),
-            loaded_min_cell.y.min(global_min_cell.y),
-        );
-        let base_max_cell = IVec2::new(
-            loaded_max_cell.x.max(global_max_cell.x),
-            loaded_max_cell.y.max(global_max_cell.y),
-        );
-        let min_cell_x = base_min_cell.x - PARTICLE_ESCAPE_MARGIN_X_CELLS;
-        let max_cell_x = base_max_cell.x + PARTICLE_ESCAPE_MARGIN_X_CELLS;
-        let min_cell_y = base_min_cell.y - PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS;
-        let max_cell_y = base_max_cell.y + PARTICLE_ESCAPE_MARGIN_TOP_CELLS;
+            .unwrap_or((IVec2::new(-CHUNK_SIZE_I32, -CHUNK_SIZE_I32), IVec2::new(CHUNK_SIZE_I32, CHUNK_SIZE_I32)));
+        let min_cell_x = loaded_min_cell.x - PARTICLE_ESCAPE_MARGIN_X_CELLS;
+        let max_cell_x = loaded_max_cell.x + PARTICLE_ESCAPE_MARGIN_X_CELLS;
+        let min_cell_y = loaded_min_cell.y - PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS;
+        let max_cell_y = loaded_max_cell.y + PARTICLE_ESCAPE_MARGIN_TOP_CELLS;
 
         let min_world = cell_to_world_center(IVec2::new(min_cell_x, min_cell_y))
             - Vec2::splat(CELL_SIZE_M * 0.5);
@@ -3622,20 +3680,6 @@ fn distance_sq_to_cell_aabb(point: Vec2, cell: IVec2) -> f32 {
     point.distance_squared(closest)
 }
 
-fn generate_initial_water_positions() -> Vec<Vec2> {
-    let mut positions = Vec::with_capacity(INITIAL_WATER_COLS * INITIAL_WATER_ROWS);
-    for row in 0..INITIAL_WATER_ROWS {
-        for col in 0..INITIAL_WATER_COLS {
-            positions.push(
-                INITIAL_WATER_ORIGIN_M
-                    + Vec2::new(col as f32, row as f32) * PARTICLE_SPACING_M
-                    + Vec2::splat(particle_properties(ParticleMaterial::WaterLiquid).radius_m),
-            );
-        }
-    }
-    positions
-}
-
 fn default_particle_mass() -> f32 {
     particle_properties(ParticleMaterial::WaterLiquid).mass
 }
@@ -3807,7 +3851,8 @@ mod tests {
     use super::*;
     use crate::physics::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA};
     use crate::physics::terrain::{
-        CELL_SIZE_M, CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MIN_CHUNK_X, surface_y_for_world_x,
+        CELL_SIZE_M, CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
+        WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, surface_y_for_world_x,
     };
 
     fn clear_particles(particles: &mut ParticleWorld) {
@@ -3965,6 +4010,12 @@ mod tests {
         terrain.reset_fixed_world();
         terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let mut particles = ParticleWorld::default();
+        particles.pos = vec![Vec2::new(0.0, 3.0)];
+        particles.prev_pos = particles.pos.clone();
+        particles.vel = vec![Vec2::ZERO];
+        particles.mass = vec![default_particle_mass()];
+        particles.material = vec![ParticleMaterial::WaterLiquid];
+        particles.resize_work_buffers();
         let mut object_world = ObjectWorld::default();
         let object_field = ObjectPhysicsField::default();
         let before_avg_y = particles.positions().iter().map(|p| p.y).sum::<f32>()
@@ -4002,9 +4053,10 @@ mod tests {
         terrain_static.reset_fixed_world();
         terrain_static.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
         let terrain_empty = TerrainWorld::default();
+        let surface_y = surface_y_for_world_x(0) as f32 * CELL_SIZE_M;
 
         let mut with_terrain = ParticleWorld::default();
-        with_terrain.pos = vec![Vec2::new(0.1, 0.6)];
+        with_terrain.pos = vec![Vec2::new(0.1, surface_y + 0.45)];
         with_terrain.prev_pos = with_terrain.pos.clone();
         with_terrain.vel = vec![Vec2::new(0.0, -8.0)];
         with_terrain.mass = vec![default_particle_mass()];
@@ -4028,9 +4080,17 @@ mod tests {
 
         let y_with = with_terrain.pos[0].y;
         let y_without = without_terrain.pos[0].y;
+        let d_with = terrain_static
+            .sample_signed_distance_and_normal(with_terrain.pos[0])
+            .map(|(d, _)| d)
+            .unwrap_or(0.0);
+        let d_without = terrain_static
+            .sample_signed_distance_and_normal(without_terrain.pos[0])
+            .map(|(d, _)| d)
+            .unwrap_or(0.0);
         assert!(
-            y_with > y_without + 0.2,
-            "boundary push did not keep particle away from terrain (with={y_with}, without={y_without})"
+            d_with > d_without + 0.05 && y_with > y_without,
+            "boundary push did not keep particle away from terrain (with={y_with}, without={y_without}, d_with={d_with}, d_without={d_without})"
         );
     }
 

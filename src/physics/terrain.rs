@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use bevy::prelude::*;
-use noise::{NoiseFn, OpenSimplex};
+use super::generation;
 
 pub use super::material::TerrainMaterial;
+pub use super::generation::{
+    BASE_SURFACE_Y, HEIGHT_NOISE_AMP_CELLS, HEIGHT_NOISE_FREQ, SOIL_DEPTH_CELLS,
+    TERRAIN_GENERATOR_VERSION, WORLD_SEED,
+};
 
 pub const CELL_SIZE_M: f32 = 0.25;
 pub const CHUNK_SIZE: usize = 16;
@@ -16,11 +20,6 @@ pub const WORLD_MIN_CHUNK_X: i32 = -2;
 pub const WORLD_MAX_CHUNK_X: i32 = 1;
 pub const WORLD_MIN_CHUNK_Y: i32 = -2;
 pub const WORLD_MAX_CHUNK_Y: i32 = 1;
-pub const WORLD_SEED: u32 = 13_370;
-pub const HEIGHT_NOISE_FREQ: f64 = 0.035;
-pub const HEIGHT_NOISE_AMP_CELLS: i32 = 10;
-pub const BASE_SURFACE_Y: i32 = -4;
-pub const SOIL_DEPTH_CELLS: i32 = 4;
 pub const TERRAIN_SDF_SAMPLES_PER_CELL: i32 = 2;
 const SDF_INF: f32 = 1.0e9;
 const SDF_DIAGONAL_COST: f32 = std::f32::consts::SQRT_2;
@@ -65,15 +64,13 @@ impl TerrainChunk {
             dirty: true,
         };
 
-        let noise = OpenSimplex::new(WORLD_SEED);
         for local_x in 0..CHUNK_SIZE_I32 {
             let global_x = chunk_coord.x * CHUNK_SIZE_I32 + local_x;
-            let surface_y = surface_y_for_world_x_with_noise(global_x, &noise);
             for local_y in 0..CHUNK_SIZE_I32 {
                 let global_y = chunk_coord.y * CHUNK_SIZE_I32 + local_y;
                 let local = IVec2::new(local_x, local_y);
-                chunk.cells[local_cell_to_index(local)] =
-                    generated_cell_from_surface(global_y, surface_y);
+                let global_cell = IVec2::new(global_x, global_y);
+                chunk.cells[local_cell_to_index(local)] = generated_cell_for_world(global_cell);
             }
         }
 
@@ -106,15 +103,29 @@ impl TerrainChunk {
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
     }
+
+    pub fn is_pristine_generated(&self, chunk_coord: IVec2) -> bool {
+        for local_y in 0..CHUNK_SIZE_I32 {
+            for local_x in 0..CHUNK_SIZE_I32 {
+                let local = IVec2::new(local_x, local_y);
+                let global_cell = chunk_coord * CHUNK_SIZE_I32 + local;
+                if self.get(local) != generated_cell_for_world(global_cell) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 pub fn surface_y_for_world_x(world_x: i32) -> i32 {
-    let noise = OpenSimplex::new(WORLD_SEED);
-    surface_y_for_world_x_with_noise(world_x, &noise)
+    generation::surface_y_for_world_x(world_x)
 }
 
 pub fn generated_cell_for_world(global_cell: IVec2) -> TerrainCell {
-    generated_cell_from_surface(global_cell.y, surface_y_for_world_x(global_cell.x))
+    generation::generated_material_for_world_cell(global_cell)
+        .map(TerrainCell::solid)
+        .unwrap_or(TerrainCell::Empty)
 }
 
 #[derive(Resource, Debug, Default)]
@@ -129,6 +140,8 @@ pub struct TerrainWorld {
     sdf_height: usize,
     sdf_sample_spacing_m: f32,
     sdf_origin_m: Vec2,
+    sdf_min_world_m: Vec2,
+    sdf_max_world_m: Vec2,
 }
 
 impl TerrainWorld {
@@ -143,6 +156,8 @@ impl TerrainWorld {
         self.sdf_height = 0;
         self.sdf_sample_spacing_m = 0.0;
         self.sdf_origin_m = Vec2::ZERO;
+        self.sdf_min_world_m = Vec2::ZERO;
+        self.sdf_max_world_m = Vec2::ZERO;
     }
 
     pub fn reset_fixed_world(&mut self) {
@@ -153,26 +168,39 @@ impl TerrainWorld {
                 self.ensure_chunk_loaded(IVec2::new(chunk_x, chunk_y));
             }
         }
-
-        let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32;
-        let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1;
-        let min_cell_y = WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32;
-        let max_cell_y = (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1;
-
-        self.fill_rect(
-            IVec2::new(min_cell_x, min_cell_y),
-            IVec2::new(min_cell_x, max_cell_y),
-            TerrainCell::stone(),
-        );
-        self.fill_rect(
-            IVec2::new(max_cell_x, min_cell_y),
-            IVec2::new(max_cell_x, max_cell_y),
-            TerrainCell::stone(),
-        );
     }
 
     pub fn ensure_chunk_loaded(&mut self, chunk_coord: IVec2) {
         self.ensure_chunk_mut(chunk_coord);
+    }
+
+    pub fn unload_pristine_chunks_outside_radius(&mut self, center_chunk: IVec2, keep_radius: i32) {
+        let keep_radius = keep_radius.max(0);
+        let unload_targets: Vec<IVec2> = self
+            .chunks
+            .iter()
+            .filter_map(|(&chunk_coord, chunk)| {
+                let dx = (chunk_coord.x - center_chunk.x).abs();
+                let dy = (chunk_coord.y - center_chunk.y).abs();
+                if dx <= keep_radius && dy <= keep_radius {
+                    return None;
+                }
+                if chunk.is_pristine_generated(chunk_coord) {
+                    Some(chunk_coord)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if unload_targets.is_empty() {
+            return;
+        }
+        for chunk_coord in unload_targets {
+            self.chunks.remove(&chunk_coord);
+            self.dirty_chunks.remove(&chunk_coord);
+        }
+        self.static_particles_dirty = true;
     }
 
     #[allow(dead_code)]
@@ -369,15 +397,30 @@ impl TerrainWorld {
 
     fn rebuild_signed_distance_field(&mut self) {
         let samples_per_cell = TERRAIN_SDF_SAMPLES_PER_CELL.max(1) as usize;
-        let world_cells_w = ((WORLD_MAX_CHUNK_X - WORLD_MIN_CHUNK_X + 1) * CHUNK_SIZE_I32) as usize;
-        let world_cells_h = ((WORLD_MAX_CHUNK_Y - WORLD_MIN_CHUNK_Y + 1) * CHUNK_SIZE_I32) as usize;
+        let Some((min_cell, max_cell)) = self.loaded_cell_bounds() else {
+            self.sdf_samples.clear();
+            self.sdf_width = 0;
+            self.sdf_height = 0;
+            self.sdf_sample_spacing_m = 0.0;
+            self.sdf_origin_m = Vec2::ZERO;
+            self.sdf_min_world_m = Vec2::ZERO;
+            self.sdf_max_world_m = Vec2::ZERO;
+            return;
+        };
+        let world_cells_w = (max_cell.x - min_cell.x + 1) as usize;
+        let world_cells_h = (max_cell.y - min_cell.y + 1) as usize;
 
         self.sdf_width = world_cells_w * samples_per_cell;
         self.sdf_height = world_cells_h * samples_per_cell;
         self.sdf_sample_spacing_m = CELL_SIZE_M / samples_per_cell as f32;
         self.sdf_origin_m = Vec2::new(
-            WORLD_MIN_CHUNK_X as f32 * CHUNK_WORLD_SIZE_M + 0.5 * self.sdf_sample_spacing_m,
-            WORLD_MIN_CHUNK_Y as f32 * CHUNK_WORLD_SIZE_M + 0.5 * self.sdf_sample_spacing_m,
+            min_cell.x as f32 * CELL_SIZE_M + 0.5 * self.sdf_sample_spacing_m,
+            min_cell.y as f32 * CELL_SIZE_M + 0.5 * self.sdf_sample_spacing_m,
+        );
+        self.sdf_min_world_m = Vec2::new(min_cell.x as f32 * CELL_SIZE_M, min_cell.y as f32 * CELL_SIZE_M);
+        self.sdf_max_world_m = Vec2::new(
+            (max_cell.x + 1) as f32 * CELL_SIZE_M,
+            (max_cell.y + 1) as f32 * CELL_SIZE_M,
         );
 
         let sample_count = self.sdf_width * self.sdf_height;
@@ -428,6 +471,13 @@ impl TerrainWorld {
 
     fn sample_signed_distance(&self, world_pos: Vec2) -> Option<f32> {
         if self.sdf_samples.is_empty() || self.sdf_width == 0 || self.sdf_height == 0 {
+            return None;
+        }
+        if world_pos.x < self.sdf_min_world_m.x
+            || world_pos.x >= self.sdf_max_world_m.x
+            || world_pos.y < self.sdf_min_world_m.y
+            || world_pos.y >= self.sdf_max_world_m.y
+        {
             return None;
         }
 
@@ -498,21 +548,6 @@ fn local_cell_to_index(local_cell: IVec2) -> usize {
     debug_assert!(local_cell.x >= 0 && local_cell.x < CHUNK_SIZE_I32);
     debug_assert!(local_cell.y >= 0 && local_cell.y < CHUNK_SIZE_I32);
     (local_cell.y as usize) * CHUNK_SIZE + (local_cell.x as usize)
-}
-
-fn surface_y_for_world_x_with_noise(world_x: i32, noise: &OpenSimplex) -> i32 {
-    let n = noise.get([world_x as f64 * HEIGHT_NOISE_FREQ, 0.0]);
-    BASE_SURFACE_Y + (n * HEIGHT_NOISE_AMP_CELLS as f64).round() as i32
-}
-
-fn generated_cell_from_surface(global_y: i32, surface_y: i32) -> TerrainCell {
-    if global_y > surface_y {
-        return TerrainCell::Empty;
-    }
-    if global_y > surface_y - SOIL_DEPTH_CELLS {
-        return TerrainCell::solid(TerrainMaterial::Soil);
-    }
-    TerrainCell::solid(TerrainMaterial::Stone)
 }
 
 fn sdf_index(width: usize, x: usize, y: usize) -> usize {
@@ -692,5 +727,28 @@ mod tests {
 
         assert!(d_inside < 0.0);
         assert!(d_above > 0.0);
+    }
+
+    #[test]
+    fn unload_pristine_chunks_outside_radius_keeps_modified_chunks() {
+        let mut terrain = TerrainWorld::default();
+        terrain.ensure_chunk_loaded(IVec2::new(0, 0));
+        terrain.ensure_chunk_loaded(IVec2::new(5, 0));
+
+        terrain.unload_pristine_chunks_outside_radius(IVec2::new(0, 0), 1);
+        assert!(terrain.chunk(IVec2::new(5, 0)).is_none());
+
+        terrain.ensure_chunk_loaded(IVec2::new(5, 0));
+        let modified_cell = IVec2::new(5 * CHUNK_SIZE_I32, 0);
+        let generated = generated_cell_for_world(modified_cell);
+        let modified = if matches!(generated, TerrainCell::Empty) {
+            TerrainCell::stone()
+        } else {
+            TerrainCell::Empty
+        };
+        assert!(terrain.set_cell(modified_cell, modified));
+
+        terrain.unload_pristine_chunks_outside_radius(IVec2::new(0, 0), 1);
+        assert!(terrain.chunk(IVec2::new(5, 0)).is_some());
     }
 }

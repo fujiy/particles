@@ -17,6 +17,43 @@ impl Default for SimulationParallelSettings {
     }
 }
 
+#[derive(Resource, Debug)]
+pub struct TerrainStreamingSettings {
+    pub enabled: bool,
+    pub load_radius_chunks: i32,
+}
+
+impl Default for TerrainStreamingSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            load_radius_chunks: 3,
+        }
+    }
+}
+
+#[derive(Resource, Debug)]
+pub struct PhysicsRegionSettings {
+    pub enabled: bool,
+    pub active_radius_chunks: i32,
+}
+
+impl Default for PhysicsRegionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            active_radius_chunks: 2,
+        }
+    }
+}
+
+#[derive(Resource, Debug, Default)]
+pub struct PhysicsActiveRegion {
+    pub active_chunks: Vec<IVec2>,
+    pub chunk_min: Option<IVec2>,
+    pub chunk_max: Option<IVec2>,
+}
+
 #[derive(Resource, Debug, Default)]
 pub struct SimulationPerfMetrics {
     pub physics_time_this_frame_secs: f64,

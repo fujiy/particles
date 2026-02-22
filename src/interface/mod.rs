@@ -27,8 +27,7 @@ use crate::physics::state::{
     SimulationParallelSettings, SimulationState,
 };
 use crate::physics::terrain::{
-    CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, WORLD_MAX_CHUNK_X,
-    WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, world_to_cell,
+    CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,
 };
 
 const HUD_BG_COLOR: Color = Color::srgba(0.05, 0.06, 0.09, 0.82);
@@ -1778,7 +1777,12 @@ fn handle_world_interactions(
             let mut spawn_cells = Vec::new();
             let mut last_cell = interaction_state.last_water_spawn_cell;
             stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
-                if cell_in_fixed_world(cell) && last_cell != Some(cell) {
+                let chunk = IVec2::new(
+                    cell.x.div_euclid(CHUNK_SIZE_I32),
+                    cell.y.div_euclid(CHUNK_SIZE_I32),
+                );
+                terrain_world.ensure_chunk_loaded(chunk);
+                if last_cell != Some(cell) {
                     spawn_cells.push(cell);
                     last_cell = Some(cell);
                 }
@@ -1799,9 +1803,12 @@ fn handle_world_interactions(
             let terrain_material = tool.terrain_material().unwrap_or(TerrainMaterial::Stone);
             interaction_state.stone_stroke.active = true;
             stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
-                if cell_in_fixed_world(cell) {
-                    interaction_state.stone_stroke.generated_cells.insert(cell);
-                }
+                let chunk = IVec2::new(
+                    cell.x.div_euclid(CHUNK_SIZE_I32),
+                    cell.y.div_euclid(CHUNK_SIZE_I32),
+                );
+                terrain_world.ensure_chunk_loaded(chunk);
+                interaction_state.stone_stroke.generated_cells.insert(cell);
                 particle_world.wake_particles_in_radius(cell_to_world_center(cell), WAKE_RADIUS);
             });
             terrain_changed |= update_stone_stroke_partition(
@@ -1817,7 +1824,12 @@ fn handle_world_interactions(
                 let mut spawn_cells = Vec::new();
                 let mut last_cell = interaction_state.last_granular_spawn_cell;
                 stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
-                    if cell_in_fixed_world(cell) && last_cell != Some(cell) {
+                    let chunk = IVec2::new(
+                        cell.x.div_euclid(CHUNK_SIZE_I32),
+                        cell.y.div_euclid(CHUNK_SIZE_I32),
+                    );
+                    terrain_world.ensure_chunk_loaded(chunk);
+                    if last_cell != Some(cell) {
                         spawn_cells.push(cell);
                         last_cell = Some(cell);
                     }
@@ -2325,9 +2337,11 @@ fn remove_terrain_cells_in_radius(
     for y in min_cell.y..=max_cell.y {
         for x in min_cell.x..=max_cell.x {
             let cell = IVec2::new(x, y);
-            if !cell_in_fixed_world(cell) {
-                continue;
-            }
+            let chunk = IVec2::new(
+                cell.x.div_euclid(CHUNK_SIZE_I32),
+                cell.y.div_euclid(CHUNK_SIZE_I32),
+            );
+            terrain_world.ensure_chunk_loaded(chunk);
             if cell_to_world_center(cell).distance_squared(center) > radius2 {
                 continue;
             }
@@ -2355,9 +2369,11 @@ fn break_terrain_solids_in_radius(
     for y in min_cell.y..=max_cell.y {
         for x in min_cell.x..=max_cell.x {
             let cell = IVec2::new(x, y);
-            if !cell_in_fixed_world(cell) {
-                continue;
-            }
+            let chunk = IVec2::new(
+                cell.x.div_euclid(CHUNK_SIZE_I32),
+                cell.y.div_euclid(CHUNK_SIZE_I32),
+            );
+            terrain_world.ensure_chunk_loaded(chunk);
             if cell_to_world_center(cell).distance_squared(center) > radius2 {
                 continue;
             }
@@ -2382,15 +2398,6 @@ fn break_terrain_solids_in_radius(
         let _ = particle_world.spawn_material_particles_from_cells(&cells, material, Vec2::ZERO);
     }
     removed
-}
-
-fn cell_in_fixed_world(cell: IVec2) -> bool {
-    let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32;
-    let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1;
-    let min_cell_y = WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32;
-    let max_cell_y = (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 - 1;
-
-    (min_cell_x..=max_cell_x).contains(&cell.x) && (min_cell_y..=max_cell_y).contains(&cell.y)
 }
 
 fn toggle_button_bg(enabled: bool) -> BackgroundColor {

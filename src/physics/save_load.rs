@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+use super::generation::TERRAIN_GENERATOR_VERSION;
 use super::material::{ParticleMaterial, TerrainMaterial};
 use super::object::{ObjectSnapshotData, ObjectWorld};
 use super::particle::{ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M};
@@ -22,6 +23,8 @@ pub const DEFAULT_QUICK_SAVE_SLOT: &str = "quick_save";
 #[derive(Debug, Serialize, Deserialize)]
 struct SaveSnapshot {
     save_version: u32,
+    #[serde(default)]
+    generator_version: u32,
     simulation: SimulationSnapshot,
     #[serde(default)]
     loaded_chunks: Vec<ChunkSnapshot>,
@@ -218,6 +221,7 @@ pub fn save_to_path(
 ) -> Result<(), String> {
     let snapshot = SaveSnapshot {
         save_version: SAVE_VERSION,
+        generator_version: TERRAIN_GENERATOR_VERSION,
         simulation: SimulationSnapshot {
             running: sim_state.running,
         },
@@ -306,6 +310,12 @@ pub fn load_from_path(
         return Err(format!(
             "incompatible save version: file={}, supported={}",
             snapshot.save_version, SAVE_VERSION
+        ));
+    }
+    if snapshot.generator_version != TERRAIN_GENERATOR_VERSION {
+        return Err(format!(
+            "incompatible terrain generator version: file={}, supported={}",
+            snapshot.generator_version, TERRAIN_GENERATOR_VERSION
         ));
     }
     validate_snapshot(&snapshot)?;
@@ -475,8 +485,9 @@ mod tests {
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!("particles_load_regen_{nanos}.json"));
         let json = format!(
-            "{{\"save_version\":{},\"simulation\":{{\"running\":false}},\"loaded_chunks\":[{{\"chunk\":[0,0]}}],\"terrain_cells\":[],\"particles\":[],\"objects\":[]}}",
-            SAVE_VERSION
+            "{{\"save_version\":{},\"generator_version\":{},\"simulation\":{{\"running\":false}},\"loaded_chunks\":[{{\"chunk\":[0,0]}}],\"terrain_cells\":[],\"particles\":[],\"objects\":[]}}",
+            SAVE_VERSION,
+            TERRAIN_GENERATOR_VERSION
         );
         fs::write(&path, json).expect("should write temporary save file");
         load_from_path(
@@ -498,6 +509,36 @@ mod tests {
             }
         }
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn load_rejects_incompatible_generator_version() {
+        let mut terrain = TerrainWorld::default();
+        let mut particles = ParticleWorld::default();
+        let mut objects = ObjectWorld::default();
+        let mut sim_state = SimulationState::default();
+
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("particles_bad_generator_{nanos}.json"));
+        let json = format!(
+            "{{\"save_version\":{},\"generator_version\":{},\"simulation\":{{\"running\":false}},\"loaded_chunks\":[],\"terrain_cells\":[],\"particles\":[],\"objects\":[]}}",
+            SAVE_VERSION,
+            TERRAIN_GENERATOR_VERSION + 1
+        );
+        fs::write(&path, json).expect("should write temporary save file");
+        let error = load_from_path(
+            path.to_str().expect("temp path should be utf-8"),
+            &mut terrain,
+            &mut particles,
+            &mut objects,
+            &mut sim_state,
+        )
+        .expect_err("mismatched generator version should fail");
+        assert!(error.contains("incompatible terrain generator version"));
         let _ = fs::remove_file(path);
     }
 }

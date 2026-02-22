@@ -5,10 +5,9 @@ use crate::physics::particle::{
     PARTICLE_RADIUS_M, ParticleActivityState, ParticleMaterial, ParticleWorld,
     WATER_KERNEL_RADIUS_M, nominal_particle_draw_radius_m,
 };
-use crate::physics::state::SimUpdateSet;
+use crate::physics::state::{PhysicsActiveRegion, SimUpdateSet};
 use crate::physics::terrain::{
-    CELL_SIZE_M, CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
-    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
+    CELL_SIZE_M, CHUNK_WORLD_SIZE_M, TerrainWorld,
 };
 use crate::render::TerrainRenderDiagnostics;
 
@@ -17,9 +16,11 @@ const BUTTON_BG_ON: Color = Color::srgba(0.16, 0.30, 0.46, 0.95);
 const BUTTON_BG_HOVER: Color = Color::srgba(0.24, 0.25, 0.30, 0.98);
 const BUTTON_BG_PRESS: Color = Color::srgba(0.38, 0.40, 0.48, 0.98);
 const GRID_NEIGHBOR_COLOR: Color = Color::srgba(0.27, 0.75, 0.98, 0.28);
-const GRID_CHUNK_COLOR: Color = Color::srgba(0.52, 0.52, 0.52, 0.45);
+const GRID_CHUNK_BOUNDARY_COLOR: Color = Color::srgba(0.90, 0.90, 0.94, 0.32);
+const GRID_ACTIVE_CHUNK_COLOR: Color = Color::srgba(1.00, 0.08, 0.78, 0.95);
+const GRID_PHYSICS_REGION_COLOR: Color = Color::srgba(0.96, 0.72, 0.12, 0.98);
 const GRID_TERRAIN_UPDATED_COLOR: Color = Color::srgba(0.13, 0.85, 0.92, 1.00);
-const GRID_PARTICLE_UPDATED_COLOR: Color = Color::srgba(1.00, 0.08, 0.78, 1.00);
+const GRID_PARTICLE_UPDATED_COLOR: Color = Color::srgba(0.76, 0.56, 0.98, 1.00);
 const GRID_OBJECT_COLOR: Color = Color::srgba(0.92, 0.36, 0.12, 0.70);
 const GRID_OBJECT_CENTER_COLOR: Color = Color::srgba(0.98, 0.98, 0.98, 0.90);
 const GRID_OBJECT_LOCAL_X_COLOR: Color = Color::srgba(0.95, 0.26, 0.21, 0.95);
@@ -49,6 +50,7 @@ impl Plugin for OverlayPlugin {
                 (
                     update_grid_overlay_button_label,
                     update_particle_overlay_button_label,
+                    update_grid_overlay_info_text,
                 )
                     .chain()
                     .in_set(SimUpdateSet::Ui),
@@ -94,6 +96,9 @@ struct GridOverlayToggleButton;
 #[derive(Component)]
 struct GridOverlayToggleButtonLabel;
 
+#[derive(Component)]
+struct GridOverlayInfoText;
+
 fn setup_overlay_ui(mut commands: Commands) {
     commands
         .spawn((
@@ -138,6 +143,19 @@ fn setup_overlay_ui(mut commands: Commands) {
                 ParticleOverlayToggleButtonLabel,
             ));
         });
+
+    commands.spawn((
+        Text::new(""),
+        TextFont::from_font_size(14.0),
+        TextColor(Color::srgba(0.96, 0.96, 0.98, 0.95)),
+        Node {
+            position_type: PositionType::Absolute,
+            left: px(12.0),
+            top: px(12.0),
+            ..default()
+        },
+        GridOverlayInfoText,
+    ));
 }
 
 fn handle_particle_overlay_button(
@@ -225,9 +243,28 @@ fn update_particle_overlay_button_label(
     }
 }
 
+fn update_grid_overlay_info_text(
+    overlay_state: Res<GridOverlayState>,
+    active_region: Res<PhysicsActiveRegion>,
+    mut labels: Query<&mut Text, With<GridOverlayInfoText>>,
+) {
+    if !overlay_state.is_changed() && !active_region.is_changed() {
+        return;
+    }
+    for mut label in &mut labels {
+        label.0 = if overlay_state.enabled {
+            format!("Physics Chunks: {}", active_region.active_chunks.len())
+        } else {
+            String::new()
+        };
+    }
+}
+
 fn draw_grid_overlay(
     mut gizmos: Gizmos,
     overlay_state: Res<GridOverlayState>,
+    active_region: Res<PhysicsActiveRegion>,
+    terrain_world: Res<TerrainWorld>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     object_world: Res<ObjectWorld>,
     particle_world: Res<ParticleWorld>,
@@ -236,10 +273,18 @@ fn draw_grid_overlay(
         return;
     }
 
-    let min_x = WORLD_MIN_CHUNK_X as f32 * CHUNK_WORLD_SIZE_M;
-    let max_x = (WORLD_MAX_CHUNK_X + 1) as f32 * CHUNK_WORLD_SIZE_M;
-    let min_y = WORLD_MIN_CHUNK_Y as f32 * CHUNK_WORLD_SIZE_M;
-    let max_y = (WORLD_MAX_CHUNK_Y + 1) as f32 * CHUNK_WORLD_SIZE_M;
+    let loaded_chunks = terrain_world.loaded_chunk_coords();
+    for &chunk in &loaded_chunks {
+        draw_chunk_outline(&mut gizmos, chunk, GRID_CHUNK_BOUNDARY_COLOR);
+    }
+
+    let (Some(min_chunk), Some(max_chunk)) = (active_region.chunk_min, active_region.chunk_max) else {
+        return;
+    };
+    let min_x = min_chunk.x as f32 * CHUNK_WORLD_SIZE_M;
+    let max_x = (max_chunk.x + 1) as f32 * CHUNK_WORLD_SIZE_M;
+    let min_y = min_chunk.y as f32 * CHUNK_WORLD_SIZE_M;
+    let max_y = (max_chunk.y + 1) as f32 * CHUNK_WORLD_SIZE_M;
 
     let neighbor_step = WATER_KERNEL_RADIUS_M;
     let min_neighbor_x = (min_x / neighbor_step).floor() as i32;
@@ -264,40 +309,35 @@ fn draw_grid_overlay(
         );
     }
 
-    for chunk_x in WORLD_MIN_CHUNK_X..=(WORLD_MAX_CHUNK_X + 1) {
-        let x = chunk_x as f32 * CHUNK_WORLD_SIZE_M;
-        gizmos.line_2d(Vec2::new(x, min_y), Vec2::new(x, max_y), GRID_CHUNK_COLOR);
+    for &chunk in &active_region.active_chunks {
+        draw_chunk_outline(&mut gizmos, chunk, GRID_ACTIVE_CHUNK_COLOR);
     }
-    for chunk_y in WORLD_MIN_CHUNK_Y..=(WORLD_MAX_CHUNK_Y + 1) {
-        let y = chunk_y as f32 * CHUNK_WORLD_SIZE_M;
-        gizmos.line_2d(Vec2::new(min_x, y), Vec2::new(max_x, y), GRID_CHUNK_COLOR);
-    }
+
     for &chunk in render_diagnostics
         .terrain_updated_chunk_highlight_frames
         .keys()
     {
-        let x0 = chunk.x as f32 * CHUNK_WORLD_SIZE_M;
-        let x1 = (chunk.x as f32 + 1.0) * CHUNK_WORLD_SIZE_M;
-        let y0 = chunk.y as f32 * CHUNK_WORLD_SIZE_M;
-        let y1 = (chunk.y as f32 + 1.0) * CHUNK_WORLD_SIZE_M;
-        gizmos.line_2d(Vec2::new(x0, y0), Vec2::new(x1, y0), GRID_TERRAIN_UPDATED_COLOR);
-        gizmos.line_2d(Vec2::new(x1, y0), Vec2::new(x1, y1), GRID_TERRAIN_UPDATED_COLOR);
-        gizmos.line_2d(Vec2::new(x1, y1), Vec2::new(x0, y1), GRID_TERRAIN_UPDATED_COLOR);
-        gizmos.line_2d(Vec2::new(x0, y1), Vec2::new(x0, y0), GRID_TERRAIN_UPDATED_COLOR);
+        if chunk.x < min_chunk.x || chunk.x > max_chunk.x || chunk.y < min_chunk.y || chunk.y > max_chunk.y {
+            continue;
+        }
+        draw_chunk_outline(&mut gizmos, chunk, GRID_TERRAIN_UPDATED_COLOR);
     }
     for &chunk in render_diagnostics
         .particle_updated_chunk_highlight_frames
         .keys()
     {
-        let x0 = chunk.x as f32 * CHUNK_WORLD_SIZE_M;
-        let x1 = (chunk.x as f32 + 1.0) * CHUNK_WORLD_SIZE_M;
-        let y0 = chunk.y as f32 * CHUNK_WORLD_SIZE_M;
-        let y1 = (chunk.y as f32 + 1.0) * CHUNK_WORLD_SIZE_M;
-        gizmos.line_2d(Vec2::new(x0, y0), Vec2::new(x1, y0), GRID_PARTICLE_UPDATED_COLOR);
-        gizmos.line_2d(Vec2::new(x1, y0), Vec2::new(x1, y1), GRID_PARTICLE_UPDATED_COLOR);
-        gizmos.line_2d(Vec2::new(x1, y1), Vec2::new(x0, y1), GRID_PARTICLE_UPDATED_COLOR);
-        gizmos.line_2d(Vec2::new(x0, y1), Vec2::new(x0, y0), GRID_PARTICLE_UPDATED_COLOR);
+        if chunk.x < min_chunk.x || chunk.x > max_chunk.x || chunk.y < min_chunk.y || chunk.y > max_chunk.y {
+            continue;
+        }
+        draw_chunk_outline(&mut gizmos, chunk, GRID_PARTICLE_UPDATED_COLOR);
     }
+
+    draw_rect_outline(
+        &mut gizmos,
+        Vec2::new(min_x, min_y),
+        Vec2::new(max_x, max_y),
+        GRID_PHYSICS_REGION_COLOR,
+    );
 
     let particle_positions = particle_world.positions();
     let particle_masses = particle_world.masses();
@@ -330,6 +370,13 @@ fn draw_object_grid_cells(gizmos: &mut Gizmos, object: &ObjectData, center: Vec2
         gizmos.line_2d(world[2], world[3], GRID_OBJECT_COLOR);
         gizmos.line_2d(world[3], world[0], GRID_OBJECT_COLOR);
     }
+}
+
+fn draw_rect_outline(gizmos: &mut Gizmos, min: Vec2, max: Vec2, color: Color) {
+    gizmos.line_2d(Vec2::new(min.x, min.y), Vec2::new(max.x, min.y), color);
+    gizmos.line_2d(Vec2::new(max.x, min.y), Vec2::new(max.x, max.y), color);
+    gizmos.line_2d(Vec2::new(max.x, max.y), Vec2::new(min.x, max.y), color);
+    gizmos.line_2d(Vec2::new(min.x, max.y), Vec2::new(min.x, min.y), color);
 }
 
 fn draw_object_pose_axes(gizmos: &mut Gizmos, center: Vec2, theta: f32) {
@@ -447,4 +494,15 @@ fn toggle_button_bg(enabled: bool) -> BackgroundColor {
     } else {
         BUTTON_BG_OFF.into()
     }
+}
+
+fn draw_chunk_outline(gizmos: &mut Gizmos, chunk: IVec2, color: Color) {
+    let x0 = chunk.x as f32 * CHUNK_WORLD_SIZE_M;
+    let x1 = (chunk.x as f32 + 1.0) * CHUNK_WORLD_SIZE_M;
+    let y0 = chunk.y as f32 * CHUNK_WORLD_SIZE_M;
+    let y1 = (chunk.y as f32 + 1.0) * CHUNK_WORLD_SIZE_M;
+    gizmos.line_2d(Vec2::new(x0, y0), Vec2::new(x1, y0), color);
+    gizmos.line_2d(Vec2::new(x1, y0), Vec2::new(x1, y1), color);
+    gizmos.line_2d(Vec2::new(x1, y1), Vec2::new(x0, y1), color);
+    gizmos.line_2d(Vec2::new(x0, y1), Vec2::new(x0, y0), color);
 }
