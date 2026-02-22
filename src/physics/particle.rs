@@ -47,6 +47,8 @@ pub const TERRAIN_LOAD_SAMPLE_INTERVAL_SUBSTEPS: u32 = 2;
 pub const TERRAIN_LOAD_STRAIN_THRESHOLD: f32 = 0.28;
 pub const TERRAIN_LOAD_BREAK_DURATION_SECONDS: f32 = 0.45;
 pub const TERRAIN_LOAD_DECAY_PER_SAMPLE: f32 = 0.8;
+const NEIGHBOR_GRID_MAX_AXIS_CELLS: i64 = 16_384;
+const NEIGHBOR_GRID_MAX_DENSE_CELLS: i64 = 8_388_608;
 pub const GRANULAR_CONTACT_FRICTION_SCALE: f32 = 2.0;
 pub const GRANULAR_GRANULAR_CONTACT_FRICTION_BOOST: f32 = 2.5;
 pub const GRANULAR_SOLID_CONTACT_FRICTION_BOOST: f32 = 1.5;
@@ -241,6 +243,7 @@ struct NeighborGrid {
     grid_size: UVec2,
     cell_starts: Vec<u32>,
     sorted_indices: Vec<usize>,
+    sparse_cells: HashMap<IVec2, Vec<usize>>,
 }
 
 impl NeighborGrid {
@@ -250,6 +253,7 @@ impl NeighborGrid {
             self.grid_size = UVec2::ZERO;
             self.cell_starts.clear();
             self.sorted_indices.clear();
+            self.sparse_cells.clear();
             return;
         }
 
@@ -263,11 +267,31 @@ impl NeighborGrid {
             max_cell.y = max_cell.y.max(cell.y);
         }
 
-        let grid_w = (max_cell.x - min_cell.x + 1).max(1) as u32;
-        let grid_h = (max_cell.y - min_cell.y + 1).max(1) as u32;
-        let cell_count = (grid_w as usize) * (grid_h as usize);
+        let grid_w_i64 = (i64::from(max_cell.x) - i64::from(min_cell.x) + 1).max(1);
+        let grid_h_i64 = (i64::from(max_cell.y) - i64::from(min_cell.y) + 1).max(1);
+        let dense_cell_count_i64 = grid_w_i64.saturating_mul(grid_h_i64);
+        let should_use_sparse = grid_w_i64 > NEIGHBOR_GRID_MAX_AXIS_CELLS
+            || grid_h_i64 > NEIGHBOR_GRID_MAX_AXIS_CELLS
+            || dense_cell_count_i64 > NEIGHBOR_GRID_MAX_DENSE_CELLS;
+        if should_use_sparse {
+            self.grid_min = IVec2::ZERO;
+            self.grid_size = UVec2::ZERO;
+            self.cell_starts.clear();
+            self.sorted_indices.clear();
+            self.sparse_cells.clear();
+            for (index, &position) in positions.iter().enumerate() {
+                let cell = particle_grid_cell(position);
+                self.sparse_cells.entry(cell).or_default().push(index);
+            }
+            return;
+        }
+
+        let grid_w = grid_w_i64 as u32;
+        let grid_h = grid_h_i64 as u32;
+        let cell_count = dense_cell_count_i64 as usize;
         self.grid_min = min_cell;
         self.grid_size = UVec2::new(grid_w, grid_h);
+        self.sparse_cells.clear();
 
         let mut counts = vec![0u32; cell_count];
         for position in positions.iter().copied() {
@@ -299,6 +323,17 @@ impl NeighborGrid {
     fn gather(&self, position: Vec2, out_neighbors: &mut Vec<usize>) {
         out_neighbors.clear();
         let center = particle_grid_cell(position);
+        if !self.sparse_cells.is_empty() {
+            for y in (center.y - 1)..=(center.y + 1) {
+                for x in (center.x - 1)..=(center.x + 1) {
+                    let Some(indices) = self.sparse_cells.get(&IVec2::new(x, y)) else {
+                        continue;
+                    };
+                    out_neighbors.extend_from_slice(indices);
+                }
+            }
+            return;
+        }
         for y in (center.y - 1)..=(center.y + 1) {
             for x in (center.x - 1)..=(center.x + 1) {
                 let Some(cell_index) = self.cell_index_of_cell(IVec2::new(x, y)) else {
@@ -1140,6 +1175,24 @@ impl ParticleWorld {
         }
     }
 
+    pub fn promote_particles_in_chunk_radius(&mut self, center_chunk: IVec2, radius_chunks: i32) {
+        let radius_chunks = radius_chunks.max(0);
+        for i in 0..self.particle_count() {
+            let chunk = world_pos_to_chunk(self.pos[i]);
+            if is_chunk_outside_radius(chunk, center_chunk, radius_chunks) {
+                continue;
+            }
+            if self.activity_state[i] == ParticleActivityState::Active {
+                continue;
+            }
+            self.activity_state[i] = ParticleActivityState::Active;
+            self.sleep_candidate_frames[i] = 0;
+            self.active_hold_frames[i] = self.active_hold_frames[i].max(ACTIVE_MIN_FRAMES);
+            self.sleep_lock_frames[i] = 0;
+            self.pending_wake[i] = false;
+        }
+    }
+
     pub fn spawn_water_particles_along_segment(
         &mut self,
         from: Vec2,
@@ -1524,8 +1577,8 @@ impl ParticleWorld {
                 self.prev_pos[i] = self.pos[i];
                 if !self.is_active_particle(i) {
                     if self.is_halo_particle(i) {
-                        // Halo particles stay frozen but remain in neighbor queries.
-                        self.vel[i] = Vec2::ZERO;
+                        // Halo particles stay frozen but keep their velocity state so that
+                        // reactivation can resume with preserved momentum.
                         continue;
                     }
                     // Keep ballistic motion outside active region to avoid artificial "walls"
@@ -3015,20 +3068,6 @@ impl ParticleWorld {
         self.is_active_particle(index) || self.is_halo_particle(index)
     }
 
-    fn is_chunk_in_active_or_halo_region(&self, chunk: IVec2) -> bool {
-        let (Some(chunk_min), Some(chunk_max)) = (self.active_chunk_min, self.active_chunk_max)
-        else {
-            return false;
-        };
-        let halo = self.active_halo_chunks.max(0);
-        let expanded_min = chunk_min - IVec2::splat(halo);
-        let expanded_max = chunk_max + IVec2::splat(halo);
-        chunk.x >= expanded_min.x
-            && chunk.x <= expanded_max.x
-            && chunk.y >= expanded_min.y
-            && chunk.y <= expanded_max.y
-    }
-
     fn request_wake(&mut self, index: usize) {
         if index >= self.particle_count() {
             return;
@@ -3418,8 +3457,8 @@ impl ParticleWorld {
         let Some(center_chunk) = self.far_field_center_chunk else {
             return;
         };
-        let release_radius = self.far_field_release_radius_chunks.max(0);
-        let live_radius = release_radius + self.active_halo_chunks.max(0);
+        let active_radius = self.far_field_release_radius_chunks.max(0);
+        let live_radius = active_radius + self.active_halo_chunks.max(0);
         let freeze_radius = self.far_field_freeze_radius_chunks.max(0);
         if self.particle_count() == 0 {
             return;
@@ -3433,21 +3472,18 @@ impl ParticleWorld {
                 continue;
             }
             let chunk = world_pos_to_chunk(self.pos[i]);
-            if self.is_chunk_in_active_or_halo_region(chunk) {
-                // Keep particles that belong to the current active+halo simulation window.
-                continue;
-            }
-            if !is_chunk_outside_radius(chunk, center_chunk, live_radius) {
+            if !is_chunk_outside_radius(chunk, center_chunk, active_radius) {
                 continue;
             }
             let prev_chunk = world_pos_to_chunk(self.prev_pos[i]);
-            let crossed_outside_live =
-                !is_chunk_outside_radius(prev_chunk, center_chunk, live_radius);
+            let crossed_active_boundary =
+                !is_chunk_outside_radius(prev_chunk, center_chunk, active_radius);
+            let outside_live = is_chunk_outside_radius(chunk, center_chunk, live_radius);
             let outside_freeze = is_chunk_outside_radius(chunk, center_chunk, freeze_radius);
 
-            if crossed_outside_live && !outside_freeze {
+            if crossed_active_boundary && !outside_freeze {
                 let (edge, boundary_position, grid_segment) =
-                    edge_sample_for_chunk(chunk, self.pos[i], center_chunk);
+                    edge_sample_for_active_boundary(chunk, self.pos[i], center_chunk, active_radius);
                 self.deferred_boundary_particles
                     .entry(DeferredEdgeKey {
                         chunk,
@@ -3461,7 +3497,9 @@ impl ParticleWorld {
                         mass: self.mass[i],
                         material: self.material[i],
                     });
-            } else {
+                keep[i] = false;
+                removed_count += 1;
+            } else if outside_live && outside_freeze {
                 self.deferred_inactive_chunk_particles
                     .entry(chunk)
                     .or_default()
@@ -3471,9 +3509,9 @@ impl ParticleWorld {
                         mass: self.mass[i],
                         material: self.material[i],
                     });
+                keep[i] = false;
+                removed_count += 1;
             }
-            keep[i] = false;
-            removed_count += 1;
         }
 
         if removed_count > 0 {
@@ -3485,8 +3523,7 @@ impl ParticleWorld {
         let Some(center_chunk) = self.far_field_center_chunk else {
             return;
         };
-        let release_radius = self.far_field_release_radius_chunks.max(0);
-        let live_radius = release_radius + self.active_halo_chunks.max(0);
+        let active_radius = self.far_field_release_radius_chunks.max(0);
         let mut budget = self.far_field_release_particles_per_frame;
         let clearance_radius = self.far_field_release_clearance_radius_m.max(0.0);
         let clearance2 = clearance_radius * clearance_radius;
@@ -3502,7 +3539,7 @@ impl ParticleWorld {
             .deferred_inactive_chunk_particles
             .keys()
             .copied()
-            .filter(|&chunk| !is_chunk_outside_radius(chunk, center_chunk, live_radius))
+            .filter(|&chunk| !is_chunk_outside_radius(chunk, center_chunk, active_radius))
             .collect();
         chunk_keys_to_release.sort_by_key(|chunk| (chunk.y, chunk.x));
         for chunk in chunk_keys_to_release {
@@ -3545,7 +3582,7 @@ impl ParticleWorld {
             .deferred_boundary_particles
             .keys()
             .copied()
-            .filter(|key| !is_chunk_outside_radius(key.chunk, center_chunk, live_radius))
+            .filter(|key| !is_chunk_outside_radius(key.chunk, center_chunk, active_radius))
             .collect();
         keys_to_release.sort_by_key(|key| {
             (
@@ -4271,38 +4308,55 @@ fn edge_sort_key(edge: ChunkEdge) -> i32 {
     }
 }
 
-fn edge_sample_for_chunk(
+fn edge_sample_for_active_boundary(
     chunk: IVec2,
     position: Vec2,
     center_chunk: IVec2,
+    active_radius: i32,
 ) -> (ChunkEdge, Vec2, i32) {
-    let x0 = chunk.x as f32 * (CHUNK_SIZE_I32 as f32 * CELL_SIZE_M);
-    let x1 = (chunk.x + 1) as f32 * (CHUNK_SIZE_I32 as f32 * CELL_SIZE_M);
-    let y0 = chunk.y as f32 * (CHUNK_SIZE_I32 as f32 * CELL_SIZE_M);
-    let y1 = (chunk.y + 1) as f32 * (CHUNK_SIZE_I32 as f32 * CELL_SIZE_M);
+    let active_radius = active_radius.max(0);
+    let chunk_world_size = CHUNK_SIZE_I32 as f32 * CELL_SIZE_M;
+    let boundary_min_chunk = center_chunk - IVec2::splat(active_radius);
+    let boundary_max_chunk = center_chunk + IVec2::splat(active_radius);
+
+    let side_min_x = boundary_min_chunk.x as f32 * chunk_world_size;
+    let side_max_x = (boundary_max_chunk.x + 1) as f32 * chunk_world_size;
+    let side_min_y = boundary_min_chunk.y as f32 * chunk_world_size;
+    let side_max_y = (boundary_max_chunk.y + 1) as f32 * chunk_world_size;
+
     let inset = FAR_FIELD_EDGE_INSET_M.max(0.0);
-    let min_x = x0 + inset;
-    let max_x = x1 - inset;
-    let min_y = y0 + inset;
-    let max_y = y1 - inset;
+    let min_x = side_min_x + inset;
+    let max_x = side_max_x - inset;
+    let min_y = side_min_y + inset;
+    let max_y = side_max_y - inset;
 
     let dx = chunk.x - center_chunk.x;
     let dy = chunk.y - center_chunk.y;
     let (edge, sample_pos) = if dx.abs() >= dy.abs() {
         if dx >= 0 {
-            (ChunkEdge::West, Vec2::new(min_x, position.y.clamp(min_y, max_y)))
+            let boundary_x = side_max_x + inset;
+            (
+                ChunkEdge::West,
+                Vec2::new(boundary_x, position.y.clamp(min_y, max_y)),
+            )
         } else {
-            (ChunkEdge::East, Vec2::new(max_x, position.y.clamp(min_y, max_y)))
+            let boundary_x = side_min_x - inset;
+            (
+                ChunkEdge::East,
+                Vec2::new(boundary_x, position.y.clamp(min_y, max_y)),
+            )
         }
     } else if dy >= 0 {
+        let boundary_y = side_max_y + inset;
         (
             ChunkEdge::South,
-            Vec2::new(position.x.clamp(min_x, max_x), min_y),
+            Vec2::new(position.x.clamp(min_x, max_x), boundary_y),
         )
     } else {
+        let boundary_y = side_min_y - inset;
         (
             ChunkEdge::North,
-            Vec2::new(position.x.clamp(min_x, max_x), max_y),
+            Vec2::new(position.x.clamp(min_x, max_x), boundary_y),
         )
     };
     let grid_cell = particle_grid_cell(sample_pos);

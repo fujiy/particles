@@ -7,7 +7,7 @@ use crate::physics::particle::{
 };
 use crate::physics::state::{PhysicsActiveRegion, PhysicsRegionSettings, SimUpdateSet};
 use crate::physics::terrain::{
-    CELL_SIZE_M, CHUNK_WORLD_SIZE_M, TerrainWorld,
+    CELL_SIZE_M, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainWorld, world_to_cell,
 };
 use crate::render::TerrainRenderDiagnostics;
 
@@ -459,6 +459,8 @@ fn object_pose_for_overlay(
 fn draw_particle_overlay(
     mut gizmos: Gizmos,
     overlay_state: Res<ParticleOverlayState>,
+    active_region: Res<PhysicsActiveRegion>,
+    region_settings: Res<PhysicsRegionSettings>,
     terrain_world: Res<TerrainWorld>,
     particle_world: Res<ParticleWorld>,
     object_world: Res<ObjectWorld>,
@@ -468,8 +470,33 @@ fn draw_particle_overlay(
     }
 
     let water_overlay_radius = nominal_particle_draw_radius_m();
+    let terrain_overlay_chunk_bounds = active_region
+        .chunk_min
+        .zip(active_region.chunk_max)
+        .map(|(min_chunk, max_chunk)| {
+            let halo_chunks = region_settings.active_halo_chunks.max(0);
+            (
+                min_chunk - IVec2::splat(halo_chunks),
+                max_chunk + IVec2::splat(halo_chunks),
+            )
+        });
 
     for pos in terrain_world.static_particle_positions() {
+        let Some((overlay_min_chunk, overlay_max_chunk)) = terrain_overlay_chunk_bounds else {
+            continue;
+        };
+        let cell = world_to_cell(*pos);
+        let chunk = IVec2::new(
+            cell.x.div_euclid(CHUNK_SIZE_I32),
+            cell.y.div_euclid(CHUNK_SIZE_I32),
+        );
+        if chunk.x < overlay_min_chunk.x
+            || chunk.x > overlay_max_chunk.x
+            || chunk.y < overlay_min_chunk.y
+            || chunk.y > overlay_max_chunk.y
+        {
+            continue;
+        }
         gizmos
             .circle_2d(
                 *pos,

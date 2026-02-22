@@ -128,6 +128,7 @@ fn step_water_particles(
         let halo_chunks = region_settings.active_halo_chunks.max(0);
         particle_world.set_active_halo_chunks(halo_chunks);
         let live_radius = release_radius + halo_chunks;
+        particle_world.promote_particles_in_chunk_radius(center_chunk, live_radius);
         let freeze_radius = (live_radius + region_settings.far_field_freeze_margin_chunks.max(0))
             .max(live_radius + 1);
         particle_world.configure_far_field_queue(
@@ -154,8 +155,8 @@ fn step_water_particles(
                 cell.x.div_euclid(CHUNK_SIZE_I32),
                 cell.y.div_euclid(CHUNK_SIZE_I32),
             );
-            if (chunk.x - center_chunk.x).abs() > release_radius
-                || (chunk.y - center_chunk.y).abs() > release_radius
+            if (chunk.x - center_chunk.x).abs() > live_radius
+                || (chunk.y - center_chunk.y).abs() > live_radius
             {
                 continue;
             }
