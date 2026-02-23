@@ -9,19 +9,41 @@ pub(super) fn setup_overlay_ui(mut commands: Commands) {
             Node {
                 position_type: PositionType::Absolute,
                 right: px(12.0),
-                bottom: px(GRID_BUTTON_BOTTOM_PX),
+                bottom: px(TILE_BUTTON_BOTTOM_PX),
                 padding: UiRect::axes(px(10.0), px(6.0)),
                 ..default()
             },
             BackgroundColor(BUTTON_BG_OFF),
-            GridOverlayToggleButton,
+            TileOverlayToggleButton,
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("Grid Overlay: OFF"),
+                Text::new("Tile Overlay: OFF"),
                 TextFont::from_font_size(14.0),
                 TextColor(Color::WHITE),
-                GridOverlayToggleButtonLabel,
+                TileOverlayToggleButtonLabel,
+            ));
+        });
+
+    commands
+        .spawn((
+            Button,
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(12.0),
+                bottom: px(PHYSICS_AREA_BUTTON_BOTTOM_PX),
+                padding: UiRect::axes(px(10.0), px(6.0)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG_OFF),
+            PhysicsAreaOverlayToggleButton,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("Physics Area Overlay: OFF"),
+                TextFont::from_font_size(14.0),
+                TextColor(Color::WHITE),
+                PhysicsAreaOverlayToggleButtonLabel,
             ));
         });
 
@@ -57,7 +79,7 @@ pub(super) fn setup_overlay_ui(mut commands: Commands) {
             top: px(12.0),
             ..default()
         },
-        GridOverlayInfoText,
+        OverlayInfoText,
     ));
 }
 
@@ -84,12 +106,12 @@ pub(super) fn handle_particle_overlay_button(
     }
 }
 
-pub(super) fn handle_grid_overlay_button(
+pub(super) fn handle_tile_overlay_button(
     mut interactions: Query<
         (&Interaction, &mut BackgroundColor),
-        (Changed<Interaction>, With<GridOverlayToggleButton>),
+        (Changed<Interaction>, With<TileOverlayToggleButton>),
     >,
-    mut overlay_state: ResMut<GridOverlayState>,
+    mut overlay_state: ResMut<TileOverlayState>,
 ) {
     for (interaction, mut bg) in &mut interactions {
         match *interaction {
@@ -107,29 +129,83 @@ pub(super) fn handle_grid_overlay_button(
     }
 }
 
-pub(super) fn update_grid_overlay_button_label(
-    overlay_state: Res<GridOverlayState>,
+pub(super) fn handle_physics_area_overlay_button(
+    mut interactions: Query<
+        (&Interaction, &mut BackgroundColor),
+        (Changed<Interaction>, With<PhysicsAreaOverlayToggleButton>),
+    >,
+    mut overlay_state: ResMut<PhysicsAreaOverlayState>,
+) {
+    for (interaction, mut bg) in &mut interactions {
+        match *interaction {
+            Interaction::Pressed => {
+                overlay_state.enabled = !overlay_state.enabled;
+                *bg = BUTTON_BG_PRESS.into();
+            }
+            Interaction::Hovered => {
+                *bg = BUTTON_BG_HOVER.into();
+            }
+            Interaction::None => {
+                *bg = toggle_button_bg(overlay_state.enabled);
+            }
+        }
+    }
+}
+
+pub(super) fn update_tile_overlay_button_label(
+    overlay_state: Res<TileOverlayState>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
-    mut labels: Query<&mut Text, With<GridOverlayToggleButtonLabel>>,
+    mut labels: Query<&mut Text, With<TileOverlayToggleButtonLabel>>,
 ) {
     if !overlay_state.is_changed() && !render_diagnostics.is_changed() {
         return;
     }
 
     for mut label in &mut labels {
+        let lod_tile_count = render_diagnostics
+            .visible_tiles
+            .iter()
+            .filter(|tile| tile.span_chunks > 1)
+            .count();
         label.0 = if overlay_state.enabled {
             format!(
-                "Grid Overlay: ON (T:{} P:{} L:{})",
+                "Tile Overlay: ON (Tiles:{} LOD:{})",
+                render_diagnostics.visible_tiles.len(),
+                lod_tile_count,
+            )
+        } else {
+            "Tile Overlay: OFF".to_string()
+        };
+    }
+}
+
+pub(super) fn update_physics_area_overlay_button_label(
+    overlay_state: Res<PhysicsAreaOverlayState>,
+    render_diagnostics: Res<TerrainRenderDiagnostics>,
+    active_region: Res<PhysicsActiveRegion>,
+    mut labels: Query<&mut Text, With<PhysicsAreaOverlayToggleButtonLabel>>,
+) {
+    if !overlay_state.is_changed()
+        && !render_diagnostics.is_changed()
+        && !active_region.is_changed()
+    {
+        return;
+    }
+
+    for mut label in &mut labels {
+        label.0 = if overlay_state.enabled {
+            format!(
+                "Physics Area Overlay: ON (A:{} T:{} P:{})",
+                active_region.active_chunks.len(),
                 render_diagnostics
                     .terrain_updated_chunk_highlight_frames
                     .len(),
                 render_diagnostics
                     .particle_updated_chunk_highlight_frames
                     .len(),
-                render_diagnostics.lod_visible_tiles.len(),
             )
         } else {
-            "Grid Overlay: OFF".to_string()
+            "Physics Area Overlay: OFF".to_string()
         };
     }
 }
@@ -151,20 +227,41 @@ pub(super) fn update_particle_overlay_button_label(
     }
 }
 
-pub(super) fn update_grid_overlay_info_text(
-    overlay_state: Res<GridOverlayState>,
+pub(super) fn update_overlay_info_text(
+    tile_overlay_state: Res<TileOverlayState>,
+    physics_overlay_state: Res<PhysicsAreaOverlayState>,
     active_region: Res<PhysicsActiveRegion>,
-    mut labels: Query<&mut Text, With<GridOverlayInfoText>>,
+    render_diagnostics: Res<TerrainRenderDiagnostics>,
+    mut labels: Query<&mut Text, With<OverlayInfoText>>,
 ) {
-    if !overlay_state.is_changed() && !active_region.is_changed() {
+    if !tile_overlay_state.is_changed()
+        && !physics_overlay_state.is_changed()
+        && !active_region.is_changed()
+        && !render_diagnostics.is_changed()
+    {
         return;
     }
     for mut label in &mut labels {
-        label.0 = if overlay_state.enabled {
-            format!("Physics Chunks: {}", active_region.active_chunks.len())
-        } else {
-            String::new()
-        };
+        let mut lines = Vec::new();
+        if physics_overlay_state.enabled {
+            lines.push(format!(
+                "Physics Chunks: {}",
+                active_region.active_chunks.len()
+            ));
+        }
+        if tile_overlay_state.enabled {
+            let lod_tile_count = render_diagnostics
+                .visible_tiles
+                .iter()
+                .filter(|tile| tile.span_chunks > 1)
+                .count();
+            lines.push(format!(
+                "Render Tiles: {} (LOD: {})",
+                render_diagnostics.visible_tiles.len(),
+                lod_tile_count
+            ));
+        }
+        label.0 = lines.join("\n");
     }
 }
 fn toggle_button_bg(enabled: bool) -> BackgroundColor {

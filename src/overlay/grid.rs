@@ -2,31 +2,36 @@ use bevy::prelude::*;
 
 use super::*;
 
-pub(super) fn draw_grid_overlay(
+pub(super) fn draw_tile_overlay(
     mut gizmos: Gizmos,
-    overlay_state: Res<GridOverlayState>,
+    overlay_state: Res<TileOverlayState>,
+    render_diagnostics: Res<TerrainRenderDiagnostics>,
+) {
+    if !overlay_state.enabled {
+        return;
+    }
+
+    for tile in &render_diagnostics.visible_tiles {
+        let color = if tile.span_chunks <= 1 {
+            GRID_FULL_TILE_COLOR
+        } else {
+            GRID_LOD_CHUNK_COLOR
+        };
+        draw_chunk_rect_outline(&mut gizmos, tile.origin_chunk, tile.span_chunks, color);
+    }
+}
+
+pub(super) fn draw_physics_area_overlay(
+    mut gizmos: Gizmos,
+    overlay_state: Res<PhysicsAreaOverlayState>,
     active_region: Res<PhysicsActiveRegion>,
     region_settings: Res<PhysicsRegionSettings>,
-    terrain_world: Res<TerrainWorld>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     object_world: Res<ObjectWorld>,
     particle_world: Res<ParticleWorld>,
 ) {
     if !overlay_state.enabled {
         return;
-    }
-
-    let loaded_chunks = terrain_world.loaded_chunk_coords();
-    for &chunk in &loaded_chunks {
-        draw_chunk_outline(&mut gizmos, chunk, GRID_CHUNK_BOUNDARY_COLOR);
-    }
-    for tile in &render_diagnostics.lod_visible_tiles {
-        draw_chunk_rect_outline(
-            &mut gizmos,
-            tile.origin_chunk,
-            tile.span_chunks,
-            GRID_LOD_CHUNK_COLOR,
-        );
     }
 
     let (Some(min_chunk), Some(max_chunk)) = (active_region.chunk_min, active_region.chunk_max)
