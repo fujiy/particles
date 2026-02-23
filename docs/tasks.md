@@ -113,9 +113,65 @@
 
 ## Design Feedback (from Impl sessions)
 
-- (No open feedback items)
+- 並列切替仕様の明文化が必要:
+  - `SimulationParallelSettings.enabled` は active region 有効時でも尊重し、強制逐次化しない。
+  - 並列経路でも `active/halo` 判定を逐次経路と同等に適用する。
+- LOD粒子描画仕様の明文化が必要:
+  - 退避（deferred）粒子は、live粒子が消えた後も Tile 合成経路で可視化を維持する。
+  - LOD粒子は `1px` 固定ではなく、粒子半径をタイル解像度へ投影した半径で描画する。
 
 ## Done
+
+- [x] [ARCH-01] `material` / `generation` モジュール再編
+  - 背景:
+    - `material_*` と `generation` の責務を分離し、パラメータ/乱数/ルールの見通しを改善したい。
+  - スコープ:
+    - `material_*` を `material/` サブモジュールへ移動し、`generation/` を `params/random/rules` に分割する。
+  - Subtasks:
+    - [x] `material` を `material/mod.rs`, `material/types.rs`, `material/defaults.rs` 構成へ移行する。
+    - [x] `generation` を `generation/mod.rs`, `generation/params.rs`, `generation/random.rs`, `generation/rules.rs` 構成へ移行する。
+    - [x] 生成パラメータに説明コメントを付与する。
+    - [x] 公開API（`physics::material::*`, `physics::generation::*`）互換を `pub use` で維持する。
+  - 完了条件:
+    - 既存呼び出し側を壊さず、モジュール責務が分離される。
+
+- [x] [WGEN-04] 地形起伏の2層化（大域+小域）
+  - 背景:
+    - 大域起伏を増やすと小域ディテールが相対的に不足するため、独立調整できる構成が必要。
+  - スコープ:
+    - 地表高さを macro/detail 2層ノイズ合成に変更し、土層厚みのランダム性も維持する。
+  - Subtasks:
+    - [x] `HEIGHT_NOISE_DETAIL_*` パラメータを追加し、詳細凹凸を独立調整可能にする。
+    - [x] surface 高さ評価を macro/detail の合成へ変更する。
+    - [x] 既存の確率場サンプラ（`sample_material_probabilities`）でも同一surface評価を用いる。
+  - 完了条件:
+    - 大域起伏と小域起伏を別パラメータで調整できる。
+
+- [x] [REND-02] LOD Tile粒子の可視化強化
+  - 背景:
+    - 退避粒子がLODで消える、粒子が極小/薄色で視認しにくい問題があった。
+  - スコープ:
+    - Tile合成へ deferred 粒子を取り込み、LOD粒子の見た目（サイズ/色）を改善する。
+  - Subtasks:
+    - [x] `ParticleRenderChunkCache` に deferred 粒子キャッシュを追加する。
+    - [x] LOD tile 合成で live + deferred 粒子を描画する。
+    - [x] 標準LODが粗い状態でも、等倍タイル上で deferred 粒子可視化を維持する。
+    - [x] LOD粒子描画を半径投影ディスク描画へ変更する（`1px` 固定を廃止）。
+    - [x] LOD粒子色の濃度を引き上げる。
+  - 完了条件:
+    - 退避粒子がLODで消えず、粒子が視認可能なサイズ/濃さで表示される。
+
+- [x] [PHYS-02] Parallelトグルの実効化
+  - 背景:
+    - UIの `Parallel` ボタンON/OFFで time profile が変わらず、設定が反映されていない疑いがあった。
+  - スコープ:
+    - active region 有効時の強制逐次化を除去し、並列経路でも領域判定を維持する。
+  - Subtasks:
+    - [x] `liquid` ソルバの強制 `parallel_enabled=false` を削除する。
+    - [x] 並列経路に `active/halo` 判定を導入し、逐次経路と挙動整合を取る。
+    - [x] 並列閾値を定数ではなく `solver_params.parallel_particle_threshold` 参照へ統一する。
+  - 完了条件:
+    - `Parallel` ボタンの切替が実際の並列経路選択に反映される。
 
 - [x] Design Feedback反映: 物理演算領域（active/halo/inactive）、水境界、近傍グリッド安全策、Tile/LOD描画責務、連続LOD確率場、統計ブレンド規則を `design.md` に統合
 - [x] [TST-01] 物理統合テスト artifact 可視化出力
