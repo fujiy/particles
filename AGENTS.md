@@ -43,6 +43,7 @@
 
 ## Commit Command Rule
 - When the user says `commit`, run `git commit` with an appropriate commit message.
+- When the user says `commit`, include all currently accumulated uncommitted changes, and split them into as many coherent work-unit commits as practical.
 - Commits are basically performed in `Impl session`.
 - Commit unit must be "one intent" (one design decision or one implementation outcome).
 - Do not mix unrelated changes in the same commit.
