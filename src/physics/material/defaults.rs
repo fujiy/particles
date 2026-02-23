@@ -1,6 +1,6 @@
 use crate::physics::world::constants::CELL_SIZE_M;
 
-use super::material_types::{
+use super::types::{
     MaterialForm, MaterialKind, MaterialParams, MaterialProperties, ParticleMaterial,
     ParticlePhaseProperties, SolidBreakProperties, TerrainMaterial,
 };

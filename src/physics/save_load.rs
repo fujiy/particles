@@ -337,7 +337,6 @@ pub fn load_from_path(
             terrain.ensure_chunk_loaded(IVec2::new(chunk.chunk[0], chunk.chunk[1]));
         }
     }
-    terrain.clear_loaded_cells();
     for cell in &snapshot.terrain_cells {
         let cell_coord = IVec2::new(cell.cell[0], cell.cell[1]);
         let _ = terrain.set_cell(
