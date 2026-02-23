@@ -8,11 +8,13 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
 use super::generation::TERRAIN_GENERATOR_VERSION;
-use super::material::{ParticleMaterial, TerrainMaterial};
-use super::object::{ObjectSnapshotData, ObjectWorld};
-use super::particle::{ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M};
+use super::material::{
+    DEFAULT_MATERIAL_PARAMS, ParticleMaterial, TerrainMaterial, terrain_boundary_radius_m,
+};
 use super::state::SimulationState;
-use super::terrain::{CHUNK_SIZE_I32, TerrainCell, TerrainWorld};
+use super::world::object::{ObjectSnapshotData, ObjectWorld};
+use super::world::particle::ParticleWorld;
+use super::world::terrain::{CHUNK_SIZE_I32, TerrainCell, TerrainWorld};
 
 pub const SAVE_VERSION: u32 = 1;
 pub const DEFAULT_QUICK_SAVE_SLOT: &str = "quick_save";
@@ -346,7 +348,7 @@ pub fn load_from_path(
             },
         );
     }
-    terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+    terrain.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
 
     let positions = snapshot
         .particles
@@ -453,9 +455,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::physics::object::ObjectWorld;
-    use crate::physics::particle::ParticleWorld;
-    use crate::physics::terrain::generated_cell_for_world;
+    use crate::physics::world::object::ObjectWorld;
+    use crate::physics::world::particle::ParticleWorld;
+    use crate::physics::world::terrain::generated_cell_for_world;
 
     #[test]
     fn load_uses_chunk_regeneration_when_terrain_cells_are_empty() {

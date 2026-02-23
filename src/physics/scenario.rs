@@ -6,13 +6,16 @@ use bevy::prelude::*;
 use image::{ColorType, ImageFormat};
 use serde::Serialize;
 
-use super::material::{ParticleMaterial, TerrainMaterial};
-use super::object::{
+use super::material::{
+    DEFAULT_MATERIAL_PARAMS, ParticleMaterial, TerrainMaterial, terrain_boundary_radius_m,
+};
+use super::solver::params_defaults::DEFAULT_SOLVER_PARAMS;
+use super::world::object::{
     OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectPhysicsField, ObjectWorld,
 };
-use super::particle::{FIXED_DT, ParticleActivityState, ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M};
-use super::terrain::world_to_cell;
-use super::terrain::{
+use super::world::particle::{ParticleActivityState, ParticleWorld};
+use super::world::terrain::world_to_cell;
+use super::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
     WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };
@@ -433,7 +436,7 @@ pub fn apply_scenario_spec(
             TerrainCell::solid(fill.material),
         );
     }
-    terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+    terrain.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
 
     particles.restore_from_snapshot(Vec::new(), Vec::new(), Vec::new())?;
 
@@ -524,10 +527,11 @@ pub fn run_scenario_and_write_artifacts(spec: &ScenarioSpec) -> Result<ScenarioR
 
     for _ in 0..spec.step_count {
         objects.update_physics_field(particles.positions(), particles.masses(), &mut object_field);
-        terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+        terrain.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
         particles.step_if_running(&terrain, &object_field, &mut objects, true);
         if particles.apply_pending_terrain_fractures(&mut terrain, &mut objects) {
-            terrain.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
+            terrain
+                .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
         }
     }
 
@@ -748,7 +752,8 @@ fn evaluate_assertions_with_context(
         active: true,
     });
     if let Some(surface) = spec.water_surface_assertion {
-        let active_after_steps = (surface.active_after_seconds / FIXED_DT).ceil() as usize;
+        let active_after_steps =
+            (surface.active_after_seconds / DEFAULT_SOLVER_PARAMS.fixed_dt).ceil() as usize;
         let active = step_count >= active_after_steps;
         let water_cell_count = initial_water_cell_count(spec).max(1);
         let basin_width = (surface.basin_max_x - surface.basin_min_x + 1).max(1) as usize;

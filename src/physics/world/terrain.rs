@@ -1,26 +1,18 @@
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
-use super::generation;
+use crate::physics::generation;
 use bevy::prelude::*;
 
-pub use super::generation::{
+pub use super::constants::{
+    CELL_SIZE_M, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, DEFAULT_SOLID_HP,
+    TERRAIN_SDF_SAMPLES_PER_CELL, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
+    WORLD_MIN_CHUNK_Y,
+};
+pub use crate::physics::generation::{
     BASE_SURFACE_Y, HEIGHT_NOISE_AMP_CELLS, HEIGHT_NOISE_FREQ, SOIL_DEPTH_CELLS,
     TERRAIN_GENERATOR_VERSION, WORLD_SEED,
 };
-pub use super::material::TerrainMaterial;
-
-pub const CELL_SIZE_M: f32 = 0.25;
-pub const CHUNK_SIZE: usize = 16;
-pub const CHUNK_SIZE_I32: i32 = CHUNK_SIZE as i32;
-pub const CELL_PIXEL_SIZE: u32 = 8;
-pub const CHUNK_PIXEL_SIZE: u32 = (CHUNK_SIZE as u32) * CELL_PIXEL_SIZE;
-pub const CHUNK_WORLD_SIZE_M: f32 = (CHUNK_SIZE as f32) * CELL_SIZE_M;
-pub const DEFAULT_SOLID_HP: u16 = 1_000;
-pub const WORLD_MIN_CHUNK_X: i32 = -2;
-pub const WORLD_MAX_CHUNK_X: i32 = 1;
-pub const WORLD_MIN_CHUNK_Y: i32 = -2;
-pub const WORLD_MAX_CHUNK_Y: i32 = 1;
-pub const TERRAIN_SDF_SAMPLES_PER_CELL: i32 = 2;
+pub use crate::physics::material::TerrainMaterial;
 const SDF_INF: f32 = 1.0e9;
 const SDF_DIAGONAL_COST: f32 = std::f32::consts::SQRT_2;
 

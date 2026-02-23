@@ -3,22 +3,25 @@ use std::collections::{HashMap, HashSet};
 use bevy::log::tracing;
 use bevy::prelude::*;
 
-use super::connectivity::connected_components_4;
 use super::terrain::{
     CELL_SIZE_M, CHUNK_WORLD_SIZE_M, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
     WORLD_MIN_CHUNK_Y, world_to_cell,
 };
+use crate::physics::connectivity::connected_components_4;
+use crate::physics::solver::params_defaults::DEFAULT_SOLVER_PARAMS;
+
+pub const OBJECT_SHAPE_STIFFNESS_ALPHA: f32 = DEFAULT_SOLVER_PARAMS.object_shape_stiffness_alpha;
+pub const OBJECT_SHAPE_ITERS: usize = DEFAULT_SOLVER_PARAMS.object_shape_iters;
+pub const OBJECT_LOCAL_SDF_SAMPLES_PER_CELL: i32 =
+    DEFAULT_SOLVER_PARAMS.object_local_sdf_samples_per_cell;
+pub const OBJECT_PHYSICS_SDF_CELL_SIZE_M: f32 = DEFAULT_SOLVER_PARAMS.object_physics_sdf_cell_size_m;
+pub const OBJECT_BROADPHASE_CELL_SIZE_M: f32 = DEFAULT_SOLVER_PARAMS.object_broadphase_cell_size_m;
+pub const OBJECT_SDF_MAX_DISTANCE_M: f32 = DEFAULT_SOLVER_PARAMS.object_sdf_max_distance_m;
+pub const OBJECT_SDF_MAX_SPLATS_PER_CELL: usize = DEFAULT_SOLVER_PARAMS.object_sdf_max_splats_per_cell;
+pub const OBJECT_SDF_MAX_CONTACTS_PER_QUERY: usize =
+    DEFAULT_SOLVER_PARAMS.object_sdf_max_contacts_per_query;
 
 pub type ObjectId = u32;
-
-pub const OBJECT_SHAPE_STIFFNESS_ALPHA: f32 = 0.92;
-pub const OBJECT_SHAPE_ITERS: usize = 3;
-pub const OBJECT_LOCAL_SDF_SAMPLES_PER_CELL: i32 = 2;
-pub const OBJECT_PHYSICS_SDF_CELL_SIZE_M: f32 = CELL_SIZE_M * 0.5;
-pub const OBJECT_BROADPHASE_CELL_SIZE_M: f32 = CELL_SIZE_M * 4.0;
-pub const OBJECT_SDF_MAX_DISTANCE_M: f32 = CELL_SIZE_M * 2.5;
-pub const OBJECT_SDF_MAX_SPLATS_PER_CELL: usize = 4;
-pub const OBJECT_SDF_MAX_CONTACTS_PER_QUERY: usize = 4;
 
 const SDF_INF: f32 = 1.0e9;
 const SDF_DIAGONAL_COST: f32 = std::f32::consts::SQRT_2;
