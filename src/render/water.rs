@@ -15,6 +15,7 @@ pub fn sync_water_dots_to_render(
 ) {
     let _span = tracing::info_span!("render::sync_water_dots_to_render").entered();
     let loaded_chunks = terrain.loaded_chunk_coords();
+    let has_any_water = !particle_chunk_cache.water_by_chunk.is_empty();
     {
         let _span = tracing::info_span!("render::water_chunk_sprite_maintenance").entered();
         let stale_chunks: Vec<_> = water_state
@@ -54,10 +55,25 @@ pub fn sync_water_dots_to_render(
             );
             created_chunks = true;
         }
+        if !has_any_water {
+            if water_state.had_any_water {
+                let _span = tracing::info_span!("render::water_clear_when_empty").entered();
+                let blank = vec![0_u8; (CHUNK_PIXEL_SIZE * CHUNK_PIXEL_SIZE * 4) as usize];
+                for entry in water_state.chunk_sprites.values() {
+                    if let Some(image) = images.get_mut(&entry.image) {
+                        image.data = Some(blank.clone());
+                    }
+                }
+                water_state.had_any_water = false;
+            }
+            return;
+        }
+
         if !(created_chunks || particle_chunk_cache.is_changed() || terrain.is_changed()) {
             return;
         }
     }
+    water_state.had_any_water = true;
 
     let draw_radius = nominal_particle_draw_radius_m();
     let draw_radius_px = (draw_radius * WATER_DOT_SCALE).ceil() as i32;

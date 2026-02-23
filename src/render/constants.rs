@@ -15,6 +15,6 @@ pub const OBJECT_RENDER_Z: f32 = 7.0;
 pub const OBJECT_PADDING_PX: u32 = 2;
 
 pub const LOD_RENDER_Z: f32 = -0.5;
-pub const LOD_LEVEL_RESOLUTION_DIV: i32 = 4;
-pub const LOD_LEVEL_DISTANCE_STEP_CHUNKS: i32 = 6;
+pub const LOD_LEVEL_RESOLUTION_DIV: i32 = 2;
 pub const LOD_PRECOMPUTED_LEVELS: u32 = 8;
+pub const RENDER_TILE_EVICT_GRACE_FRAMES: u16 = 12;

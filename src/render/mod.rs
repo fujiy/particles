@@ -4,50 +4,88 @@ use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
-use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, particle_properties};
-use crate::physics::state::{SimUpdateSet, TerrainStreamingSettings};
+use crate::physics::material::{
+    DEFAULT_MATERIAL_PARAMS, MaterialParams, particle_properties, terrain_boundary_radius_m,
+};
+use crate::physics::state::SimUpdateSet;
 use crate::physics::world::object::{ObjectData, ObjectId, ObjectWorld};
-use crate::physics::world::particle::{ParticleMaterial, ParticleWorld, nominal_particle_draw_radius_m};
+use crate::physics::world::particle::{
+    ParticleMaterial, ParticleWorld, nominal_particle_draw_radius_m,
+};
 use crate::physics::world::terrain::{
-    CELL_SIZE_M, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainCell, TerrainChunk,
-    TerrainWorld,
+    CELL_SIZE_M, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainCell, TerrainWorld,
     world_to_cell,
 };
-use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 
 mod constants;
 mod palette;
 pub(crate) use constants::*;
 pub(crate) use palette::*;
 
-#[derive(Resource, Default)]
-pub struct TerrainRenderState {
-    chunk_sprites: HashMap<IVec2, TerrainChunkSprite>,
-}
-
-#[derive(Resource, Default)]
-pub struct TerrainLodRenderState {
-    chunk_sprites: HashMap<LodTileKey, TerrainLodTileSprite>,
-    tiles_with_particles: HashSet<LodTileKey>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct LodTileKey {
+struct RenderTileKey {
     origin_chunk: IVec2,
     span_chunks: i32,
 }
 
+#[derive(Component, Clone, Copy, Debug)]
+struct RenderTile {
+    key: RenderTileKey,
+    lod_level: u32,
+}
+
+#[derive(Component)]
+struct RenderTileVisual {
+    image: Handle<Image>,
+}
+
+#[derive(Component, Default)]
+struct RenderTileFlags {
+    terrain_dirty: bool,
+    needs_upload: bool,
+}
+
+#[derive(Component, Default)]
+struct RenderTileTerrainCache {
+    pixels: Vec<u8>,
+    rebuilt_this_frame: bool,
+}
+
+#[derive(Component, Default)]
+struct RenderTileParticleState {
+    indices: Vec<usize>,
+    has_particles: bool,
+    had_particles_last_compose: bool,
+    changed_this_frame: bool,
+}
+
+#[derive(Component, Default)]
+struct RenderTileUploadBuffer {
+    pixels: Vec<u8>,
+    pending: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct LodRenderTile {
+pub struct RenderVisibleTile {
     pub origin_chunk: IVec2,
     pub span_chunks: i32,
+    pub lod_level: u32,
+}
+
+#[derive(Resource, Default)]
+pub struct TerrainTileRenderState {
+    entities_by_key: HashMap<RenderTileKey, Entity>,
+    target_tiles: HashSet<RenderTileKey>,
+    target_lod_level: u32,
+    target_span_chunks: i32,
+    evict_frames_outside_required: HashMap<RenderTileKey, u16>,
 }
 
 #[derive(Resource, Default)]
 pub struct TerrainRenderDiagnostics {
     pub terrain_updated_chunk_highlight_frames: HashMap<IVec2, u8>,
     pub particle_updated_chunk_highlight_frames: HashMap<IVec2, u8>,
-    pub lod_visible_tiles: Vec<LodRenderTile>,
+    pub visible_tiles: Vec<RenderVisibleTile>,
 }
 
 const UPDATED_CHUNK_HIGHLIGHT_FRAMES: u8 = 60;
@@ -59,6 +97,7 @@ pub struct WaterRenderState {
     density: Vec<f32>,
     blur_tmp: Vec<f32>,
     blurred_density: Vec<f32>,
+    had_any_water: bool,
 }
 
 #[derive(Resource, Default)]
@@ -76,18 +115,6 @@ pub struct ParticleRenderChunkCache {
     all_by_chunk: HashMap<IVec2, Vec<usize>>,
     water_by_chunk: HashMap<IVec2, Vec<usize>>,
     free_by_chunk: HashMap<IVec2, Vec<usize>>,
-}
-
-struct TerrainChunkSprite {
-    entity: Entity,
-    image: Handle<Image>,
-}
-
-struct TerrainLodTileSprite {
-    entity: Entity,
-    image: Handle<Image>,
-    terrain_pixels: Vec<u8>,
-    has_particles: bool,
 }
 
 struct ObjectSprite {
@@ -108,17 +135,16 @@ pub struct ObjectRenderHandle {
 }
 
 mod free_particles;
-mod lod;
 mod object_sprites;
+mod tiles;
 mod water;
 
 pub struct RenderPlugin;
 
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TerrainRenderState>()
+        app.init_resource::<TerrainTileRenderState>()
             .init_resource::<TerrainLodPaletteCache>()
-            .init_resource::<TerrainLodRenderState>()
             .init_resource::<TerrainRenderDiagnostics>()
             .init_resource::<WaterRenderState>()
             .init_resource::<ObjectRenderState>()
@@ -128,15 +154,34 @@ impl Plugin for RenderPlugin {
             .add_systems(
                 Update,
                 (
-                    refresh_particle_render_chunk_cache,
-                    sync_lod_chunks_to_render,
-                    sync_dirty_terrain_chunks_to_render,
-                    sync_water_dots_to_render,
-                    sync_free_particles_to_render,
-                    sync_object_sprites_to_render,
-                )
-                    .chain()
-                    .in_set(SimUpdateSet::Rendering),
+                    refresh_particle_render_chunk_cache.in_set(SimUpdateSet::Rendering),
+                    tiles::sync_required_render_tiles
+                        .in_set(SimUpdateSet::Rendering)
+                        .after(refresh_particle_render_chunk_cache),
+                    tiles::mark_dirty_render_tiles_from_world
+                        .in_set(SimUpdateSet::Rendering)
+                        .after(tiles::sync_required_render_tiles),
+                    tiles::refresh_render_tile_particle_state
+                        .in_set(SimUpdateSet::Rendering)
+                        .after(tiles::mark_dirty_render_tiles_from_world),
+                    tiles::refresh_render_tile_terrain_cache
+                        .in_set(SimUpdateSet::Rendering)
+                        .after(tiles::mark_dirty_render_tiles_from_world),
+                    tiles::compose_render_tile_upload_buffers
+                        .in_set(SimUpdateSet::Rendering)
+                        .after(tiles::refresh_render_tile_particle_state)
+                        .after(tiles::refresh_render_tile_terrain_cache),
+                    tiles::apply_render_tile_uploads
+                        .in_set(SimUpdateSet::Rendering)
+                        .after(tiles::compose_render_tile_upload_buffers),
+                    sync_water_dots_to_render
+                        .in_set(SimUpdateSet::Rendering)
+                        .after(refresh_particle_render_chunk_cache),
+                    sync_free_particles_to_render
+                        .in_set(SimUpdateSet::Rendering)
+                        .after(refresh_particle_render_chunk_cache),
+                    sync_object_sprites_to_render.in_set(SimUpdateSet::Rendering),
+                ),
             );
     }
 }
@@ -178,118 +223,11 @@ fn refresh_particle_render_chunk_cache(
     }
 }
 
-pub use lod::sync_lod_chunks_to_render;
-
-pub fn sync_dirty_terrain_chunks_to_render(
-    mut commands: Commands,
-    mut terrain_world: ResMut<TerrainWorld>,
-    mut render_state: ResMut<TerrainRenderState>,
-    mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    let _span = tracing::info_span!("render::sync_dirty_terrain_chunks_to_render").entered();
-    let stale_chunks: Vec<_> = render_state
-        .chunk_sprites
-        .keys()
-        .copied()
-        .filter(|chunk_coord| terrain_world.chunk(*chunk_coord).is_none())
-        .collect();
-    for chunk_coord in stale_chunks {
-        if let Some(entry) = render_state.chunk_sprites.remove(&chunk_coord) {
-            commands.entity(entry.entity).despawn();
-            images.remove(entry.image.id());
-        }
-    }
-
-    let dirty_chunks = terrain_world.take_dirty_chunks();
-    render_diagnostics
-        .terrain_updated_chunk_highlight_frames
-        .retain(|_, frames_left| {
-            if *frames_left > 0 {
-                *frames_left -= 1;
-            }
-            *frames_left > 0
-        });
-    render_diagnostics
-        .particle_updated_chunk_highlight_frames
-        .retain(|_, frames_left| {
-            if *frames_left > 0 {
-                *frames_left -= 1;
-            }
-            *frames_left > 0
-        });
-
-    for chunk_coord in dirty_chunks {
-        render_diagnostics
-            .terrain_updated_chunk_highlight_frames
-            .insert(chunk_coord, UPDATED_CHUNK_HIGHLIGHT_FRAMES);
-        let Some(chunk) = terrain_world.chunk(chunk_coord) else {
-            continue;
-        };
-
-        if chunk.is_empty() {
-            if let Some(entry) = render_state.chunk_sprites.remove(&chunk_coord) {
-                commands.entity(entry.entity).despawn();
-                images.remove(entry.image.id());
-            }
-            continue;
-        }
-
-        let image = build_chunk_image(chunk_coord, chunk);
-
-        if let Some(entry) = render_state.chunk_sprites.get_mut(&chunk_coord) {
-            if images.insert(entry.image.id(), image).is_err() {
-                entry.image = images.add(build_chunk_image(chunk_coord, chunk));
-                let mut sprite = Sprite::from_image(entry.image.clone());
-                sprite.custom_size = Some(Vec2::splat(CHUNK_WORLD_SIZE_M));
-                commands.entity(entry.entity).insert(sprite);
-            }
-            continue;
-        }
-
-        let image_handle = images.add(image);
-        let mut sprite = Sprite::from_image(image_handle.clone());
-        sprite.custom_size = Some(Vec2::splat(CHUNK_WORLD_SIZE_M));
-
-        let center = chunk_to_world_center(chunk_coord);
-        let entity = commands
-            .spawn((sprite, Transform::from_xyz(center.x, center.y, 0.0)))
-            .id();
-
-        render_state.chunk_sprites.insert(
-            chunk_coord,
-            TerrainChunkSprite {
-                entity,
-                image: image_handle,
-            },
-        );
-    }
-}
-
 pub use water::sync_water_dots_to_render;
 
 pub use free_particles::sync_free_particles_to_render;
 
 pub use object_sprites::sync_object_sprites_to_render;
-
-fn build_chunk_image(chunk_coord: IVec2, chunk: &TerrainChunk) -> Image {
-    let mut pixels = vec![0_u8; (CHUNK_PIXEL_SIZE * CHUNK_PIXEL_SIZE * 4) as usize];
-
-    for local_y in 0..CHUNK_SIZE {
-        for local_x in 0..CHUNK_SIZE {
-            let cell = chunk.get(IVec2::new(local_x as i32, local_y as i32));
-            write_cell_pixels(
-                &mut pixels,
-                chunk_coord,
-                local_x as u32,
-                local_y as u32,
-                cell,
-            );
-        }
-    }
-
-    image_from_rgba_pixels(pixels)
-}
 
 fn image_from_rgba_pixels(pixels: Vec<u8>) -> Image {
     let mut image = Image::new_fill(
