@@ -56,6 +56,31 @@
 - 完了条件:
   - フルチャンク生成なしで遠景サムネイルが生成され、境界遷移が破綻しない。
 
+### [REND-01] Tileベース描画パイプライン再編（Full/LOD統合）
+
+- Status: `In Progress`
+- 背景:
+  - 現状はフルチャンク描画とLOD描画の管理単位が分かれており、同期コストと責務境界が不明瞭。
+  - ズーム時に `sync_lod_chunks_to_render` などの更新コストが高く、Tile単位の並列更新へ寄せたい。
+- スコープ:
+  - Render側の最小単位を `Tile` に統一し、Full/LOD を「解像度違いの同一表現」として扱う。
+  - LOD要求はカメラ情報のみで決定し、物理演算範囲（active/halo）とは独立に管理する。
+  - `World -> Tile` 反映と `Tile -> Texture` 更新を分離し、Tile単位に並列実行可能な構成へ移行する。
+- Subtasks:
+  - [x] `RenderTile` コンポーネント（tile座標、`lod_level`、参照チャンク範囲、dirty状態）を定義する。
+  - [x] カメラ状態から required tile set を算出するsystemを実装する（Full/LOD統一）。
+  - [x] requiredとの差分で Tile entity を spawn/update/despawn する reconcile system を実装する。
+  - [x] 地形/粒子の更新から Tile dirty を付与する `World -> Tile` 反映systemを実装する。
+  - [x] Tileテクスチャ生成をTile単位ジョブ化し、`Assets<Image>` 反映系と分離する。
+  - [x] チャンク改変時のLOD再サンプリング範囲を影響Tileのみに局所化する。
+  - [x] カメラ範囲外のTile破棄にヒステリシスを導入し、entity churnを抑制する。
+  - [x] Grid Overlay をTile基準で再構成し、Full/LOD輪郭を一貫表示する。
+  - [x] Tracyで `required calc / reconcile / reflect / texture upload` の内訳計測を追加する。
+  - [ ] 旧実装比でズーム時の描画更新コストを比較し、改善を確認する。
+- 完了条件:
+  - Full/LOD描画が `Tile` 実装へ統合され、ズーム時のレンダリング更新負荷が現行より有意に低下する。
+  - 描画LOD決定がカメラ依存のみで完結し、物理演算範囲とは独立して動作する。
+
 ## Approval-Gated Items
 
 - 物理統合テスト（headless scenario tests）のケース追加・閾値変更・ベースライン更新は、実装前にユーザー承認を取る。
@@ -76,6 +101,18 @@
   - 粒子散乱時に密配列確保が暴走しないよう、セルスパン上限超過時は sparse グリッドへフォールバックする。
 - Overlay仕様の反映が必要:
   - `particle overlay` では `halo` 粒子を表示し、地形粒子は「物理演算範囲 + halo」内のみ表示する。
+- Render設計の明文化が必要:
+  - `Chunk` は物理演算単位、`Tile` は描画単位として責務を分離する。
+  - Full/LOD は別機構ではなく、`lod_level` の異なる `Tile` として統一管理する。
+- LOD決定規則の明文化が必要:
+  - required tile set はカメラ位置・ズームのみから決定し、`active/halo` には依存させない。
+  - カメラ近傍ほど高解像度Tileを要求し、未充足時は要求解像度で再生成する。
+- Tileライフサイクル仕様の明文化が必要:
+  - `Required -> Loaded -> Dirty -> Uploaded -> Evictable` の状態遷移と再利用条件を定義する。
+  - 一定距離外でTileを破棄するが、破棄ヒステリシスを設けてspawn/despawnスパイクを抑制する。
+- 並列化境界の明文化が必要:
+  - `World -> Tile` 反映とTileテクスチャ生成はTile単位で並列化対象にする。
+  - `Assets<Image>` 反映は競合回避のため専用段に分離し、計測で律速点を確認する。
 
 ## Done
 
