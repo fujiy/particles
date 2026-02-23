@@ -25,7 +25,6 @@ const SUBSTEPS: usize = DEFAULT_SOLVER_PARAMS.substeps;
 const EPSILON_LAMBDA: f32 = DEFAULT_SOLVER_PARAMS.epsilon_lambda;
 const TERRAIN_GHOST_DENSITY_SCALE: f32 = DEFAULT_SOLVER_PARAMS.terrain_ghost_density_scale;
 const TERRAIN_GHOST_DELTA_SCALE: f32 = DEFAULT_SOLVER_PARAMS.terrain_ghost_delta_scale;
-const PARALLEL_PARTICLE_THRESHOLD: usize = DEFAULT_SOLVER_PARAMS.parallel_particle_threshold;
 const PARTICLE_CONTACT_PUSH_FACTOR: f32 = DEFAULT_SOLVER_PARAMS.particle_contact_push_factor;
 const DETACH_FLOOD_FILL_MAX_CELLS: usize = DEFAULT_SOLVER_PARAMS.detach_flood_fill_max_cells;
 const SLEEP_DISP_THRESHOLD: f32 = DEFAULT_SOLVER_PARAMS.sleep_disp_threshold;
@@ -500,6 +499,22 @@ impl ParticleWorld {
         &self.activity_state
     }
 
+    pub fn for_each_deferred_particle<F>(&self, mut f: F)
+    where
+        F: FnMut(IVec2, Vec2, ParticleMaterial),
+    {
+        for (&chunk, queue) in &self.deferred_inactive_chunk_particles {
+            for state in queue {
+                f(chunk, state.position, state.material);
+            }
+        }
+        for (key, queue) in &self.deferred_boundary_particles {
+            for state in queue {
+                f(key.chunk, state.position, state.material);
+            }
+        }
+    }
+
     pub fn is_particle_active_in_region(&self, index: usize) -> bool {
         self.is_active_particle(index)
     }
@@ -947,8 +962,8 @@ impl ParticleWorld {
         let _span = tracing::info_span!("physics::density_constraint_pass").entered();
         let h_ww = WATER_KERNEL_RADIUS_M;
         let inv_dt = 1.0 / dt_sub.max(1e-6);
-        let use_parallel =
-            self.parallel_enabled && self.particle_count() >= PARALLEL_PARTICLE_THRESHOLD;
+        let parallel_threshold = self.solver_params.parallel_particle_threshold.max(1);
+        let use_parallel = self.parallel_enabled && self.particle_count() >= parallel_threshold;
 
         if refresh_neighbors {
             let _span = tracing::info_span!("physics::rebuild_neighbor_cache").entered();
@@ -1088,14 +1103,22 @@ impl ParticleWorld {
         let materials = &self.material;
         let activity_state = &self.activity_state;
         let neighbor_cache = &self.neighbor_cache;
+        let active_chunk_min = self.active_chunk_min;
+        let active_chunk_max = self.active_chunk_max;
+        let active_halo_chunks = self.active_halo_chunks;
 
         self.density
             .par_iter_mut()
             .zip(self.lambda.par_iter_mut())
             .enumerate()
             .map(|(i, (density_i, lambda_i))| {
-                if activity_state[i] == ParticleActivityState::Sleeping
-                    || !is_water_particle(materials[i])
+                if !is_active_or_halo_particle_for_region(
+                    positions[i],
+                    activity_state[i],
+                    active_chunk_min,
+                    active_chunk_max,
+                    active_halo_chunks,
+                ) || !is_water_particle(materials[i])
                 {
                     *density_i = REST_DENSITY;
                     *lambda_i = 0.0;
@@ -1324,6 +1347,8 @@ impl ParticleWorld {
         let activity_state = &self.activity_state;
         let lambdas = &self.lambda;
         let neighbor_cache = &self.neighbor_cache;
+        let active_chunk_min = self.active_chunk_min;
+        let active_chunk_max = self.active_chunk_max;
 
         let reduced = self
             .delta_pos
@@ -1332,7 +1357,12 @@ impl ParticleWorld {
             .fold(
                 ComputeDeltaThreadScratch::default,
                 |mut scratch, (i, delta_pos_i)| {
-                    if activity_state[i] == ParticleActivityState::Sleeping {
+                    if !is_active_particle_for_region(
+                        positions[i],
+                        activity_state[i],
+                        active_chunk_min,
+                        active_chunk_max,
+                    ) {
                         *delta_pos_i = Vec2::ZERO;
                         return scratch;
                     }
@@ -1586,7 +1616,8 @@ impl ParticleWorld {
         let _span = tracing::info_span!("physics::xsph_pass").entered();
         self.viscosity_work.clone_from(&self.vel);
         let count = self.particle_count();
-        let use_parallel = self.parallel_enabled && count >= PARALLEL_PARTICLE_THRESHOLD;
+        let parallel_threshold = self.solver_params.parallel_particle_threshold.max(1);
+        let use_parallel = self.parallel_enabled && count >= parallel_threshold;
 
         if use_parallel {
             let positions = &self.pos;
@@ -1594,15 +1625,21 @@ impl ParticleWorld {
             let materials = &self.material;
             let activity = &self.activity_state;
             let neighbor_grid = &self.neighbor_grid;
+            let active_chunk_min = self.active_chunk_min;
+            let active_chunk_max = self.active_chunk_max;
             self.viscosity_work
                 .par_iter_mut()
                 .enumerate()
                 .for_each(|(i, out)| {
-                    let active = activity
-                        .get(i)
-                        .copied()
-                        .unwrap_or(ParticleActivityState::Active)
-                        == ParticleActivityState::Active;
+                    let active = is_active_particle_for_region(
+                        positions[i],
+                        activity
+                            .get(i)
+                            .copied()
+                            .unwrap_or(ParticleActivityState::Active),
+                        active_chunk_min,
+                        active_chunk_max,
+                    );
                     if !active || !is_water_particle(materials[i]) {
                         *out = velocities[i];
                         return;
@@ -1848,64 +1885,42 @@ impl ParticleWorld {
     }
 
     pub(crate) fn is_active_particle(&self, index: usize) -> bool {
-        let active = self
-            .activity_state
-            .get(index)
-            .copied()
-            .unwrap_or(ParticleActivityState::Active)
-            == ParticleActivityState::Active;
-        if !active {
-            return false;
-        }
-        let (Some(chunk_min), Some(chunk_max)) = (self.active_chunk_min, self.active_chunk_max)
-        else {
-            return true;
-        };
         if index >= self.particle_count() {
             return false;
         }
-        let cell = world_to_cell(self.pos[index]);
-        let chunk = IVec2::new(
-            cell.x.div_euclid(CHUNK_SIZE_I32),
-            cell.y.div_euclid(CHUNK_SIZE_I32),
-        );
-        chunk.x >= chunk_min.x
-            && chunk.x <= chunk_max.x
-            && chunk.y >= chunk_min.y
-            && chunk.y <= chunk_max.y
+        is_active_particle_for_region(
+            self.pos[index],
+            self.activity_state
+                .get(index)
+                .copied()
+                .unwrap_or(ParticleActivityState::Active),
+            self.active_chunk_min,
+            self.active_chunk_max,
+        )
     }
 
     fn is_halo_particle(&self, index: usize) -> bool {
         if index >= self.particle_count() {
             return false;
         }
-        let halo = self.active_halo_chunks.max(0);
-        if halo == 0 {
-            return false;
-        }
-        let (Some(chunk_min), Some(chunk_max)) = (self.active_chunk_min, self.active_chunk_max)
-        else {
-            return false;
-        };
-        let cell = world_to_cell(self.pos[index]);
-        let chunk = IVec2::new(
-            cell.x.div_euclid(CHUNK_SIZE_I32),
-            cell.y.div_euclid(CHUNK_SIZE_I32),
-        );
-
-        let inside_active = chunk.x >= chunk_min.x
-            && chunk.x <= chunk_max.x
-            && chunk.y >= chunk_min.y
-            && chunk.y <= chunk_max.y;
-        if inside_active {
-            return false;
-        }
-        let expanded_min = chunk_min - IVec2::splat(halo);
-        let expanded_max = chunk_max + IVec2::splat(halo);
-        chunk.x >= expanded_min.x
-            && chunk.x <= expanded_max.x
-            && chunk.y >= expanded_min.y
-            && chunk.y <= expanded_max.y
+        is_active_or_halo_particle_for_region(
+            self.pos[index],
+            self.activity_state
+                .get(index)
+                .copied()
+                .unwrap_or(ParticleActivityState::Active),
+            self.active_chunk_min,
+            self.active_chunk_max,
+            self.active_halo_chunks,
+        ) && !is_active_particle_for_region(
+            self.pos[index],
+            self.activity_state
+                .get(index)
+                .copied()
+                .unwrap_or(ParticleActivityState::Active),
+            self.active_chunk_min,
+            self.active_chunk_max,
+        )
     }
 
     fn is_active_or_halo_particle(&self, index: usize) -> bool {
@@ -2048,7 +2063,8 @@ impl ParticleWorld {
             wake_centers: Vec<Vec2>,
         }
 
-        let use_parallel = self.parallel_enabled && count >= PARALLEL_PARTICLE_THRESHOLD;
+        let parallel_threshold = self.solver_params.parallel_particle_threshold.max(1);
+        let use_parallel = self.parallel_enabled && count >= parallel_threshold;
         let mut wake_indices = Vec::new();
         let mut wake_centers = Vec::new();
         if use_parallel {
@@ -2057,6 +2073,8 @@ impl ParticleWorld {
             let materials = &self.material;
             let activity = &self.activity_state;
             let neighbor_grid = &self.neighbor_grid;
+            let active_chunk_min = self.active_chunk_min;
+            let active_chunk_max = self.active_chunk_max;
             let object_particles_by_id: HashMap<ObjectId, Vec<usize>> = object_world
                 .objects()
                 .iter()
@@ -2065,11 +2083,15 @@ impl ParticleWorld {
             let reduced = (0..count)
                 .into_par_iter()
                 .fold(WakeDetectAccum::default, |mut local, i| {
-                    let active = activity
-                        .get(i)
-                        .copied()
-                        .unwrap_or(ParticleActivityState::Active)
-                        == ParticleActivityState::Active;
+                    let active = is_active_particle_for_region(
+                        positions[i],
+                        activity
+                            .get(i)
+                            .copied()
+                            .unwrap_or(ParticleActivityState::Active),
+                        active_chunk_min,
+                        active_chunk_max,
+                    );
                     if !active {
                         return local;
                     }
@@ -2081,11 +2103,15 @@ impl ParticleWorld {
 
                     neighbor_grid.gather(positions[i], &mut local.neighbors);
                     for &j in &local.neighbors {
-                        let neighbor_active = activity
-                            .get(j)
-                            .copied()
-                            .unwrap_or(ParticleActivityState::Active)
-                            == ParticleActivityState::Active;
+                        let neighbor_active = is_active_particle_for_region(
+                            positions[j],
+                            activity
+                                .get(j)
+                                .copied()
+                                .unwrap_or(ParticleActivityState::Active),
+                            active_chunk_min,
+                            active_chunk_max,
+                        );
                         if i == j || neighbor_active {
                             continue;
                         }
@@ -2898,6 +2924,59 @@ impl ParticleWorld {
         }
         indices
     }
+}
+
+fn is_active_particle_for_region(
+    position: Vec2,
+    activity_state: ParticleActivityState,
+    active_chunk_min: Option<IVec2>,
+    active_chunk_max: Option<IVec2>,
+) -> bool {
+    if activity_state != ParticleActivityState::Active {
+        return false;
+    }
+    let (Some(chunk_min), Some(chunk_max)) = (active_chunk_min, active_chunk_max) else {
+        return true;
+    };
+    let chunk = world_pos_to_chunk(position);
+    chunk.x >= chunk_min.x
+        && chunk.x <= chunk_max.x
+        && chunk.y >= chunk_min.y
+        && chunk.y <= chunk_max.y
+}
+
+fn is_active_or_halo_particle_for_region(
+    position: Vec2,
+    activity_state: ParticleActivityState,
+    active_chunk_min: Option<IVec2>,
+    active_chunk_max: Option<IVec2>,
+    active_halo_chunks: i32,
+) -> bool {
+    if activity_state != ParticleActivityState::Active {
+        return false;
+    }
+    let (Some(chunk_min), Some(chunk_max)) = (active_chunk_min, active_chunk_max) else {
+        return true;
+    };
+    let chunk = world_pos_to_chunk(position);
+    let inside_active = chunk.x >= chunk_min.x
+        && chunk.x <= chunk_max.x
+        && chunk.y >= chunk_min.y
+        && chunk.y <= chunk_max.y;
+    if inside_active {
+        return true;
+    }
+
+    let halo = active_halo_chunks.max(0);
+    if halo == 0 {
+        return false;
+    }
+    let expanded_min = chunk_min - IVec2::splat(halo);
+    let expanded_max = chunk_max + IVec2::splat(halo);
+    chunk.x >= expanded_min.x
+        && chunk.x <= expanded_max.x
+        && chunk.y >= expanded_min.y
+        && chunk.y <= expanded_max.y
 }
 
 #[derive(Debug, Default)]

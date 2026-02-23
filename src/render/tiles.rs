@@ -162,15 +162,6 @@ pub(super) fn refresh_render_tile_particle_state(
 
         particle_state.changed_this_frame = false;
 
-        if tile.key.span_chunks <= 1 {
-            let had_particles =
-                particle_state.has_particles || particle_state.had_particles_last_compose;
-            particle_state.indices.clear();
-            particle_state.has_particles = false;
-            particle_state.changed_this_frame = particles_changed && had_particles;
-            continue;
-        }
-
         let should_resample = particles_changed
             || flags.needs_upload
             || flags.terrain_dirty
@@ -180,9 +171,17 @@ pub(super) fn refresh_render_tile_particle_state(
             continue;
         }
 
-        let indices = collect_particles_for_tile(&particle_chunk_cache, tile.key);
-        let has_particles_now = !indices.is_empty();
-        particle_state.indices = indices;
+        let (indices, deferred) = collect_particles_for_tile(&particle_chunk_cache, tile.key);
+        // Full-resolution tiles use dedicated particle render passes for live particles.
+        // Keep deferred particles composited so particles remain visible after chunk unload.
+        let live_indices = if tile.key.span_chunks <= 1 {
+            Vec::new()
+        } else {
+            indices
+        };
+        let has_particles_now = !live_indices.is_empty() || !deferred.is_empty();
+        particle_state.indices = live_indices;
+        particle_state.deferred = deferred;
         particle_state.has_particles = has_particles_now;
         particle_state.changed_this_frame =
             particles_changed && (has_particles_now || particle_state.had_particles_last_compose);
@@ -248,11 +247,12 @@ pub(super) fn compose_render_tile_upload_buffers(
             continue;
         }
 
-        let composed = if tile.key.span_chunks > 1 && particle_state.has_particles {
+        let composed = if particle_state.has_particles {
             compose_lod_tile_pixels(
                 &terrain_cache.pixels,
                 &particles,
                 &particle_state.indices,
+                &particle_state.deferred,
                 tile.key.origin_chunk,
                 tile.key.span_chunks,
             )
@@ -606,17 +606,24 @@ fn render_tile_z(key: RenderTileKey, lod_level: u32) -> f32 {
 fn collect_particles_for_tile(
     particle_chunk_cache: &ParticleRenderChunkCache,
     tile: RenderTileKey,
-) -> Vec<usize> {
+) -> (Vec<usize>, Vec<DeferredRenderParticle>) {
     let span = tile.span_chunks.max(1);
     let mut indices = Vec::new();
+    let mut deferred = Vec::new();
     for y in tile.origin_chunk.y..(tile.origin_chunk.y + span) {
         for x in tile.origin_chunk.x..(tile.origin_chunk.x + span) {
             if let Some(chunk_indices) = particle_chunk_cache.all_by_chunk.get(&IVec2::new(x, y)) {
                 indices.extend(chunk_indices.iter().copied());
             }
+            if let Some(chunk_deferred) = particle_chunk_cache
+                .deferred_by_chunk
+                .get(&IVec2::new(x, y))
+            {
+                deferred.extend(chunk_deferred.iter().copied());
+            }
         }
     }
-    indices
+    (indices, deferred)
 }
 
 fn build_tile_terrain_pixels(
@@ -861,6 +868,7 @@ fn compose_lod_tile_pixels(
     terrain_pixels: &[u8],
     particles: &ParticleWorld,
     particle_indices: &[usize],
+    deferred_particles: &[DeferredRenderParticle],
     tile_origin_chunk: IVec2,
     tile_span_chunks: i32,
 ) -> Vec<u8> {
@@ -869,6 +877,12 @@ fn compose_lod_tile_pixels(
         &mut pixels,
         particles,
         particle_indices,
+        tile_origin_chunk,
+        tile_span_chunks,
+    );
+    rasterize_lod_deferred_particles_into_pixels(
+        &mut pixels,
+        deferred_particles,
         tile_origin_chunk,
         tile_span_chunks,
     );
@@ -890,19 +904,79 @@ fn rasterize_lod_particles_into_pixels(
         let Some(&pos) = particles.positions().get(index) else {
             continue;
         };
-        let local = (pos - tile_min_world) / tile_size_world;
-        if local.x < 0.0 || local.x >= 1.0 || local.y < 0.0 || local.y >= 1.0 {
+        let material = particles.materials()[index];
+        if !rasterize_lod_particle_disc(
+            pixels,
+            pos,
+            material,
+            tile_min_world,
+            tile_size_world,
+            texture_size,
+        ) {
             continue;
         }
-        let px = (local.x * texture_size)
-            .floor()
-            .clamp(0.0, texture_size - 1.0) as u32;
-        let py = (local.y * texture_size)
-            .floor()
-            .clamp(0.0, texture_size - 1.0) as u32;
-        let image_y = CHUNK_PIXEL_SIZE - 1 - py;
-        let offset = ((image_y * CHUNK_PIXEL_SIZE + px) * 4) as usize;
-        let src = lod_particle_color(particles.materials()[index]);
-        blend_rgba8_over(&mut pixels[offset..offset + 4], src);
     }
+}
+
+fn rasterize_lod_deferred_particles_into_pixels(
+    pixels: &mut [u8],
+    deferred_particles: &[DeferredRenderParticle],
+    tile_origin_chunk: IVec2,
+    tile_span_chunks: i32,
+) {
+    let tile_min_world = tile_origin_chunk.as_vec2() * CHUNK_WORLD_SIZE_M;
+    let tile_size_world = CHUNK_WORLD_SIZE_M * tile_span_chunks.max(1) as f32;
+    let texture_size = CHUNK_PIXEL_SIZE as f32;
+
+    for particle in deferred_particles {
+        let _ = rasterize_lod_particle_disc(
+            pixels,
+            particle.position,
+            particle.material,
+            tile_min_world,
+            tile_size_world,
+            texture_size,
+        );
+    }
+}
+
+fn rasterize_lod_particle_disc(
+    pixels: &mut [u8],
+    world_pos: Vec2,
+    material: ParticleMaterial,
+    tile_min_world: Vec2,
+    tile_size_world: f32,
+    texture_size: f32,
+) -> bool {
+    let local = (world_pos - tile_min_world) / tile_size_world;
+    if local.x < 0.0 || local.x >= 1.0 || local.y < 0.0 || local.y >= 1.0 {
+        return false;
+    }
+
+    let center_x = local.x * texture_size;
+    let center_y = local.y * texture_size;
+    let radius_world = particle_properties(material).radius_m;
+    let radius_px = ((radius_world / tile_size_world) * texture_size).max(0.75);
+    let radius2 = radius_px * radius_px;
+    let src = lod_particle_color(material);
+
+    let min_x = (center_x - radius_px).floor().max(0.0) as i32;
+    let max_x = (center_x + radius_px).ceil().min(texture_size - 1.0) as i32;
+    let min_y = (center_y - radius_px).floor().max(0.0) as i32;
+    let max_y = (center_y + radius_px).ceil().min(texture_size - 1.0) as i32;
+
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let dx = (x as f32 + 0.5) - center_x;
+            let dy = (y as f32 + 0.5) - center_y;
+            if dx * dx + dy * dy > radius2 {
+                continue;
+            }
+            let image_y = CHUNK_PIXEL_SIZE as i32 - 1 - y;
+            let offset = ((image_y as u32 * CHUNK_PIXEL_SIZE + x as u32) * 4) as usize;
+            blend_rgba8_over(&mut pixels[offset..offset + 4], src);
+        }
+    }
+
+    true
 }

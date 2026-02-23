@@ -194,8 +194,10 @@ pub fn cell_palette(cell: TerrainCell) -> Option<[[u8; 4]; 4]> {
 
 pub fn lod_particle_color(material: ParticleMaterial) -> [u8; 4] {
     let palette = cell_palette_for_particle(material);
-    let mut color = palette[0];
-    color[3] = 220;
+    // Use a brighter representative swatch and keep LOD particles opaque enough
+    // so they remain readable over terrain colors.
+    let mut color = palette[2];
+    color[3] = color[3].max(252);
     color
 }
 

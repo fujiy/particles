@@ -40,11 +40,6 @@ pub(super) fn step_single_substep(
     dt_sub: f32,
     breakdown: &mut ParticleStepBreakdown,
 ) {
-    let saved_parallel_enabled = particles.parallel_enabled;
-    if particles.active_chunk_min.is_some() && particles.active_chunk_max.is_some() {
-        // Region filter relies on `is_active_particle`; force sequential code paths.
-        particles.parallel_enabled = false;
-    }
     particles.terrain_load_substep_counter = particles.terrain_load_substep_counter.wrapping_add(1);
     particles.object_peak_strain.clear();
     particles.object_peak_strain_particle.clear();
@@ -247,5 +242,4 @@ pub(super) fn step_single_substep(
     breakdown.sleep_update_secs += phase_wall_start.elapsed().as_secs_f64();
     let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
     breakdown.sleep_update_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
-    particles.parallel_enabled = saved_parallel_enabled;
 }

@@ -54,6 +54,7 @@ struct RenderTileTerrainCache {
 #[derive(Component, Default)]
 struct RenderTileParticleState {
     indices: Vec<usize>,
+    deferred: Vec<DeferredRenderParticle>,
     has_particles: bool,
     had_particles_last_compose: bool,
     changed_this_frame: bool,
@@ -113,8 +114,15 @@ pub struct FreeParticleRenderState {
 #[derive(Resource, Default)]
 pub struct ParticleRenderChunkCache {
     all_by_chunk: HashMap<IVec2, Vec<usize>>,
+    deferred_by_chunk: HashMap<IVec2, Vec<DeferredRenderParticle>>,
     water_by_chunk: HashMap<IVec2, Vec<usize>>,
     free_by_chunk: HashMap<IVec2, Vec<usize>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DeferredRenderParticle {
+    position: Vec2,
+    material: ParticleMaterial,
 }
 
 struct ObjectSprite {
@@ -204,6 +212,7 @@ fn refresh_particle_render_chunk_cache(
     }
 
     cache.all_by_chunk.clear();
+    cache.deferred_by_chunk.clear();
     cache.water_by_chunk.clear();
     cache.free_by_chunk.clear();
 
@@ -221,6 +230,14 @@ fn refresh_particle_render_chunk_cache(
         }
         cache.free_by_chunk.entry(chunk).or_default().push(idx);
     }
+
+    particles.for_each_deferred_particle(|chunk, position, material| {
+        cache
+            .deferred_by_chunk
+            .entry(chunk)
+            .or_default()
+            .push(DeferredRenderParticle { position, material });
+    });
 }
 
 pub use water::sync_water_dots_to_render;
