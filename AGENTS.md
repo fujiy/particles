@@ -57,3 +57,11 @@
   - Commit targets are implementation files + related tests + `docs/tasks.md` status update.
   - Do not include `docs/design.md` edits.
 - Before implementation commits, compile checks and tests must pass.
+
+## `done` Command Rule
+- When the user says `done`, treat it as: "a task unit has reached a completion checkpoint."
+- Before finishing:
+  - Mark completed subtasks in `docs/tasks.md`.
+  - Report work that was newly requested by the user but not previously listed in tasks.
+  - If implementation behavior has diverged from `docs/design.md`, add the change as Design Feedback in `docs/tasks.md`.
+- After documentation updates, create git commits split by coherent work unit/intention as much as practical.
