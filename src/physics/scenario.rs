@@ -527,11 +527,13 @@ pub fn run_scenario_and_write_artifacts(spec: &ScenarioSpec) -> Result<ScenarioR
 
     for _ in 0..spec.step_count {
         objects.update_physics_field(particles.positions(), particles.masses(), &mut object_field);
-        terrain.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
+        terrain
+            .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
         particles.step_if_running(&terrain, &object_field, &mut objects, true);
         if particles.apply_pending_terrain_fractures(&mut terrain, &mut objects) {
-            terrain
-                .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
+            terrain.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(
+                DEFAULT_MATERIAL_PARAMS,
+            ));
         }
     }
 

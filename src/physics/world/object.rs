@@ -14,10 +14,12 @@ pub const OBJECT_SHAPE_STIFFNESS_ALPHA: f32 = DEFAULT_SOLVER_PARAMS.object_shape
 pub const OBJECT_SHAPE_ITERS: usize = DEFAULT_SOLVER_PARAMS.object_shape_iters;
 pub const OBJECT_LOCAL_SDF_SAMPLES_PER_CELL: i32 =
     DEFAULT_SOLVER_PARAMS.object_local_sdf_samples_per_cell;
-pub const OBJECT_PHYSICS_SDF_CELL_SIZE_M: f32 = DEFAULT_SOLVER_PARAMS.object_physics_sdf_cell_size_m;
+pub const OBJECT_PHYSICS_SDF_CELL_SIZE_M: f32 =
+    DEFAULT_SOLVER_PARAMS.object_physics_sdf_cell_size_m;
 pub const OBJECT_BROADPHASE_CELL_SIZE_M: f32 = DEFAULT_SOLVER_PARAMS.object_broadphase_cell_size_m;
 pub const OBJECT_SDF_MAX_DISTANCE_M: f32 = DEFAULT_SOLVER_PARAMS.object_sdf_max_distance_m;
-pub const OBJECT_SDF_MAX_SPLATS_PER_CELL: usize = DEFAULT_SOLVER_PARAMS.object_sdf_max_splats_per_cell;
+pub const OBJECT_SDF_MAX_SPLATS_PER_CELL: usize =
+    DEFAULT_SOLVER_PARAMS.object_sdf_max_splats_per_cell;
 pub const OBJECT_SDF_MAX_CONTACTS_PER_QUERY: usize =
     DEFAULT_SOLVER_PARAMS.object_sdf_max_contacts_per_query;
 

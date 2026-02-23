@@ -9,10 +9,10 @@ use crate::physics::material::{
     terrain_fracture_particle,
 };
 use crate::physics::world::object::{ObjectId, ObjectPhysicsField, ObjectWorld};
+use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::particle::helpers::{
     is_granular_particle, resolve_terrain_contact_cell,
 };
-use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{CELL_SIZE_M, TerrainCell, TerrainWorld};
 
 pub(super) fn apply_object_reaction_impulses(
@@ -32,8 +32,11 @@ pub(super) fn apply_object_reaction_impulses(
             .filter_map(|&index| particles.mass.get(index).copied())
             .sum::<f32>()
             .max(1e-6);
-        let dv = (impulse / mass_sum)
-            .clamp_length_max(particles.solver_params.object_reaction_max_dv_per_substep_mps);
+        let dv = (impulse / mass_sum).clamp_length_max(
+            particles
+                .solver_params
+                .object_reaction_max_dv_per_substep_mps,
+        );
         for &index in &object.particle_indices {
             if index >= particles.particle_count() {
                 continue;
@@ -50,7 +53,9 @@ pub(super) fn detect_fracture_candidates(
     object_world: &ObjectWorld,
 ) {
     debug_assert!(
-        !particles.material_params.enable_granular_to_solid_reconversion,
+        !particles
+            .material_params
+            .enable_granular_to_solid_reconversion,
         "v4 keeps granular->solid reconversion disabled"
     );
     particles.pending_object_fractures.clear();

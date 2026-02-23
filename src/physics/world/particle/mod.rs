@@ -41,21 +41,20 @@ const TERRAIN_LOAD_STRAIN_THRESHOLD: f32 = DEFAULT_SOLVER_PARAMS.terrain_load_st
 const TERRAIN_LOAD_BREAK_DURATION_SECONDS: f32 =
     DEFAULT_SOLVER_PARAMS.terrain_load_break_duration_seconds;
 const TERRAIN_LOAD_DECAY_PER_SAMPLE: f32 = DEFAULT_SOLVER_PARAMS.terrain_load_decay_per_sample;
-const GRANULAR_CONTACT_FRICTION_SCALE: f32 =
-    DEFAULT_SOLVER_PARAMS.granular_contact_friction_scale;
+const GRANULAR_CONTACT_FRICTION_SCALE: f32 = DEFAULT_SOLVER_PARAMS.granular_contact_friction_scale;
 const GRANULAR_GRANULAR_CONTACT_FRICTION_BOOST: f32 =
     DEFAULT_SOLVER_PARAMS.granular_granular_contact_friction_boost;
 const GRANULAR_SOLID_CONTACT_FRICTION_BOOST: f32 =
     DEFAULT_SOLVER_PARAMS.granular_solid_contact_friction_boost;
 const TERRAIN_CONTACT_FRICTION_SCALE: f32 = DEFAULT_SOLVER_PARAMS.terrain_contact_friction_scale;
-const GRANULAR_CONTACT_NORMAL_DAMPING: f32 =
-    DEFAULT_SOLVER_PARAMS.granular_contact_normal_damping;
+const GRANULAR_CONTACT_NORMAL_DAMPING: f32 = DEFAULT_SOLVER_PARAMS.granular_contact_normal_damping;
 const TERRAIN_CONTACT_NORMAL_DAMPING: f32 = DEFAULT_SOLVER_PARAMS.terrain_contact_normal_damping;
 const GRANULAR_SPAWN_JITTER_RATIO: f32 = DEFAULT_SOLVER_PARAMS.granular_spawn_jitter_ratio;
 const PARTICLE_ESCAPE_MARGIN_X_CELLS: i32 = DEFAULT_SOLVER_PARAMS.particle_escape_margin_x_cells;
 const PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS: i32 =
     DEFAULT_SOLVER_PARAMS.particle_escape_margin_bottom_cells;
-const PARTICLE_ESCAPE_MARGIN_TOP_CELLS: i32 = DEFAULT_SOLVER_PARAMS.particle_escape_margin_top_cells;
+const PARTICLE_ESCAPE_MARGIN_TOP_CELLS: i32 =
+    DEFAULT_SOLVER_PARAMS.particle_escape_margin_top_cells;
 const FAR_FIELD_EDGE_INSET_M: f32 = DEFAULT_SOLVER_PARAMS.far_field_edge_inset_m;
 const NEIGHBOR_LIST_SKIN_M: f32 = DEFAULT_SOLVER_PARAMS.neighbor_list_skin_m;
 

@@ -1,9 +1,7 @@
 use bevy::prelude::Vec2;
 
 use super::params_types::SolverParams;
-use crate::physics::material::{
-    DEFAULT_MATERIAL_PARAMS, particle_radius_m, water_kernel_radius_m,
-};
+use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, particle_radius_m, water_kernel_radius_m};
 use crate::physics::world::constants::{CELL_SIZE_M, CHUNK_SIZE_I32};
 
 pub const DEFAULT_SOLVER_PARAMS: SolverParams = SolverParams {

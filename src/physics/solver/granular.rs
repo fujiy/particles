@@ -6,10 +6,10 @@ use rayon::prelude::*;
 
 use crate::physics::material::particle_properties;
 use crate::physics::world::object::{ObjectId, ObjectPhysicsField, ObjectWorld};
+use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::particle::helpers::{
     granular_contact_friction_pair_scale, is_water_particle, pack_pair_key,
 };
-use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::TerrainWorld;
 
 #[derive(Default)]

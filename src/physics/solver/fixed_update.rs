@@ -3,10 +3,10 @@ use std::time::Instant;
 use bevy::log::tracing;
 use bevy::prelude::*;
 
-use super::step::step_simulation_once;
 use super::params_types::SolverParams;
-use crate::physics::profiler::process_cpu_time_seconds;
+use super::step::step_simulation_once;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
+use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::state::{
     PhysicsActiveRegion, PhysicsRegionSettings, PhysicsStepProfileSegment, PhysicsStepProfiler,
     ReplayState, SimulationParallelSettings, SimulationPerfMetrics, SimulationState,

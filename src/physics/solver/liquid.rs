@@ -161,8 +161,7 @@ pub(super) fn step_single_substep(
         let _span = tracing::info_span!("physics::update_velocity").entered();
         for i in 0..particles.particle_count() {
             particles.vel[i] = (particles.pos[i] - particles.prev_pos[i]) / dt_sub;
-            particles.vel[i] = particles
-                .vel[i]
+            particles.vel[i] = particles.vel[i]
                 .clamp_length_max(particles.material_params.particle_speed_limit_mps);
         }
     }
@@ -211,8 +210,7 @@ pub(super) fn step_single_substep(
     {
         let _span = tracing::info_span!("physics::final_velocity_clamp").entered();
         for i in 0..particles.particle_count() {
-            particles.vel[i] = particles
-                .vel[i]
+            particles.vel[i] = particles.vel[i]
                 .clamp_length_max(particles.material_params.particle_speed_limit_mps);
         }
     }
