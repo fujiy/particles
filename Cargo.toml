@@ -18,6 +18,8 @@ libc = "0.2"
 tracing-tracy = { version = "0.11.4", default-features = false, features = ["enable", "ondemand", "broadcast"], optional = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 noise = "0.9"
+bevy-inspector-egui = "0.36.0"
+tracing = "0.1"
 
 [profile.dev]
 opt-level = 1

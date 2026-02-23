@@ -14,8 +14,7 @@ use crate::physics::particle::{
 use crate::physics::state::{SimUpdateSet, TerrainStreamingSettings};
 use crate::physics::terrain::{
     CELL_PIXEL_SIZE, CELL_SIZE_M, CHUNK_PIXEL_SIZE, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M,
-    TerrainCell, TerrainChunk, TerrainMaterial, TerrainWorld, generated_cell_for_world,
-    world_to_cell,
+    TerrainCell, TerrainChunk, TerrainMaterial, TerrainWorld, world_to_cell,
 };
 
 #[derive(Resource, Default)]
@@ -30,7 +29,8 @@ pub struct TerrainLodPaletteCache {
 
 #[derive(Resource, Default)]
 pub struct TerrainLodRenderState {
-    chunk_sprites: HashMap<LodTileKey, TerrainChunkSprite>,
+    chunk_sprites: HashMap<LodTileKey, TerrainLodTileSprite>,
+    tiles_with_particles: HashSet<LodTileKey>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -72,9 +72,23 @@ pub struct FreeParticleRenderState {
     chunk_sprites: HashMap<IVec2, OverlayChunkSprite>,
 }
 
+#[derive(Resource, Default)]
+pub struct ParticleRenderChunkCache {
+    all_by_chunk: HashMap<IVec2, Vec<usize>>,
+    water_by_chunk: HashMap<IVec2, Vec<usize>>,
+    free_by_chunk: HashMap<IVec2, Vec<usize>>,
+}
+
 struct TerrainChunkSprite {
     entity: Entity,
     image: Handle<Image>,
+}
+
+struct TerrainLodTileSprite {
+    entity: Entity,
+    image: Handle<Image>,
+    terrain_pixels: Vec<u8>,
+    has_particles: bool,
 }
 
 struct ObjectSprite {
@@ -172,10 +186,12 @@ impl Plugin for RenderPlugin {
             .init_resource::<WaterRenderState>()
             .init_resource::<ObjectRenderState>()
             .init_resource::<FreeParticleRenderState>()
+            .init_resource::<ParticleRenderChunkCache>()
             .add_systems(Startup, bootstrap_terrain_chunks)
             .add_systems(
                 Update,
                 (
+                    refresh_particle_render_chunk_cache,
                     sync_lod_chunks_to_render,
                     sync_dirty_terrain_chunks_to_render,
                     sync_water_dots_to_render,
@@ -192,8 +208,41 @@ pub fn bootstrap_terrain_chunks(mut terrain_world: ResMut<TerrainWorld>) {
     terrain_world.rebuild_static_particles_if_dirty(TERRAIN_BOUNDARY_RADIUS_M);
 }
 
+fn refresh_particle_render_chunk_cache(
+    particles: Res<ParticleWorld>,
+    object_world: Res<ObjectWorld>,
+    mut cache: ResMut<ParticleRenderChunkCache>,
+) {
+    let _span = tracing::info_span!("render::refresh_particle_render_chunk_cache").entered();
+    if !particles.is_changed() && !object_world.is_changed() {
+        return;
+    }
+
+    cache.all_by_chunk.clear();
+    cache.water_by_chunk.clear();
+    cache.free_by_chunk.clear();
+
+    for (idx, &pos) in particles.positions().iter().enumerate() {
+        let chunk = chunk_coord_from_world(pos);
+        cache.all_by_chunk.entry(chunk).or_default().push(idx);
+
+        let material = particles.materials()[idx];
+        if matches!(material, ParticleMaterial::WaterLiquid) {
+            cache.water_by_chunk.entry(chunk).or_default().push(idx);
+            continue;
+        }
+        if object_world.object_of_particle(idx).is_some() {
+            continue;
+        }
+        cache.free_by_chunk.entry(chunk).or_default().push(idx);
+    }
+}
+
 pub fn sync_lod_chunks_to_render(
     mut commands: Commands,
+    terrain_world: Res<TerrainWorld>,
+    particles: Res<ParticleWorld>,
+    particle_chunk_cache: Res<ParticleRenderChunkCache>,
     streaming_settings: Res<TerrainStreamingSettings>,
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
@@ -202,6 +251,7 @@ pub fn sync_lod_chunks_to_render(
     mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    let _span = tracing::info_span!("render::sync_lod_chunks_to_render").entered();
     let Some((min_chunk, max_chunk, center_chunk)) = visible_chunk_bounds(&windows, &cameras)
     else {
         let stale_tiles: Vec<_> = lod_state.chunk_sprites.keys().copied().collect();
@@ -211,17 +261,74 @@ pub fn sync_lod_chunks_to_render(
                 images.remove(entry.image.id());
             }
         }
+        lod_state.tiles_with_particles.clear();
         render_diagnostics.lod_visible_tiles.clear();
         return;
     };
 
     let load_radius = streaming_settings.load_radius_chunks.max(0);
-    let mut target_tiles = HashSet::new();
-    for y in min_chunk.y..=max_chunk.y {
-        for x in min_chunk.x..=max_chunk.x {
-            let chunk_coord = IVec2::new(x, y);
-            let dx = (chunk_coord.x - center_chunk.x).abs();
-            let dy = (chunk_coord.y - center_chunk.y).abs();
+    let visible_chunk_w = (max_chunk.x - min_chunk.x + 1).max(0) as usize;
+    let visible_chunk_h = (max_chunk.y - min_chunk.y + 1).max(0) as usize;
+    let mut target_tiles = HashSet::with_capacity(visible_chunk_w.saturating_mul(visible_chunk_h));
+    {
+        let _span = tracing::info_span!("render::lod_target_tiles").entered();
+        for y in min_chunk.y..=max_chunk.y {
+            for x in min_chunk.x..=max_chunk.x {
+                let chunk_coord = IVec2::new(x, y);
+                let dx = (chunk_coord.x - center_chunk.x).abs();
+                let dy = (chunk_coord.y - center_chunk.y).abs();
+                let chebyshev_distance = dx.max(dy);
+                if chebyshev_distance <= load_radius {
+                    continue;
+                }
+                let outside_distance = chebyshev_distance - load_radius;
+                let lod_level = lod_level_for_outside_distance(outside_distance);
+                let span_chunks = lod_span_chunks_for_level(lod_level);
+                let origin_chunk = align_chunk_to_lod_tile(chunk_coord, span_chunks);
+                target_tiles.insert(LodTileKey {
+                    origin_chunk,
+                    span_chunks,
+                });
+            }
+        }
+    }
+
+    {
+        let _span = tracing::info_span!("render::lod_remove_stale_tiles").entered();
+        let stale_tiles: Vec<_> = lod_state
+            .chunk_sprites
+            .keys()
+            .copied()
+            .filter(|tile| !target_tiles.contains(tile))
+            .collect();
+        for tile in stale_tiles {
+            if let Some(entry) = lod_state.chunk_sprites.remove(&tile) {
+                commands.entity(entry.entity).despawn();
+                images.remove(entry.image.id());
+            }
+            lod_state.tiles_with_particles.remove(&tile);
+        }
+    }
+
+    let terrain_changed = terrain_world.is_changed();
+    let particles_changed = particles.is_changed();
+    let has_new_tiles = target_tiles
+        .iter()
+        .any(|tile| !lod_state.chunk_sprites.contains_key(tile));
+
+    let mut terrain_dirty_tiles = HashSet::new();
+    if terrain_changed {
+        let _span = tracing::info_span!("render::lod_collect_terrain_dirty_tiles").entered();
+        for chunk in terrain_world.dirty_chunk_coords() {
+            if chunk.x < min_chunk.x
+                || chunk.x > max_chunk.x
+                || chunk.y < min_chunk.y
+                || chunk.y > max_chunk.y
+            {
+                continue;
+            }
+            let dx = (chunk.x - center_chunk.x).abs();
+            let dy = (chunk.y - center_chunk.y).abs();
             let chebyshev_distance = dx.max(dy);
             if chebyshev_distance <= load_radius {
                 continue;
@@ -229,43 +336,181 @@ pub fn sync_lod_chunks_to_render(
             let outside_distance = chebyshev_distance - load_radius;
             let lod_level = lod_level_for_outside_distance(outside_distance);
             let span_chunks = lod_span_chunks_for_level(lod_level);
-            let origin_chunk = align_chunk_to_lod_tile(chunk_coord, span_chunks);
-            target_tiles.insert(LodTileKey {
-                origin_chunk,
+            let tile = LodTileKey {
+                origin_chunk: align_chunk_to_lod_tile(chunk, span_chunks),
                 span_chunks,
-            });
+            };
+            if target_tiles.contains(&tile) {
+                terrain_dirty_tiles.insert(tile);
+            }
         }
     }
 
-    let stale_tiles: Vec<_> = lod_state
-        .chunk_sprites
-        .keys()
-        .copied()
-        .filter(|tile| !target_tiles.contains(tile))
-        .collect();
-    for tile in stale_tiles {
-        if let Some(entry) = lod_state.chunk_sprites.remove(&tile) {
-            commands.entity(entry.entity).despawn();
-            images.remove(entry.image.id());
-        }
-    }
-
-    for &tile in &target_tiles {
-        if lod_state.chunk_sprites.contains_key(&tile) {
-            continue;
-        }
-        let lod_level = lod_level_for_span(tile.span_chunks);
-        let image_handle = images.add(build_lod_tile_image(tile, lod_level, &lod_palette_cache));
-        let mut sprite = Sprite::from_image(image_handle.clone());
-        sprite.custom_size = Some(Vec2::splat(CHUNK_WORLD_SIZE_M * tile.span_chunks as f32));
-        let center = lod_tile_to_world_center(tile);
-        let z = LOD_RENDER_Z - lod_level as f32 * 0.001;
-        let entity = commands
-            .spawn((sprite, Transform::from_xyz(center.x, center.y, z)))
-            .id();
+    let terrain_refresh_with_particles = terrain_dirty_tiles.iter().any(|tile| {
         lod_state
             .chunk_sprites
-            .insert(tile, TerrainChunkSprite { entity, image: image_handle });
+            .get(tile)
+            .map(|entry| entry.has_particles)
+            .unwrap_or(false)
+    });
+    let need_particle_collection =
+        particles_changed || has_new_tiles || terrain_refresh_with_particles;
+
+    let mut particles_by_tile = HashMap::new();
+    let mut particle_tiles_collected = false;
+    if need_particle_collection && !target_tiles.is_empty() {
+        let _span = tracing::info_span!("render::lod_collect_particles_by_tile").entered();
+        particles_by_tile = collect_lod_particles_by_tile(
+            &particle_chunk_cache,
+            &target_tiles,
+            center_chunk,
+            load_radius,
+            min_chunk,
+            max_chunk,
+        );
+        particle_tiles_collected = true;
+    }
+
+    {
+        let _span = tracing::info_span!("render::lod_update_tiles").entered();
+        let mut tiles_to_update = HashSet::new();
+        if terrain_changed {
+            tiles_to_update.extend(terrain_dirty_tiles.iter().copied());
+        }
+        if particles_changed {
+            tiles_to_update.extend(particles_by_tile.keys().copied());
+            tiles_to_update.extend(lod_state.tiles_with_particles.iter().copied());
+        }
+        tiles_to_update.retain(|tile| target_tiles.contains(tile));
+
+        {
+            let _span = tracing::info_span!("render::lod_update_existing_tiles").entered();
+            for tile in tiles_to_update {
+                let lod_level = lod_level_for_span(tile.span_chunks);
+                let Some(entry) = lod_state.chunk_sprites.get_mut(&tile) else {
+                    continue;
+                };
+                let tile_particle_indices = particles_by_tile
+                    .get(&tile)
+                    .map(|indices| indices.as_slice())
+                    .unwrap_or(&[]);
+                let has_particles_now = if particle_tiles_collected {
+                    !tile_particle_indices.is_empty()
+                } else {
+                    entry.has_particles
+                };
+                let needs_terrain_refresh = terrain_changed && terrain_dirty_tiles.contains(&tile);
+                let needs_particle_refresh = if particles_changed {
+                    has_particles_now || entry.has_particles
+                } else {
+                    needs_terrain_refresh && has_particles_now
+                };
+                if !needs_terrain_refresh && !needs_particle_refresh {
+                    continue;
+                }
+
+                if needs_terrain_refresh {
+                    entry.terrain_pixels = build_lod_tile_terrain_pixels(
+                        &terrain_world,
+                        tile,
+                        lod_level,
+                        &lod_palette_cache,
+                    );
+                }
+                let composed = if has_particles_now {
+                    compose_lod_tile_pixels(
+                        &entry.terrain_pixels,
+                        &particles,
+                        tile_particle_indices,
+                        tile.origin_chunk,
+                        tile.span_chunks,
+                    )
+                } else {
+                    entry.terrain_pixels.clone()
+                };
+                if images
+                    .insert(entry.image.id(), image_from_rgba_pixels(composed))
+                    .is_err()
+                {
+                    let composed = if has_particles_now {
+                        compose_lod_tile_pixels(
+                            &entry.terrain_pixels,
+                            &particles,
+                            tile_particle_indices,
+                            tile.origin_chunk,
+                            tile.span_chunks,
+                        )
+                    } else {
+                        entry.terrain_pixels.clone()
+                    };
+                    entry.image = images.add(image_from_rgba_pixels(composed));
+                    let mut sprite = Sprite::from_image(entry.image.clone());
+                    sprite.custom_size =
+                        Some(Vec2::splat(CHUNK_WORLD_SIZE_M * tile.span_chunks as f32));
+                    commands.entity(entry.entity).insert(sprite);
+                }
+                entry.has_particles = has_particles_now;
+                if has_particles_now {
+                    lod_state.tiles_with_particles.insert(tile);
+                } else {
+                    lod_state.tiles_with_particles.remove(&tile);
+                }
+            }
+        }
+
+        if has_new_tiles {
+            let _span = tracing::info_span!("render::lod_create_new_tiles").entered();
+            for &tile in &target_tiles {
+                if lod_state.chunk_sprites.contains_key(&tile) {
+                    continue;
+                }
+
+                let lod_level = lod_level_for_span(tile.span_chunks);
+                let tile_particle_indices = particles_by_tile
+                    .get(&tile)
+                    .map(|indices| indices.as_slice())
+                    .unwrap_or(&[]);
+                let has_particles_now = !tile_particle_indices.is_empty();
+                let terrain_pixels = build_lod_tile_terrain_pixels(
+                    &terrain_world,
+                    tile,
+                    lod_level,
+                    &lod_palette_cache,
+                );
+                let composed = if has_particles_now {
+                    compose_lod_tile_pixels(
+                        &terrain_pixels,
+                        &particles,
+                        tile_particle_indices,
+                        tile.origin_chunk,
+                        tile.span_chunks,
+                    )
+                } else {
+                    terrain_pixels.clone()
+                };
+                let image_handle = images.add(image_from_rgba_pixels(composed));
+                let mut sprite = Sprite::from_image(image_handle.clone());
+                sprite.custom_size =
+                    Some(Vec2::splat(CHUNK_WORLD_SIZE_M * tile.span_chunks as f32));
+                let center = lod_tile_to_world_center(tile);
+                let z = LOD_RENDER_Z - lod_level as f32 * 0.001;
+                let entity = commands
+                    .spawn((sprite, Transform::from_xyz(center.x, center.y, z)))
+                    .id();
+                lod_state.chunk_sprites.insert(
+                    tile,
+                    TerrainLodTileSprite {
+                        entity,
+                        image: image_handle,
+                        terrain_pixels,
+                        has_particles: has_particles_now,
+                    },
+                );
+                if has_particles_now {
+                    lod_state.tiles_with_particles.insert(tile);
+                }
+            }
+        }
     }
 
     let mut diagnostic_tiles: Vec<_> = target_tiles
@@ -275,7 +520,8 @@ pub fn sync_lod_chunks_to_render(
             span_chunks: tile.span_chunks,
         })
         .collect();
-    diagnostic_tiles.sort_by_key(|tile| (tile.span_chunks, tile.origin_chunk.y, tile.origin_chunk.x));
+    diagnostic_tiles
+        .sort_by_key(|tile| (tile.span_chunks, tile.origin_chunk.y, tile.origin_chunk.x));
     render_diagnostics.lod_visible_tiles = diagnostic_tiles;
 }
 
@@ -286,6 +532,7 @@ pub fn sync_dirty_terrain_chunks_to_render(
     mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    let _span = tracing::info_span!("render::sync_dirty_terrain_chunks_to_render").entered();
     let stale_chunks: Vec<_> = render_state
         .chunk_sprites
         .keys()
@@ -368,63 +615,55 @@ pub fn sync_water_dots_to_render(
     mut commands: Commands,
     particles: Res<ParticleWorld>,
     terrain: Res<TerrainWorld>,
+    particle_chunk_cache: Res<ParticleRenderChunkCache>,
     mut water_state: ResMut<WaterRenderState>,
     mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    let _span = tracing::info_span!("render::sync_water_dots_to_render").entered();
     let loaded_chunks = terrain.loaded_chunk_coords();
-    let stale_chunks: Vec<_> = water_state
-        .chunk_sprites
-        .keys()
-        .copied()
-        .filter(|chunk_coord| terrain.chunk(*chunk_coord).is_none())
-        .collect();
-    for chunk_coord in stale_chunks {
-        if let Some(entry) = water_state.chunk_sprites.remove(&chunk_coord) {
-            commands.entity(entry.entity).despawn();
-            images.remove(entry.image.id());
+    {
+        let _span = tracing::info_span!("render::water_chunk_sprite_maintenance").entered();
+        let stale_chunks: Vec<_> = water_state
+            .chunk_sprites
+            .keys()
+            .copied()
+            .filter(|chunk_coord| terrain.chunk(*chunk_coord).is_none())
+            .collect();
+        for chunk_coord in stale_chunks {
+            if let Some(entry) = water_state.chunk_sprites.remove(&chunk_coord) {
+                commands.entity(entry.entity).despawn();
+                images.remove(entry.image.id());
+            }
         }
-    }
 
-    let mut created_chunks = false;
-    for &chunk_coord in &loaded_chunks {
-        if water_state.chunk_sprites.contains_key(&chunk_coord) {
-            continue;
+        let mut created_chunks = false;
+        for &chunk_coord in &loaded_chunks {
+            if water_state.chunk_sprites.contains_key(&chunk_coord) {
+                continue;
+            }
+            let image_handle = images.add(blank_water_image(CHUNK_PIXEL_SIZE, CHUNK_PIXEL_SIZE));
+            let mut sprite = Sprite::from_image(image_handle.clone());
+            sprite.custom_size = Some(Vec2::splat(CHUNK_WORLD_SIZE_M));
+            let center = chunk_to_world_center(chunk_coord);
+            let entity = commands
+                .spawn((
+                    sprite,
+                    Transform::from_xyz(center.x, center.y, WATER_RENDER_Z),
+                ))
+                .id();
+            water_state.chunk_sprites.insert(
+                chunk_coord,
+                OverlayChunkSprite {
+                    entity,
+                    image: image_handle,
+                },
+            );
+            created_chunks = true;
         }
-        let image_handle = images.add(blank_water_image(CHUNK_PIXEL_SIZE, CHUNK_PIXEL_SIZE));
-        let mut sprite = Sprite::from_image(image_handle.clone());
-        sprite.custom_size = Some(Vec2::splat(CHUNK_WORLD_SIZE_M));
-        let center = chunk_to_world_center(chunk_coord);
-        let entity = commands
-            .spawn((
-                sprite,
-                Transform::from_xyz(center.x, center.y, WATER_RENDER_Z),
-            ))
-            .id();
-        water_state.chunk_sprites.insert(
-            chunk_coord,
-            OverlayChunkSprite {
-                entity,
-                image: image_handle,
-            },
-        );
-        created_chunks = true;
-    }
-
-    let should_update = created_chunks || particles.is_changed() || terrain.is_changed();
-    if !should_update {
-        return;
-    }
-
-    let mut water_by_chunk: HashMap<IVec2, Vec<usize>> = HashMap::new();
-    for (idx, &pos) in particles.positions().iter().enumerate() {
-        if !matches!(particles.materials()[idx], ParticleMaterial::WaterLiquid) {
-            continue;
+        if !(created_chunks || particle_chunk_cache.is_changed() || terrain.is_changed()) {
+            return;
         }
-        water_by_chunk
-            .entry(chunk_coord_from_world(pos))
-            .or_default()
-            .push(idx);
     }
 
     let draw_radius = nominal_particle_draw_radius_m();
@@ -444,90 +683,96 @@ pub fn sync_water_dots_to_render(
         .resize((chunk_width * chunk_height) as usize, 0.0);
 
     let mut updated_chunks = HashSet::new();
-    for &chunk_coord in &loaded_chunks {
-        let mut candidate_indices = Vec::new();
-        for y in (chunk_coord.y - 1)..=(chunk_coord.y + 1) {
-            for x in (chunk_coord.x - 1)..=(chunk_coord.x + 1) {
-                if let Some(indices) = water_by_chunk.get(&IVec2::new(x, y)) {
-                    candidate_indices.extend(indices.iter().copied());
+    {
+        let _span = tracing::info_span!("render::water_rasterize_chunks").entered();
+        for &chunk_coord in &loaded_chunks {
+            let mut candidate_indices = Vec::new();
+            for y in (chunk_coord.y - 1)..=(chunk_coord.y + 1) {
+                for x in (chunk_coord.x - 1)..=(chunk_coord.x + 1) {
+                    if let Some(indices) =
+                        particle_chunk_cache.water_by_chunk.get(&IVec2::new(x, y))
+                    {
+                        candidate_indices.extend(indices.iter().copied());
+                    }
                 }
             }
-        }
 
-        water_state.density.fill(0.0);
-        let mut pixels = vec![0_u8; (chunk_width * chunk_height * 4) as usize];
+            water_state.density.fill(0.0);
+            let mut pixels = vec![0_u8; (chunk_width * chunk_height * 4) as usize];
 
-        for particle_index in candidate_indices {
-            let pos = particles.positions()[particle_index];
-            updated_chunks.insert(chunk_coord_from_world(pos));
-            let particle_mass = particles.masses()[particle_index];
-            let px_center = world_to_chunk_pixel(pos, chunk_coord);
-            for py in (px_center.y - draw_radius_px)..=(px_center.y + draw_radius_px) {
-                if py < 0 || py >= chunk_height as i32 {
-                    continue;
-                }
-                for px in (px_center.x - draw_radius_px)..=(px_center.x + draw_radius_px) {
-                    if px < 0 || px >= chunk_width as i32 {
+            for particle_index in candidate_indices {
+                let pos = particles.positions()[particle_index];
+                updated_chunks.insert(chunk_coord_from_world(pos));
+                let particle_mass = particles.masses()[particle_index];
+                let px_center = world_to_chunk_pixel(pos, chunk_coord);
+                for py in (px_center.y - draw_radius_px)..=(px_center.y + draw_radius_px) {
+                    if py < 0 || py >= chunk_height as i32 {
                         continue;
                     }
-                    let sample_world = chunk_pixel_to_world(IVec2::new(px, py), chunk_coord);
+                    for px in (px_center.x - draw_radius_px)..=(px_center.x + draw_radius_px) {
+                        if px < 0 || px >= chunk_width as i32 {
+                            continue;
+                        }
+                        let sample_world = chunk_pixel_to_world(IVec2::new(px, py), chunk_coord);
+                        if is_solid_terrain_at_world(&terrain, sample_world) {
+                            continue;
+                        }
+                        let r2 = (sample_world - pos).length_squared();
+                        let w = kernel_poly6_for_render(r2, draw_radius);
+                        if w == 0.0 {
+                            continue;
+                        }
+                        let idx = chunk_density_index(px, py, chunk_width, chunk_height);
+                        water_state.density[idx] += particle_mass * w;
+                    }
+                }
+            }
+
+            let density = std::mem::take(&mut water_state.density);
+            let WaterRenderState {
+                blur_tmp,
+                blurred_density,
+                ..
+            } = &mut *water_state;
+            blur_density_gaussian_separable(
+                &density,
+                blur_tmp,
+                blurred_density,
+                chunk_width,
+                chunk_height,
+                WATER_BLUR_RADIUS_DOTS,
+            );
+            water_state.density = density;
+
+            for py in 0..chunk_height {
+                for px in 0..chunk_width {
+                    let idx = chunk_density_index(px as i32, py as i32, chunk_width, chunk_height);
+                    let blurred = water_state.blurred_density[idx];
+                    let coverage = smoothstep(
+                        dot_threshold - WATER_DOT_SMOOTH_WIDTH,
+                        dot_threshold + WATER_DOT_SMOOTH_WIDTH,
+                        blurred,
+                    );
+                    if coverage <= 0.0 {
+                        continue;
+                    }
+                    let sample_world =
+                        chunk_pixel_to_world(IVec2::new(px as i32, py as i32), chunk_coord);
                     if is_solid_terrain_at_world(&terrain, sample_world) {
                         continue;
                     }
-                    let r2 = (sample_world - pos).length_squared();
-                    let w = kernel_poly6_for_render(r2, draw_radius);
-                    if w == 0.0 {
-                        continue;
-                    }
-                    let idx = chunk_density_index(px, py, chunk_width, chunk_height);
-                    water_state.density[idx] += particle_mass * w;
+                    let mut color =
+                        water_palette_color(px as i32, py as i32, blurred, dot_threshold);
+                    color[3] = ((color[3] as f32) * coverage).round().clamp(0.0, 255.0) as u8;
+                    let offset = idx * 4;
+                    pixels[offset..offset + 4].copy_from_slice(&color);
                 }
             }
-        }
 
-        let density = std::mem::take(&mut water_state.density);
-        let WaterRenderState {
-            blur_tmp,
-            blurred_density,
-            ..
-        } = &mut *water_state;
-        blur_density_gaussian_separable(
-            &density,
-            blur_tmp,
-            blurred_density,
-            chunk_width,
-            chunk_height,
-            WATER_BLUR_RADIUS_DOTS,
-        );
-        water_state.density = density;
-
-        for py in 0..chunk_height {
-            for px in 0..chunk_width {
-                let idx = chunk_density_index(px as i32, py as i32, chunk_width, chunk_height);
-                let blurred = water_state.blurred_density[idx];
-                let coverage = smoothstep(
-                    dot_threshold - WATER_DOT_SMOOTH_WIDTH,
-                    dot_threshold + WATER_DOT_SMOOTH_WIDTH,
-                    blurred,
-                );
-                if coverage <= 0.0 {
-                    continue;
+            if let Some(entry) = water_state.chunk_sprites.get(&chunk_coord) {
+                if let Some(image) = images.get_mut(&entry.image) {
+                    image.data = Some(pixels);
                 }
-                let sample_world =
-                    chunk_pixel_to_world(IVec2::new(px as i32, py as i32), chunk_coord);
-                if is_solid_terrain_at_world(&terrain, sample_world) {
-                    continue;
-                }
-                let mut color = water_palette_color(px as i32, py as i32, blurred, dot_threshold);
-                color[3] = ((color[3] as f32) * coverage).round().clamp(0.0, 255.0) as u8;
-                let offset = idx * 4;
-                pixels[offset..offset + 4].copy_from_slice(&color);
-            }
-        }
-
-        if let Some(entry) = water_state.chunk_sprites.get(&chunk_coord) {
-            if let Some(image) = images.get_mut(&entry.image) {
-                image.data = Some(pixels);
             }
         }
     }
@@ -540,122 +785,113 @@ pub fn sync_water_dots_to_render(
 pub fn sync_free_particles_to_render(
     mut commands: Commands,
     particles: Res<ParticleWorld>,
-    object_world: Res<ObjectWorld>,
     terrain: Res<TerrainWorld>,
+    particle_chunk_cache: Res<ParticleRenderChunkCache>,
     mut free_state: ResMut<FreeParticleRenderState>,
     mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    let _span = tracing::info_span!("render::sync_free_particles_to_render").entered();
     let loaded_chunks = terrain.loaded_chunk_coords();
-    let stale_chunks: Vec<_> = free_state
-        .chunk_sprites
-        .keys()
-        .copied()
-        .filter(|chunk_coord| terrain.chunk(*chunk_coord).is_none())
-        .collect();
-    for chunk_coord in stale_chunks {
-        if let Some(entry) = free_state.chunk_sprites.remove(&chunk_coord) {
-            commands.entity(entry.entity).despawn();
-            images.remove(entry.image.id());
+    let created_chunks = {
+        let _span = tracing::info_span!("render::free_chunk_sprite_maintenance").entered();
+        let stale_chunks: Vec<_> = free_state
+            .chunk_sprites
+            .keys()
+            .copied()
+            .filter(|chunk_coord| terrain.chunk(*chunk_coord).is_none())
+            .collect();
+        for chunk_coord in stale_chunks {
+            if let Some(entry) = free_state.chunk_sprites.remove(&chunk_coord) {
+                commands.entity(entry.entity).despawn();
+                images.remove(entry.image.id());
+            }
         }
-    }
 
-    let mut created_chunks = false;
-    for &chunk_coord in &loaded_chunks {
-        if free_state.chunk_sprites.contains_key(&chunk_coord) {
-            continue;
+        let mut created_chunks = false;
+        for &chunk_coord in &loaded_chunks {
+            if free_state.chunk_sprites.contains_key(&chunk_coord) {
+                continue;
+            }
+            let image_handle = images.add(blank_water_image(CHUNK_PIXEL_SIZE, CHUNK_PIXEL_SIZE));
+            let mut sprite = Sprite::from_image(image_handle.clone());
+            sprite.custom_size = Some(Vec2::splat(CHUNK_WORLD_SIZE_M));
+            let center = chunk_to_world_center(chunk_coord);
+            let entity = commands
+                .spawn((
+                    sprite,
+                    Transform::from_xyz(center.x, center.y, FREE_PARTICLE_RENDER_Z),
+                ))
+                .id();
+            free_state.chunk_sprites.insert(
+                chunk_coord,
+                OverlayChunkSprite {
+                    entity,
+                    image: image_handle,
+                },
+            );
+            created_chunks = true;
         }
-        let image_handle = images.add(blank_water_image(CHUNK_PIXEL_SIZE, CHUNK_PIXEL_SIZE));
-        let mut sprite = Sprite::from_image(image_handle.clone());
-        sprite.custom_size = Some(Vec2::splat(CHUNK_WORLD_SIZE_M));
-        let center = chunk_to_world_center(chunk_coord);
-        let entity = commands
-            .spawn((
-                sprite,
-                Transform::from_xyz(center.x, center.y, FREE_PARTICLE_RENDER_Z),
-            ))
-            .id();
-        free_state.chunk_sprites.insert(
-            chunk_coord,
-            OverlayChunkSprite {
-                entity,
-                image: image_handle,
-            },
-        );
-        created_chunks = true;
-    }
+        created_chunks
+    };
 
-    let should_update = created_chunks
-        || particles.is_changed()
-        || object_world.is_changed()
-        || terrain.is_changed();
+    let should_update = created_chunks || particle_chunk_cache.is_changed() || terrain.is_changed();
     if !should_update {
         return;
-    }
-
-    let mut free_particles_by_chunk: HashMap<IVec2, Vec<usize>> = HashMap::new();
-    for (idx, &pos) in particles.positions().iter().enumerate() {
-        let material = particles.materials()[idx];
-        if matches!(material, ParticleMaterial::WaterLiquid) {
-            continue;
-        }
-        if object_world.object_of_particle(idx).is_some() {
-            continue;
-        }
-        free_particles_by_chunk
-            .entry(chunk_coord_from_world(pos))
-            .or_default()
-            .push(idx);
     }
 
     let mut updated_chunks = HashSet::new();
     let chunk_width = CHUNK_PIXEL_SIZE;
     let chunk_height = CHUNK_PIXEL_SIZE;
-    for &chunk_coord in &loaded_chunks {
-        let mut pixels = vec![0_u8; (chunk_width * chunk_height * 4) as usize];
-        let mut candidate_indices = Vec::new();
-        for y in (chunk_coord.y - 1)..=(chunk_coord.y + 1) {
-            for x in (chunk_coord.x - 1)..=(chunk_coord.x + 1) {
-                if let Some(indices) = free_particles_by_chunk.get(&IVec2::new(x, y)) {
-                    candidate_indices.extend(indices.iter().copied());
+    {
+        let _span = tracing::info_span!("render::free_rasterize_chunks").entered();
+        for &chunk_coord in &loaded_chunks {
+            let mut pixels = vec![0_u8; (chunk_width * chunk_height * 4) as usize];
+            let mut candidate_indices = Vec::new();
+            for y in (chunk_coord.y - 1)..=(chunk_coord.y + 1) {
+                for x in (chunk_coord.x - 1)..=(chunk_coord.x + 1) {
+                    if let Some(indices) = particle_chunk_cache.free_by_chunk.get(&IVec2::new(x, y))
+                    {
+                        candidate_indices.extend(indices.iter().copied());
+                    }
                 }
             }
-        }
 
-        for particle_index in candidate_indices {
-            let pos = particles.positions()[particle_index];
-            let material = particles.materials()[particle_index];
-            updated_chunks.insert(chunk_coord_from_world(pos));
+            for particle_index in candidate_indices {
+                let pos = particles.positions()[particle_index];
+                let material = particles.materials()[particle_index];
+                updated_chunks.insert(chunk_coord_from_world(pos));
 
-            let radius_m = particle_properties(material).radius_m;
-            let radius_px = (radius_m * WATER_DOT_SCALE).ceil().max(1.0) as i32;
-            let center_px = world_to_chunk_pixel(pos, chunk_coord);
-            let palette = cell_palette_for_particle(material);
-            for py in (center_px.y - radius_px)..=(center_px.y + radius_px) {
-                if py < 0 || py >= chunk_height as i32 {
-                    continue;
-                }
-                for px in (center_px.x - radius_px)..=(center_px.x + radius_px) {
-                    if px < 0 || px >= chunk_width as i32 {
+                let radius_m = particle_properties(material).radius_m;
+                let radius_px = (radius_m * WATER_DOT_SCALE).ceil().max(1.0) as i32;
+                let center_px = world_to_chunk_pixel(pos, chunk_coord);
+                let palette = cell_palette_for_particle(material);
+                for py in (center_px.y - radius_px)..=(center_px.y + radius_px) {
+                    if py < 0 || py >= chunk_height as i32 {
                         continue;
                     }
-                    let sample_world = chunk_pixel_to_world(IVec2::new(px, py), chunk_coord);
-                    if is_solid_terrain_at_world(&terrain, sample_world) {
-                        continue;
+                    for px in (center_px.x - radius_px)..=(center_px.x + radius_px) {
+                        if px < 0 || px >= chunk_width as i32 {
+                            continue;
+                        }
+                        let sample_world = chunk_pixel_to_world(IVec2::new(px, py), chunk_coord);
+                        if is_solid_terrain_at_world(&terrain, sample_world) {
+                            continue;
+                        }
+                        if (sample_world - pos).length_squared() > radius_m * radius_m {
+                            continue;
+                        }
+                        let offset = chunk_density_index(px, py, chunk_width, chunk_height) * 4;
+                        let palette_index = deterministic_palette_index(px, py);
+                        pixels[offset..offset + 4].copy_from_slice(&palette[palette_index]);
                     }
-                    if (sample_world - pos).length_squared() > radius_m * radius_m {
-                        continue;
-                    }
-                    let offset = chunk_density_index(px, py, chunk_width, chunk_height) * 4;
-                    let palette_index = deterministic_palette_index(px, py);
-                    pixels[offset..offset + 4].copy_from_slice(&palette[palette_index]);
                 }
             }
-        }
 
-        if let Some(entry) = free_state.chunk_sprites.get(&chunk_coord) {
-            if let Some(image) = images.get_mut(&entry.image) {
-                image.data = Some(pixels);
+            if let Some(entry) = free_state.chunk_sprites.get(&chunk_coord) {
+                if let Some(image) = images.get_mut(&entry.image) {
+                    image.data = Some(pixels);
+                }
             }
         }
     }
@@ -673,6 +909,7 @@ pub fn sync_object_sprites_to_render(
     mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     mut images: ResMut<Assets<Image>>,
 ) {
+    let _span = tracing::info_span!("render::sync_object_sprites_to_render").entered();
     if !particles.is_changed() && !object_world.is_changed() {
         return;
     }
@@ -683,74 +920,83 @@ pub fn sync_object_sprites_to_render(
     let mut live_ids = Vec::new();
     let mut updated_chunks = HashSet::new();
 
-    for object in object_world.objects_mut() {
-        let Some((center, theta)) = object_pose(object, positions, masses) else {
-            continue;
-        };
-        live_ids.push(object.id);
-        for &index in &object.particle_indices {
-            if index < positions.len() {
-                updated_chunks.insert(chunk_coord_from_world(positions[index]));
-            }
-        }
-
-        let transform = Transform::from_xyz(center.x, center.y, OBJECT_RENDER_Z)
-            .with_rotation(Quat::from_rotation_z(theta));
-        if let Some(entry) = render_state.object_sprites.get_mut(&object.id) {
-            if object.shape_dirty {
-                let (image, world_size) = rasterize_object_image(object, materials);
-                if images.insert(entry.image.id(), image).is_err() {
-                    let (new_image, _) = rasterize_object_image(object, materials);
-                    entry.image = images.add(new_image);
+    {
+        let _span = tracing::info_span!("render::object_update_live").entered();
+        for object in object_world.objects_mut() {
+            let Some((center, theta)) = object_pose(object, positions, masses) else {
+                continue;
+            };
+            live_ids.push(object.id);
+            for &index in &object.particle_indices {
+                if index < positions.len() {
+                    updated_chunks.insert(chunk_coord_from_world(positions[index]));
                 }
-                entry.world_size = world_size;
-                let mut sprite = Sprite::from_image(entry.image.clone());
-                sprite.custom_size = Some(entry.world_size);
-                commands.entity(entry.entity).insert(sprite);
-                object.shape_dirty = false;
             }
-            commands.entity(entry.entity).insert(transform);
-            continue;
-        }
 
-        let (image, world_size) = rasterize_object_image(object, materials);
-        let image_handle = images.add(image);
-        let mut sprite = Sprite::from_image(image_handle.clone());
-        sprite.custom_size = Some(world_size);
-        let entity = commands
-            .spawn((
-                sprite,
-                transform,
-                ObjectRenderHandle {
-                    object_id: object.id,
+            let transform = Transform::from_xyz(center.x, center.y, OBJECT_RENDER_Z)
+                .with_rotation(Quat::from_rotation_z(theta));
+            if let Some(entry) = render_state.object_sprites.get_mut(&object.id) {
+                if object.shape_dirty {
+                    let (image, world_size) = rasterize_object_image(object, materials);
+                    if images.insert(entry.image.id(), image).is_err() {
+                        let (new_image, _) = rasterize_object_image(object, materials);
+                        entry.image = images.add(new_image);
+                    }
+                    entry.world_size = world_size;
+                    let mut sprite = Sprite::from_image(entry.image.clone());
+                    sprite.custom_size = Some(entry.world_size);
+                    commands.entity(entry.entity).insert(sprite);
+                    object.shape_dirty = false;
+                }
+                commands.entity(entry.entity).insert(transform);
+                continue;
+            }
+
+            let (image, world_size) = rasterize_object_image(object, materials);
+            let image_handle = images.add(image);
+            let mut sprite = Sprite::from_image(image_handle.clone());
+            sprite.custom_size = Some(world_size);
+            let entity = commands
+                .spawn((
+                    sprite,
+                    transform,
+                    ObjectRenderHandle {
+                        object_id: object.id,
+                    },
+                ))
+                .id();
+            render_state.object_sprites.insert(
+                object.id,
+                ObjectSprite {
+                    entity,
+                    image: image_handle,
+                    world_size,
                 },
-            ))
-            .id();
-        render_state.object_sprites.insert(
-            object.id,
-            ObjectSprite {
-                entity,
-                image: image_handle,
-                world_size,
-            },
-        );
-        object.shape_dirty = false;
-    }
-
-    let stale_ids: Vec<_> = render_state
-        .object_sprites
-        .keys()
-        .copied()
-        .filter(|id| !live_ids.contains(id))
-        .collect();
-    for object_id in stale_ids {
-        if let Some(entry) = render_state.object_sprites.remove(&object_id) {
-            commands.entity(entry.entity).despawn();
-            images.remove(entry.image.id());
+            );
+            object.shape_dirty = false;
         }
     }
-    for chunk in updated_chunks {
-        mark_particle_chunk_updated(&mut render_diagnostics, chunk);
+
+    {
+        let _span = tracing::info_span!("render::object_remove_stale").entered();
+        let stale_ids: Vec<_> = render_state
+            .object_sprites
+            .keys()
+            .copied()
+            .filter(|id| !live_ids.contains(id))
+            .collect();
+        for object_id in stale_ids {
+            if let Some(entry) = render_state.object_sprites.remove(&object_id) {
+                commands.entity(entry.entity).despawn();
+                images.remove(entry.image.id());
+            }
+        }
+    }
+    {
+        let _span = tracing::info_span!("render::object_mark_chunks").entered();
+        for chunk in updated_chunks {
+            mark_particle_chunk_updated(&mut render_diagnostics, chunk);
+        }
     }
 }
 
@@ -835,11 +1081,53 @@ fn lod_tile_to_world_center(tile: LodTileKey) -> Vec2 {
     (tile.origin_chunk.as_vec2() + Vec2::splat(span * 0.5)) * CHUNK_WORLD_SIZE_M
 }
 
-fn build_lod_tile_image(
+fn collect_lod_particles_by_tile(
+    particle_chunk_cache: &ParticleRenderChunkCache,
+    target_tiles: &HashSet<LodTileKey>,
+    center_chunk: IVec2,
+    load_radius: i32,
+    min_chunk: IVec2,
+    max_chunk: IVec2,
+) -> HashMap<LodTileKey, Vec<usize>> {
+    let mut by_tile: HashMap<LodTileKey, Vec<usize>> = HashMap::with_capacity(target_tiles.len());
+    for (&chunk, indices) in &particle_chunk_cache.all_by_chunk {
+        if chunk.x < min_chunk.x
+            || chunk.x > max_chunk.x
+            || chunk.y < min_chunk.y
+            || chunk.y > max_chunk.y
+        {
+            continue;
+        }
+        let dx = (chunk.x - center_chunk.x).abs();
+        let dy = (chunk.y - center_chunk.y).abs();
+        let chebyshev_distance = dx.max(dy);
+        if chebyshev_distance <= load_radius {
+            continue;
+        }
+        let outside_distance = chebyshev_distance - load_radius;
+        let lod_level = lod_level_for_outside_distance(outside_distance);
+        let span_chunks = lod_span_chunks_for_level(lod_level);
+        let tile = LodTileKey {
+            origin_chunk: align_chunk_to_lod_tile(chunk, span_chunks),
+            span_chunks,
+        };
+        if !target_tiles.contains(&tile) {
+            continue;
+        }
+        by_tile
+            .entry(tile)
+            .or_default()
+            .extend(indices.iter().copied());
+    }
+    by_tile
+}
+
+fn build_lod_tile_terrain_pixels(
+    terrain_world: &TerrainWorld,
     tile: LodTileKey,
     lod_level: u32,
     lod_palette_cache: &TerrainLodPaletteCache,
-) -> Image {
+) -> Vec<u8> {
     let mut pixels = vec![0_u8; (CHUNK_PIXEL_SIZE * CHUNK_PIXEL_SIZE * 4) as usize];
     let tile_min_world = tile.origin_chunk.as_vec2() * CHUNK_WORLD_SIZE_M;
     let tile_size_world = CHUNK_WORLD_SIZE_M * tile.span_chunks as f32;
@@ -852,7 +1140,7 @@ fn build_lod_tile_image(
                 tile_min_world.y + ((py as f32 + 0.5) / tex_size) * tile_size_world,
             );
             let sample_cell = world_to_cell(sample_world);
-            let sample_terrain = generated_cell_for_world(sample_cell);
+            let sample_terrain = terrain_world.get_cell_or_generated(sample_cell);
             let TerrainCell::Solid { material, .. } = sample_terrain else {
                 continue;
             };
@@ -865,19 +1153,57 @@ fn build_lod_tile_image(
         }
     }
 
-    let mut image = Image::new_fill(
-        Extent3d {
-            width: CHUNK_PIXEL_SIZE,
-            height: CHUNK_PIXEL_SIZE,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        &[0, 0, 0, 0],
-        TextureFormat::Rgba8UnormSrgb,
-        RenderAssetUsages::default(),
+    pixels
+}
+
+fn compose_lod_tile_pixels(
+    terrain_pixels: &[u8],
+    particles: &ParticleWorld,
+    particle_indices: &[usize],
+    tile_origin_chunk: IVec2,
+    tile_span_chunks: i32,
+) -> Vec<u8> {
+    let mut pixels = terrain_pixels.to_vec();
+    rasterize_lod_particles_into_pixels(
+        &mut pixels,
+        particles,
+        particle_indices,
+        tile_origin_chunk,
+        tile_span_chunks,
     );
-    image.data = Some(pixels);
-    image
+    pixels
+}
+
+fn rasterize_lod_particles_into_pixels(
+    pixels: &mut [u8],
+    particles: &ParticleWorld,
+    particle_indices: &[usize],
+    tile_origin_chunk: IVec2,
+    tile_span_chunks: i32,
+) {
+    let tile_min_world = tile_origin_chunk.as_vec2() * CHUNK_WORLD_SIZE_M;
+    let tile_size_world = CHUNK_WORLD_SIZE_M * tile_span_chunks.max(1) as f32;
+    let texture_size = CHUNK_PIXEL_SIZE as f32;
+
+    for &index in particle_indices {
+        let Some(&pos) = particles.positions().get(index) else {
+            continue;
+        };
+        let local = (pos - tile_min_world) / tile_size_world;
+        if local.x < 0.0 || local.x >= 1.0 || local.y < 0.0 || local.y >= 1.0 {
+            continue;
+        }
+        let px = (local.x * texture_size)
+            .floor()
+            .clamp(0.0, texture_size - 1.0) as u32;
+        let py = (local.y * texture_size)
+            .floor()
+            .clamp(0.0, texture_size - 1.0) as u32;
+        let image_y = CHUNK_PIXEL_SIZE - 1 - py;
+        let offset = ((image_y * CHUNK_PIXEL_SIZE + px) * 4) as usize;
+        let src = lod_particle_color(particles.materials()[index]);
+        blend_rgba8_over(&mut pixels[offset..offset + 4], src);
+    }
 }
 
 fn build_chunk_image(chunk_coord: IVec2, chunk: &TerrainChunk) -> Image {
@@ -896,6 +1222,10 @@ fn build_chunk_image(chunk_coord: IVec2, chunk: &TerrainChunk) -> Image {
         }
     }
 
+    image_from_rgba_pixels(pixels)
+}
+
+fn image_from_rgba_pixels(pixels: Vec<u8>) -> Image {
     let mut image = Image::new_fill(
         Extent3d {
             width: CHUNK_PIXEL_SIZE,
@@ -984,6 +1314,32 @@ fn cell_palette(cell: TerrainCell) -> Option<[[u8; 4]; 4]> {
             ..
         } => Some(SOIL_BASE_PALETTE),
     }
+}
+
+fn lod_particle_color(material: ParticleMaterial) -> [u8; 4] {
+    let palette = cell_palette_for_particle(material);
+    let mut color = palette[0];
+    color[3] = 220;
+    color
+}
+
+fn blend_rgba8_over(dst: &mut [u8], src: [u8; 4]) {
+    debug_assert!(dst.len() >= 4);
+    let src_a = src[3] as f32 / 255.0;
+    if src_a <= 0.0 {
+        return;
+    }
+    let inv_src_a = 1.0 - src_a;
+    dst[0] = ((dst[0] as f32 * inv_src_a) + (src[0] as f32 * src_a))
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    dst[1] = ((dst[1] as f32 * inv_src_a) + (src[1] as f32 * src_a))
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    dst[2] = ((dst[2] as f32 * inv_src_a) + (src[2] as f32 * src_a))
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    dst[3] = dst[3].max(src[3]);
 }
 
 fn write_cell_pixels(
