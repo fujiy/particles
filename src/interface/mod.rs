@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use bevy::prelude::*;
 
 use crate::physics::cell_to_world_center;
 use crate::physics::material::terrain_fracture_particle;
+use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::save_load;
 use crate::physics::scenario::{
     count_solid_cells, default_scenario_names, default_scenario_spec_by_name,
@@ -15,11 +16,8 @@ use crate::physics::state::{
     ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationParallelSettings,
     SimulationState,
 };
-use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
-use crate::physics::world::particle::{
-    ParticleMaterial, ParticleWorld,
-};
+use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,
 };
@@ -161,6 +159,7 @@ const WORLD_TOOLBAR_TOOLS: [WorldTool; 9] = [
     WorldTool::Break,
     WorldTool::Delete,
 ];
+const HUD_FPS_WINDOW_SEC: f32 = 1.0;
 
 mod icons;
 mod input_handlers;
@@ -176,6 +175,7 @@ impl Plugin for InterfacePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WorldInteractionState>()
             .init_resource::<SaveLoadUiState>()
+            .init_resource::<FpsHudStats>()
             .add_systems(Startup, setup_simulation_ui)
             .add_systems(
                 Update,
@@ -212,6 +212,7 @@ impl Plugin for InterfacePlugin {
                     update_save_load_dialog,
                     update_test_assert_panel,
                     update_world_tool_tooltip,
+                    update_fps_hud_stats,
                     update_simulation_hud,
                     update_step_profiler_panel,
                     update_step_profiler_tooltip,
@@ -227,6 +228,20 @@ struct SimulationHudFpsText;
 
 #[derive(Component)]
 struct SimulationHudStatsText;
+
+#[derive(Resource, Debug, Default)]
+struct FpsHudStats {
+    frame_samples: VecDeque<FpsFrameSample>,
+    window_elapsed: f32,
+    avg_fps: f32,
+    min_fps: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FpsFrameSample {
+    dt: f32,
+    fps: f32,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum WorldTool {
@@ -450,7 +465,7 @@ use input_handlers::{
 };
 
 use ui_systems::{
-    update_save_load_dialog, update_save_load_name_input_button_visuals,
+    update_fps_hud_stats, update_save_load_dialog, update_save_load_name_input_button_visuals,
     update_save_load_open_button_visuals, update_save_load_reset_button_visuals,
     update_save_load_slot_button_visuals, update_sim_parallel_button_label,
     update_sim_parallel_button_visuals, update_sim_play_pause_button_label,

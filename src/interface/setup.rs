@@ -22,7 +22,7 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("FPS: --"),
+                Text::new("FPS(1s avg/min): --/--"),
                 TextFont::from_font_size(14.0),
                 TextColor(Color::WHITE),
                 SimulationHudFpsText,

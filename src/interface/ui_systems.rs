@@ -1,4 +1,3 @@
-use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
@@ -509,8 +508,40 @@ pub(super) fn update_world_tool_tooltip(
     tooltip_text.0 = tool.label().to_string();
 }
 
+pub(super) fn update_fps_hud_stats(time: Res<Time>, mut fps_stats: ResMut<FpsHudStats>) {
+    let dt = time.delta_secs();
+    if dt <= f32::EPSILON {
+        return;
+    }
+
+    let fps = (1.0 / dt).clamp(0.0, 10_000.0);
+    fps_stats
+        .frame_samples
+        .push_back(FpsFrameSample { dt, fps });
+    fps_stats.window_elapsed += dt;
+
+    while fps_stats.window_elapsed > HUD_FPS_WINDOW_SEC && fps_stats.frame_samples.len() > 1 {
+        let Some(sample) = fps_stats.frame_samples.pop_front() else {
+            break;
+        };
+        fps_stats.window_elapsed -= sample.dt;
+    }
+
+    if fps_stats.frame_samples.is_empty() {
+        fps_stats.avg_fps = 0.0;
+        fps_stats.min_fps = 0.0;
+        return;
+    }
+
+    fps_stats.avg_fps = fps_stats.frame_samples.len() as f32 / fps_stats.window_elapsed.max(1e-5);
+    fps_stats.min_fps = fps_stats
+        .frame_samples
+        .iter()
+        .fold(f32::INFINITY, |acc, sample| acc.min(sample.fps));
+}
+
 pub(super) fn update_simulation_hud(
-    diagnostics: Res<DiagnosticsStore>,
+    fps_stats: Res<FpsHudStats>,
     sim_state: Res<SimulationState>,
     particles: Res<ParticleWorld>,
     mut hud_texts: ParamSet<(
@@ -518,11 +549,10 @@ pub(super) fn update_simulation_hud(
         Single<&mut Text, With<SimulationHudStatsText>>,
     )>,
 ) {
-    let fps = diagnostics
-        .get(&FrameTimeDiagnosticsPlugin::FPS)
-        .and_then(|diag| diag.smoothed())
-        .unwrap_or(0.0);
-    hud_texts.p0().0 = format!("FPS: {fps:.1}");
+    hud_texts.p0().0 = format!(
+        "FPS(1s avg/min): {:.1}/{:.1}",
+        fps_stats.avg_fps, fps_stats.min_fps
+    );
 
     let sim_status = if sim_state.running {
         "Running"
