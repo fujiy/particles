@@ -3,6 +3,10 @@ use std::collections::HashSet;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
+use crate::physics::generation::{TerrainMaterialProbabilities, sample_material_probabilities};
+use crate::physics::material::TerrainMaterial;
+use crate::physics::world::terrain::generated_cell_for_world;
+
 use super::*;
 
 pub(super) fn sync_required_render_tiles(
@@ -629,6 +633,8 @@ fn build_tile_terrain_pixels(
     let tile_min_world = tile.origin_chunk.as_vec2() * CHUNK_WORLD_SIZE_M;
     let tile_size_world = CHUNK_WORLD_SIZE_M * tile.span_chunks as f32;
     let tex_size = CHUNK_PIXEL_SIZE as f32;
+    let sample_footprint_m = tile_size_world / tex_size;
+    let use_probabilistic_sampling = tile.span_chunks > CELL_PIXEL_SIZE as i32;
 
     for py in 0..CHUNK_PIXEL_SIZE {
         for px in 0..CHUNK_PIXEL_SIZE {
@@ -637,20 +643,196 @@ fn build_tile_terrain_pixels(
                 tile_min_world.y + ((py as f32 + 0.5) / tex_size) * tile_size_world,
             );
             let sample_cell = world_to_cell(sample_world);
-            let sample_terrain = terrain_world.get_cell_or_generated(sample_cell);
-            let TerrainCell::Solid { material, .. } = sample_terrain else {
-                continue;
-            };
-            let palette = lod_palette_cache.palette_for(material, lod_level);
-
-            let palette_index = deterministic_palette_index(sample_cell.x, sample_cell.y);
             let image_y = CHUNK_PIXEL_SIZE - 1 - py;
             let offset = ((image_y * CHUNK_PIXEL_SIZE + px) * 4) as usize;
-            pixels[offset..offset + 4].copy_from_slice(&palette[palette_index]);
+            let sample_terrain = terrain_world.get_cell_or_generated(sample_cell);
+            let generated_terrain = generated_cell_for_world(sample_cell);
+
+            if sample_terrain != generated_terrain {
+                let TerrainCell::Solid { material, .. } = sample_terrain else {
+                    continue;
+                };
+                let palette = lod_palette_cache.palette_for(material, lod_level);
+                let palette_index = lod_palette_index_from_world_dot(sample_world);
+                pixels[offset..offset + 4].copy_from_slice(&palette[palette_index]);
+                continue;
+            }
+
+            // Keep deterministic dot-sampled palette up to CELL_PIXEL_SIZE× LOD span.
+            if !use_probabilistic_sampling {
+                let TerrainCell::Solid { material, .. } = generated_terrain else {
+                    continue;
+                };
+                let palette = lod_palette_cache.palette_for(material, lod_level);
+                let palette_index = lod_palette_index_from_world_dot(sample_world);
+                pixels[offset..offset + 4].copy_from_slice(&palette[palette_index]);
+                continue;
+            }
+
+            let probabilities = sample_material_probabilities(sample_world, sample_footprint_m);
+            let color = sample_lod_terrain_color_from_probabilities(
+                probabilities,
+                sample_cell,
+                lod_level,
+                sample_footprint_m,
+                lod_palette_cache,
+            );
+            if color[3] == 0 {
+                continue;
+            }
+            pixels[offset..offset + 4].copy_from_slice(&color);
         }
     }
 
     pixels
+}
+
+fn lod_palette_index_from_world_dot(world_pos: Vec2) -> usize {
+    let dots_per_meter = CELL_PIXEL_SIZE as f32 / CELL_SIZE_M;
+    let world_dot_x = (world_pos.x * dots_per_meter).floor() as i32;
+    let world_dot_y = (world_pos.y * dots_per_meter).floor() as i32;
+    deterministic_palette_index(world_dot_x, world_dot_y)
+}
+
+fn sample_lod_terrain_color_from_probabilities(
+    probabilities: TerrainMaterialProbabilities,
+    sample_cell: IVec2,
+    lod_level: u32,
+    sample_footprint_m: f32,
+    lod_palette_cache: &TerrainLodPaletteCache,
+) -> [u8; 4] {
+    let sampled_color =
+        deterministic_sampled_color(probabilities, sample_cell, lod_level, lod_palette_cache);
+    let (expected_color, stderr_per_sample) =
+        expected_color_from_probabilities(probabilities, lod_level, lod_palette_cache);
+    let expected_blend = expected_color_blend_factor(sample_footprint_m, stderr_per_sample);
+    mix_rgba8(sampled_color, expected_color, expected_blend)
+}
+
+fn deterministic_sampled_color(
+    probabilities: TerrainMaterialProbabilities,
+    sample_cell: IVec2,
+    lod_level: u32,
+    lod_palette_cache: &TerrainLodPaletteCache,
+) -> [u8; 4] {
+    let sample = deterministic_unit_float(sample_cell.x, sample_cell.y, 0x73a9_f2d1);
+    let material = if sample < probabilities.empty {
+        None
+    } else if sample < probabilities.empty + probabilities.soil {
+        Some(TerrainMaterial::Soil)
+    } else {
+        Some(TerrainMaterial::Stone)
+    };
+    let Some(material) = material else {
+        return [0, 0, 0, 0];
+    };
+    let palette = lod_palette_cache.palette_for(material, lod_level);
+    let palette_index = deterministic_palette_index(sample_cell.x, sample_cell.y);
+    palette[palette_index]
+}
+
+fn expected_color_from_probabilities(
+    probabilities: TerrainMaterialProbabilities,
+    lod_level: u32,
+    lod_palette_cache: &TerrainLodPaletteCache,
+) -> ([u8; 4], f32) {
+    let stone = lod_palette_cache.moments_for(TerrainMaterial::Stone, lod_level);
+    let soil = lod_palette_cache.moments_for(TerrainMaterial::Soil, lod_level);
+    let mut mean = [0.0_f32; 4];
+    let mut second = [0.0_f32; 4];
+    for channel in 0..4 {
+        mean[channel] = probabilities.stone * stone.mean_premul[channel]
+            + probabilities.soil * soil.mean_premul[channel];
+        second[channel] = probabilities.stone * stone.second_premul[channel]
+            + probabilities.soil * soil.second_premul[channel];
+    }
+
+    let mut max_var = 0.0_f32;
+    for channel in 0..4 {
+        let var = (second[channel] - mean[channel] * mean[channel]).max(0.0);
+        max_var = max_var.max(var);
+    }
+    let stderr_per_sample = max_var.sqrt() / 255.0;
+
+    let alpha = mean[3].clamp(0.0, 255.0);
+    if alpha <= 1e-5 {
+        return ([0, 0, 0, 0], stderr_per_sample);
+    }
+    let alpha_norm = alpha / 255.0;
+    let r = (mean[0] / alpha_norm).clamp(0.0, 255.0);
+    let g = (mean[1] / alpha_norm).clamp(0.0, 255.0);
+    let b = (mean[2] / alpha_norm).clamp(0.0, 255.0);
+    (
+        [
+            r.round() as u8,
+            g.round() as u8,
+            b.round() as u8,
+            alpha.round() as u8,
+        ],
+        stderr_per_sample,
+    )
+}
+
+fn expected_color_blend_factor(sample_footprint_m: f32, stderr_per_sample: f32) -> f32 {
+    let footprint_cells = (sample_footprint_m / CELL_SIZE_M).max(0.0);
+    if footprint_cells <= 1.0 {
+        return 0.0;
+    }
+
+    let sample_count = (footprint_cells * footprint_cells).max(1.0);
+    let corr_cells = LOD_EXPECTED_CORRELATION_CELLS.max(1e-3);
+    let n_eff = (sample_count / (corr_cells * corr_cells)).max(1.0);
+    let stderr_norm = stderr_per_sample / n_eff.sqrt();
+
+    if stderr_norm <= LOD_EXPECTED_STDERR_BLEND_LOW {
+        return 1.0;
+    }
+    if stderr_norm >= LOD_EXPECTED_STDERR_BLEND_HIGH {
+        return 0.0;
+    }
+    1.0 - smoothstep(
+        LOD_EXPECTED_STDERR_BLEND_LOW,
+        LOD_EXPECTED_STDERR_BLEND_HIGH,
+        stderr_norm,
+    )
+}
+
+fn deterministic_unit_float(x: i32, y: i32, salt: u32) -> f32 {
+    let mut state = (x as u32).wrapping_mul(0x45d9f3b);
+    state ^= (y as u32).wrapping_mul(0x27d4eb2d);
+    state ^= salt;
+    state ^= state >> 16;
+    state = state.wrapping_mul(0x7feb_352d);
+    state ^= state >> 15;
+    state = state.wrapping_mul(0x846c_a68b);
+    state ^= state >> 16;
+    state as f32 / u32::MAX as f32
+}
+
+fn mix_rgba8(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
+    let t = t.clamp(0.0, 1.0);
+    [
+        ((a[0] as f32 * (1.0 - t)) + (b[0] as f32 * t))
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        ((a[1] as f32 * (1.0 - t)) + (b[1] as f32 * t))
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        ((a[2] as f32 * (1.0 - t)) + (b[2] as f32 * t))
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        ((a[3] as f32 * (1.0 - t)) + (b[3] as f32 * t))
+            .round()
+            .clamp(0.0, 255.0) as u8,
+    ]
+}
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
+    if (edge1 - edge0).abs() <= f32::EPSILON {
+        return if x < edge0 { 0.0 } else { 1.0 };
+    }
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn build_full_chunk_terrain_pixels(terrain_world: &TerrainWorld, chunk_coord: IVec2) -> Vec<u8> {

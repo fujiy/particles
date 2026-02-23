@@ -18,3 +18,9 @@ pub const LOD_RENDER_Z: f32 = -0.5;
 pub const LOD_LEVEL_RESOLUTION_DIV: i32 = 2;
 pub const LOD_PRECOMPUTED_LEVELS: u32 = 8;
 pub const RENDER_TILE_EVICT_GRACE_FRAMES: u16 = 12;
+// Blend to expected color when normalized standard error of mean falls below this.
+pub const LOD_EXPECTED_STDERR_BLEND_LOW: f32 = 0.020;
+// Keep stochastic sampled color when normalized standard error is above this.
+pub const LOD_EXPECTED_STDERR_BLEND_HIGH: f32 = 0.070;
+// Correlation length (in cells) used for effective sample count: N_eff = N / corr^2.
+pub const LOD_EXPECTED_CORRELATION_CELLS: f32 = 1.6;

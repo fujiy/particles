@@ -33,22 +33,41 @@ struct MaterialPalettes {
     soil: [[u8; 4]; 4],
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct MaterialMoments {
+    pub mean_premul: [f32; 4],
+    pub second_premul: [f32; 4],
+}
+
+#[derive(Clone, Copy)]
+struct MaterialPaletteMoments {
+    stone: MaterialMoments,
+    sand: MaterialMoments,
+    soil: MaterialMoments,
+}
+
 #[derive(Resource)]
 pub struct TerrainLodPaletteCache {
     levels: Vec<MaterialPalettes>,
+    moments: Vec<MaterialPaletteMoments>,
 }
 
 impl Default for TerrainLodPaletteCache {
     fn default() -> Self {
         let mut levels = Vec::with_capacity(super::LOD_PRECOMPUTED_LEVELS as usize + 1);
+        let mut moments = Vec::with_capacity(super::LOD_PRECOMPUTED_LEVELS as usize + 1);
         for lod_level in 0..=super::LOD_PRECOMPUTED_LEVELS {
-            levels.push(MaterialPalettes {
-                stone: build_lod_palette(STONE_BASE_PALETTE, lod_level),
-                sand: build_lod_palette(SAND_BASE_PALETTE, lod_level),
-                soil: build_lod_palette(SOIL_BASE_PALETTE, lod_level),
+            let stone = build_lod_palette(STONE_BASE_PALETTE, lod_level);
+            let sand = build_lod_palette(SAND_BASE_PALETTE, lod_level);
+            let soil = build_lod_palette(SOIL_BASE_PALETTE, lod_level);
+            levels.push(MaterialPalettes { stone, sand, soil });
+            moments.push(MaterialPaletteMoments {
+                stone: compute_palette_moments(stone),
+                sand: compute_palette_moments(sand),
+                soil: compute_palette_moments(soil),
             });
         }
-        Self { levels }
+        Self { levels, moments }
     }
 }
 
@@ -61,6 +80,17 @@ impl TerrainLodPaletteCache {
             TerrainMaterial::Stone => palettes.stone,
             TerrainMaterial::Sand => palettes.sand,
             TerrainMaterial::Soil => palettes.soil,
+        }
+    }
+
+    pub(crate) fn moments_for(&self, material: TerrainMaterial, lod_level: u32) -> MaterialMoments {
+        let max_level = self.moments.len().saturating_sub(1) as u32;
+        let level = lod_level.min(max_level) as usize;
+        let moments = self.moments[level];
+        match material {
+            TerrainMaterial::Stone => moments.stone,
+            TerrainMaterial::Sand => moments.sand,
+            TerrainMaterial::Soil => moments.soil,
         }
     }
 }
@@ -85,6 +115,28 @@ fn build_lod_palette(base_palette: [[u8; 4]; 4], lod_level: u32) -> [[u8; 4]; 4]
         lod_palette[i] = [rgb[0], rgb[1], rgb[2], color[3]];
     }
     lod_palette
+}
+
+fn compute_palette_moments(palette: [[u8; 4]; 4]) -> MaterialMoments {
+    let mut mean = [0.0_f32; 4];
+    let mut second = [0.0_f32; 4];
+    for color in palette {
+        let alpha = color[3] as f32 / 255.0;
+        let sample = [
+            color[0] as f32 * alpha,
+            color[1] as f32 * alpha,
+            color[2] as f32 * alpha,
+            color[3] as f32,
+        ];
+        for channel in 0..4 {
+            mean[channel] += sample[channel] * 0.25;
+            second[channel] += sample[channel] * sample[channel] * 0.25;
+        }
+    }
+    MaterialMoments {
+        mean_premul: mean,
+        second_premul: second,
+    }
 }
 
 fn srgb8_to_linear_vec3(rgb: [u8; 3]) -> Vec3 {
