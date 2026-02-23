@@ -12,9 +12,7 @@ use super::material::{ParticleMaterial, TerrainMaterial};
 use super::object::{ObjectSnapshotData, ObjectWorld};
 use super::particle::{ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M};
 use super::state::SimulationState;
-use super::terrain::{
-    CHUNK_SIZE_I32, TerrainCell, TerrainWorld,
-};
+use super::terrain::{CHUNK_SIZE_I32, TerrainCell, TerrainWorld};
 
 pub const SAVE_VERSION: u32 = 1;
 pub const DEFAULT_QUICK_SAVE_SLOT: &str = "quick_save";
@@ -473,8 +471,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("particles_load_regen_{nanos}.json"));
         let json = format!(
             "{{\"save_version\":{},\"generator_version\":{},\"simulation\":{{\"running\":false}},\"loaded_chunks\":[{{\"chunk\":[0,0]}}],\"terrain_cells\":[],\"particles\":[],\"objects\":[]}}",
-            SAVE_VERSION,
-            TERRAIN_GENERATOR_VERSION
+            SAVE_VERSION, TERRAIN_GENERATOR_VERSION
         );
         fs::write(&path, json).expect("should write temporary save file");
         load_from_path(

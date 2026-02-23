@@ -913,7 +913,8 @@ fn write_final_state_png(
 
     for y in min_cell_y..=max_cell_y {
         for x in min_cell_x..=max_cell_x {
-            let TerrainCell::Solid { material, .. } = terrain.get_loaded_cell_or_empty(IVec2::new(x, y))
+            let TerrainCell::Solid { material, .. } =
+                terrain.get_loaded_cell_or_empty(IVec2::new(x, y))
             else {
                 continue;
             };
@@ -934,16 +935,20 @@ fn write_final_state_png(
     }
 
     let particle_radius_px_min = (FINAL_STATE_PNG_CELL_RESOLUTION as f32 * 0.35).max(1.0);
-    for (&position, &material) in particles.positions().iter().zip(particles.materials().iter()) {
+    for (&position, &material) in particles
+        .positions()
+        .iter()
+        .zip(particles.materials().iter())
+    {
         let cell = world_to_cell(position);
         let color = particle_palette(material)[deterministic_palette_index(cell.x, cell.y)];
         let rel_x = (position.x / CELL_SIZE_M) - min_cell_x as f32;
         let rel_y = (position.y / CELL_SIZE_M) - min_cell_y as f32;
         let center_x = rel_x * FINAL_STATE_PNG_CELL_RESOLUTION as f32;
         let center_y = rel_y * FINAL_STATE_PNG_CELL_RESOLUTION as f32;
-        let world_radius_px =
-            (particle_draw_radius_in_cells(material) * FINAL_STATE_PNG_CELL_RESOLUTION as f32)
-                .max(particle_radius_px_min);
+        let world_radius_px = (particle_draw_radius_in_cells(material)
+            * FINAL_STATE_PNG_CELL_RESOLUTION as f32)
+            .max(particle_radius_px_min);
         draw_disc(
             &mut pixels,
             width,
@@ -955,8 +960,15 @@ fn write_final_state_png(
         );
     }
 
-    image::save_buffer_with_format(path, &pixels, width, height, ColorType::Rgba8, ImageFormat::Png)
-        .map_err(|error| format!("failed to write {}: {error}", path.display()))
+    image::save_buffer_with_format(
+        path,
+        &pixels,
+        width,
+        height,
+        ColorType::Rgba8,
+        ImageFormat::Png,
+    )
+    .map_err(|error| format!("failed to write {}: {error}", path.display()))
 }
 
 fn fill_cell_rect(
@@ -1057,9 +1069,15 @@ fn particle_palette(material: ParticleMaterial) -> [[u8; 4]; 4] {
             [65, 152, 228, 245],
             [78, 167, 238, 250],
         ],
-        ParticleMaterial::StoneSolid | ParticleMaterial::StoneGranular => terrain_palette(TerrainMaterial::Stone),
-        ParticleMaterial::SoilSolid | ParticleMaterial::SoilGranular => terrain_palette(TerrainMaterial::Soil),
-        ParticleMaterial::SandSolid | ParticleMaterial::SandGranular => terrain_palette(TerrainMaterial::Sand),
+        ParticleMaterial::StoneSolid | ParticleMaterial::StoneGranular => {
+            terrain_palette(TerrainMaterial::Stone)
+        }
+        ParticleMaterial::SoilSolid | ParticleMaterial::SoilGranular => {
+            terrain_palette(TerrainMaterial::Soil)
+        }
+        ParticleMaterial::SandSolid | ParticleMaterial::SandGranular => {
+            terrain_palette(TerrainMaterial::Sand)
+        }
     }
 }
 

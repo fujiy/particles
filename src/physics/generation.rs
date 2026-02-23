@@ -12,7 +12,10 @@ pub const SOIL_DEPTH_CELLS: i32 = 4;
 
 pub fn surface_y_for_world_x(world_x: i32) -> i32 {
     let noise = OpenSimplex::new(generator_seed());
-    let n = noise.get([world_x as f64 * HEIGHT_NOISE_FREQ, TERRAIN_GENERATOR_VERSION as f64]);
+    let n = noise.get([
+        world_x as f64 * HEIGHT_NOISE_FREQ,
+        TERRAIN_GENERATOR_VERSION as f64,
+    ]);
     BASE_SURFACE_Y + (n * HEIGHT_NOISE_AMP_CELLS as f64).round() as i32
 }
 

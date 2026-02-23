@@ -570,7 +570,12 @@ fn draw_chunk_outline(gizmos: &mut Gizmos, chunk: IVec2, color: Color) {
     draw_chunk_rect_outline(gizmos, chunk, 1, color);
 }
 
-fn draw_chunk_rect_outline(gizmos: &mut Gizmos, origin_chunk: IVec2, span_chunks: i32, color: Color) {
+fn draw_chunk_rect_outline(
+    gizmos: &mut Gizmos,
+    origin_chunk: IVec2,
+    span_chunks: i32,
+    color: Color,
+) {
     let span = span_chunks.max(1) as f32;
     let x0 = origin_chunk.x as f32 * CHUNK_WORLD_SIZE_M;
     let x1 = (origin_chunk.x as f32 + span) * CHUNK_WORLD_SIZE_M;

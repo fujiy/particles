@@ -12,11 +12,11 @@ use super::scenario::{
     write_scenario_artifacts_for_state,
 };
 use super::state::{
-    LoadDefaultWorldRequest, LoadMapRequest, PhysicsStepProfileSegment, PhysicsStepProfiler,
-    PhysicsActiveRegion, PhysicsRegionSettings,
-    ReplayLoadScenarioRequest, ReplaySaveArtifactRequest, ReplayState, ResetSimulationRequest,
-    SaveMapRequest, SimFixedSet, SimUpdateSet, SimulationParallelSettings, SimulationPerfMetrics,
-    SimulationState, TerrainStreamingSettings,
+    LoadDefaultWorldRequest, LoadMapRequest, PhysicsActiveRegion, PhysicsRegionSettings,
+    PhysicsStepProfileSegment, PhysicsStepProfiler, ReplayLoadScenarioRequest,
+    ReplaySaveArtifactRequest, ReplayState, ResetSimulationRequest, SaveMapRequest, SimFixedSet,
+    SimUpdateSet, SimulationParallelSettings, SimulationPerfMetrics, SimulationState,
+    TerrainStreamingSettings,
 };
 use super::terrain::{CHUNK_SIZE_I32, TerrainWorld, world_to_cell};
 
@@ -200,9 +200,9 @@ fn step_water_particles(
         );
     }
     let object_update_secs = object_update_start.elapsed().as_secs_f64();
-    let object_update_cpu_secs =
-        (process_cpu_time_seconds().unwrap_or(object_update_cpu_start) - object_update_cpu_start)
-            .max(0.0);
+    let object_update_cpu_secs = (process_cpu_time_seconds().unwrap_or(object_update_cpu_start)
+        - object_update_cpu_start)
+        .max(0.0);
     particle_world.set_parallel_enabled(parallel_settings.enabled);
     if should_step {
         let terrain_rebuild_start = Instant::now();
@@ -226,8 +226,7 @@ fn step_water_particles(
             parallel_settings.enabled,
         );
         let total_secs = start.elapsed().as_secs_f64();
-        let total_cpu_secs =
-            (process_cpu_time_seconds().unwrap_or(cpu_start) - cpu_start).max(0.0);
+        let total_cpu_secs = (process_cpu_time_seconds().unwrap_or(cpu_start) - cpu_start).max(0.0);
         perf_metrics.physics_time_this_frame_secs += total_secs;
         if sim_state.running {
             step_profiler.total_duration_ms = total_secs * 1000.0;
@@ -298,7 +297,8 @@ fn step_water_particles(
         }
     } else {
         let _span = tracing::info_span!("physics::particle_step").entered();
-        let _ = particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, false);
+        let _ =
+            particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, false);
     }
     sim_state.step_once = false;
 }
@@ -588,9 +588,9 @@ fn step_simulation_once(
         particle_world.step_if_running(terrain_world, object_field, object_world, true)
     };
     let particle_step_secs = particle_step_start.elapsed().as_secs_f64();
-    let particle_step_cpu_secs =
-        (process_cpu_time_seconds().unwrap_or(particle_step_cpu_start) - particle_step_cpu_start)
-            .max(0.0);
+    let particle_step_cpu_secs = (process_cpu_time_seconds().unwrap_or(particle_step_cpu_start)
+        - particle_step_cpu_start)
+        .max(0.0);
     let terrain_fracture_start = Instant::now();
     let terrain_fracture_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
     {

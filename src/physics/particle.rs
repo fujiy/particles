@@ -445,8 +445,7 @@ impl GranularSolver {
 
         let mut reaction_impulses = HashMap::<ObjectId, Vec2>::new();
         let n = particles.particle_count();
-        let use_parallel_contacts =
-            particles.parallel_enabled && n >= PARALLEL_PARTICLE_THRESHOLD;
+        let use_parallel_contacts = particles.parallel_enabled && n >= PARALLEL_PARTICLE_THRESHOLD;
         let granular_substeps = GRANULAR_SUBSTEPS.max(1);
         let dt_granular = dt_sub / granular_substeps as f32;
         let inv_dt_granular = 1.0 / dt_granular.max(1e-6);
@@ -699,7 +698,8 @@ impl GranularSolver {
         let props_i = particle_properties(particles.material[i]);
         let inv_mass_i = 1.0 / particles.mass[i].max(1e-6);
 
-        if let Some((signed_distance, normal)) = terrain.sample_signed_distance_and_normal(particles.pos[i])
+        if let Some((signed_distance, normal)) =
+            terrain.sample_signed_distance_and_normal(particles.pos[i])
         {
             let c_n = signed_distance - props_i.terrain_push_radius_m;
             if c_n < 0.0 {
@@ -719,9 +719,9 @@ impl GranularSolver {
                     let c_t = rel_vel.dot(t_hat) * dt_granular;
                     let prev_lambda_t = *lambda_t_terrain.get(key).unwrap_or(&0.0);
                     let delta_lambda_t = (-c_t - alpha_t * prev_lambda_t) / (inv_mass_i + alpha_t);
-                    let max_tangent =
-                        (props_i.friction_dynamic * TERRAIN_CONTACT_FRICTION_SCALE).max(0.0)
-                            * next_lambda_n.abs();
+                    let max_tangent = (props_i.friction_dynamic * TERRAIN_CONTACT_FRICTION_SCALE)
+                        .max(0.0)
+                        * next_lambda_n.abs();
                     let next_lambda_t =
                         (prev_lambda_t + delta_lambda_t).clamp(-max_tangent, max_tangent);
                     let applied_t = next_lambda_t - prev_lambda_t;
@@ -1695,8 +1695,7 @@ impl ParticleWorld {
         }
         breakdown.contact_velocity_response_secs += phase_wall_start.elapsed().as_secs_f64();
         let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
-        breakdown.contact_velocity_response_cpu_secs +=
-            (phase_cpu_end - phase_cpu_start).max(0.0);
+        breakdown.contact_velocity_response_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
         phase_wall_start = Instant::now();
         phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
 
@@ -3015,7 +3014,8 @@ impl ParticleWorld {
         if !active {
             return false;
         }
-        let (Some(chunk_min), Some(chunk_max)) = (self.active_chunk_min, self.active_chunk_max) else {
+        let (Some(chunk_min), Some(chunk_max)) = (self.active_chunk_min, self.active_chunk_max)
+        else {
             return true;
         };
         if index >= self.particle_count() {
@@ -3040,7 +3040,8 @@ impl ParticleWorld {
         if halo == 0 {
             return false;
         }
-        let (Some(chunk_min), Some(chunk_max)) = (self.active_chunk_min, self.active_chunk_max) else {
+        let (Some(chunk_min), Some(chunk_max)) = (self.active_chunk_min, self.active_chunk_max)
+        else {
             return false;
         };
         let cell = world_to_cell(self.pos[index]);
@@ -3285,7 +3286,8 @@ impl ParticleWorld {
                         if self_object == Some(object_id) {
                             continue;
                         }
-                        let Some(sample) = object_world.evaluate_object_sdf(object_id, positions[i])
+                        let Some(sample) =
+                            object_world.evaluate_object_sdf(object_id, positions[i])
                         else {
                             continue;
                         };
@@ -3482,8 +3484,12 @@ impl ParticleWorld {
             let outside_freeze = is_chunk_outside_radius(chunk, center_chunk, freeze_radius);
 
             if crossed_active_boundary && !outside_freeze {
-                let (edge, boundary_position, grid_segment) =
-                    edge_sample_for_active_boundary(chunk, self.pos[i], center_chunk, active_radius);
+                let (edge, boundary_position, grid_segment) = edge_sample_for_active_boundary(
+                    chunk,
+                    self.pos[i],
+                    center_chunk,
+                    active_radius,
+                );
                 self.deferred_boundary_particles
                     .entry(DeferredEdgeKey {
                         chunk,
@@ -3556,7 +3562,8 @@ impl ParticleWorld {
                 let new_index = self.pos.len();
                 self.pos.push(state.position);
                 self.prev_pos.push(state.position);
-                self.vel.push(state.velocity.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS));
+                self.vel
+                    .push(state.velocity.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS));
                 self.mass.push(state.mass);
                 self.material.push(state.material);
                 self.request_wake(new_index);
@@ -3613,27 +3620,26 @@ impl ParticleWorld {
                     .map(|lock| lock.position)
                     .unwrap_or(state.position);
                 if self.has_particle_within_radius(wait_center, clearance2, &mut neighbors) {
-                    let force_release = if let Some(lock) =
-                        self.deferred_boundary_release_locks.get_mut(&key)
-                    {
-                        if lock.wait_frames >= clearance_wait_max {
+                    let force_release =
+                        if let Some(lock) = self.deferred_boundary_release_locks.get_mut(&key) {
+                            if lock.wait_frames >= clearance_wait_max {
+                                true
+                            } else {
+                                lock.wait_frames = lock.wait_frames.saturating_add(1);
+                                false
+                            }
+                        } else if clearance_wait_max == 0 {
                             true
                         } else {
-                            lock.wait_frames = lock.wait_frames.saturating_add(1);
+                            self.deferred_boundary_release_locks.insert(
+                                key,
+                                BoundaryReleaseLock {
+                                    position: wait_center,
+                                    wait_frames: 1,
+                                },
+                            );
                             false
-                        }
-                    } else if clearance_wait_max == 0 {
-                        true
-                    } else {
-                        self.deferred_boundary_release_locks.insert(
-                            key,
-                            BoundaryReleaseLock {
-                                position: wait_center,
-                                wait_frames: 1,
-                            },
-                        );
-                        false
-                    };
+                        };
                     if !force_release {
                         continue;
                     }
@@ -3651,7 +3657,8 @@ impl ParticleWorld {
             let new_index = self.pos.len();
             self.pos.push(state.position);
             self.prev_pos.push(state.position);
-            self.vel.push(state.velocity.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS));
+            self.vel
+                .push(state.velocity.clamp_length_max(PARTICLE_SPEED_LIMIT_MPS));
             self.mass.push(state.mass);
             self.material.push(state.material);
             self.request_wake(new_index);
@@ -3683,9 +3690,10 @@ impl ParticleWorld {
             return;
         }
 
-        let (loaded_min_cell, loaded_max_cell) = terrain
-            .loaded_cell_bounds()
-            .unwrap_or((IVec2::new(-CHUNK_SIZE_I32, -CHUNK_SIZE_I32), IVec2::new(CHUNK_SIZE_I32, CHUNK_SIZE_I32)));
+        let (loaded_min_cell, loaded_max_cell) = terrain.loaded_cell_bounds().unwrap_or((
+            IVec2::new(-CHUNK_SIZE_I32, -CHUNK_SIZE_I32),
+            IVec2::new(CHUNK_SIZE_I32, CHUNK_SIZE_I32),
+        ));
         let min_cell_x = loaded_min_cell.x - PARTICLE_ESCAPE_MARGIN_X_CELLS;
         let max_cell_x = loaded_max_cell.x + PARTICLE_ESCAPE_MARGIN_X_CELLS;
         let min_cell_y = loaded_min_cell.y - PARTICLE_ESCAPE_MARGIN_BOTTOM_CELLS;

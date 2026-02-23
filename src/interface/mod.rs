@@ -13,8 +13,8 @@ use crate::physics::object::{
     OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectPhysicsField, ObjectWorld,
 };
 use crate::physics::particle::{
-    FIXED_DT, PARTICLE_SPEED_LIMIT_MPS, ParticleMaterial, ParticleWorld,
-    TERRAIN_BOUNDARY_RADIUS_M, WAKE_RADIUS,
+    FIXED_DT, PARTICLE_SPEED_LIMIT_MPS, ParticleMaterial, ParticleWorld, TERRAIN_BOUNDARY_RADIUS_M,
+    WAKE_RADIUS,
 };
 use crate::physics::save_load;
 use crate::physics::scenario::{
@@ -23,8 +23,8 @@ use crate::physics::scenario::{
 };
 use crate::physics::state::{
     LoadDefaultWorldRequest, LoadMapRequest, PhysicsStepProfiler, ReplayLoadScenarioRequest,
-    ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet,
-    SimulationParallelSettings, SimulationState,
+    ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationParallelSettings,
+    SimulationState,
 };
 use crate::physics::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,
@@ -2086,7 +2086,11 @@ fn update_simulation_hud(
         .unwrap_or(0.0);
     hud_texts.p0().0 = format!("FPS: {fps:.1}");
 
-    let sim_status = if sim_state.running { "Running" } else { "Paused" };
+    let sim_status = if sim_state.running {
+        "Running"
+    } else {
+        "Paused"
+    };
     let water_count = particles
         .materials()
         .iter()
@@ -2160,7 +2164,8 @@ fn update_step_profiler_panel(
             let category = classify_profiler_segment(&segment.name);
             let color = match category {
                 StepProfilerCategory::Fluid => {
-                    let color = STEP_PROFILER_FLUID_COLORS[fluid_index % STEP_PROFILER_FLUID_COLORS.len()];
+                    let color =
+                        STEP_PROFILER_FLUID_COLORS[fluid_index % STEP_PROFILER_FLUID_COLORS.len()];
                     fluid_index += 1;
                     color
                 }
@@ -2171,7 +2176,8 @@ fn update_step_profiler_panel(
                     color
                 }
                 StepProfilerCategory::Object => {
-                    let color = STEP_PROFILER_OBJECT_COLORS[object_index % STEP_PROFILER_OBJECT_COLORS.len()];
+                    let color = STEP_PROFILER_OBJECT_COLORS
+                        [object_index % STEP_PROFILER_OBJECT_COLORS.len()];
                     object_index += 1;
                     color
                 }
@@ -2179,13 +2185,13 @@ fn update_step_profiler_panel(
             parent.spawn((
                 Button,
                 Node {
-                    width: px((segment.wall_duration_ms as f32 * STEP_PROFILER_BAR_MS_TO_PX).max(1.0)),
-                    height: px(
-                        ((segment.cpu_duration_ms as f32
-                            / segment.wall_duration_ms.max(1e-6) as f32)
-                            .clamp(0.05, STEP_PROFILER_MAX_PARALLELISM_DISPLAY))
-                            * STEP_PROFILER_PARALLELISM_TO_PX,
+                    width: px(
+                        (segment.wall_duration_ms as f32 * STEP_PROFILER_BAR_MS_TO_PX).max(1.0),
                     ),
+                    height: px(((segment.cpu_duration_ms as f32
+                        / segment.wall_duration_ms.max(1e-6) as f32)
+                        .clamp(0.05, STEP_PROFILER_MAX_PARALLELISM_DISPLAY))
+                        * STEP_PROFILER_PARALLELISM_TO_PX),
                     ..default()
                 },
                 BackgroundColor(color),
