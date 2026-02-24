@@ -6,14 +6,13 @@ use bevy::prelude::*;
 
 use crate::physics::world::grid::GridBlock;
 use crate::physics::world::terrain::{
-    CELL_SIZE_M, TerrainCell, TerrainWorld, generated_cell_for_world, world_to_cell,
+    CELL_SIZE_M, TerrainCell, TerrainWorld, world_to_cell,
 };
 
 const CACHE_LOD_MAX: u8 = 3;
 const CACHE_LOD_HYSTERESIS_FRAMES: u8 = 6;
 const SDF_QUERY_RADIUS_CELLS: i32 = 10;
 const SDF_INF: f32 = 1.0e9;
-const SDF_DIAGONAL_COST: f32 = std::f32::consts::SQRT_2;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TerrainBoundarySample {
@@ -77,33 +76,33 @@ impl TerrainBoundarySampler {
         self.step_stats
     }
 
-    pub fn sample_solid(&mut self, world_pos: Vec2) -> bool {
+    pub fn sample_solid(&mut self, terrain: &TerrainWorld, world_pos: Vec2) -> bool {
         self.step_stats.sample_query_count = self.step_stats.sample_query_count.saturating_add(1);
-        generated_solid_at_world(world_pos)
+        terrain_solid_at_world(terrain, world_pos)
     }
 
-    pub fn sample_sdf(&mut self, world_pos: Vec2) -> f32 {
+    pub fn sample_sdf(&mut self, terrain: &TerrainWorld, world_pos: Vec2) -> f32 {
         let _span = tracing::info_span!("physics::terrain_boundary::sample_sdf").entered();
         let start = Instant::now();
         self.step_stats.sample_query_count = self.step_stats.sample_query_count.saturating_add(1);
-        let sdf = sample_generated_sdf(world_pos);
+        let sdf = sample_terrain_sdf(terrain, world_pos);
         self.step_stats.query_wall_secs += start.elapsed().as_secs_f64();
         sdf
     }
 
-    pub fn sample_normal(&mut self, world_pos: Vec2) -> Vec2 {
+    pub fn sample_normal(&mut self, terrain: &TerrainWorld, world_pos: Vec2) -> Vec2 {
         let eps = (0.5 * CELL_SIZE_M).max(1e-4);
-        let dx = sample_generated_sdf(world_pos + Vec2::new(eps, 0.0))
-            - sample_generated_sdf(world_pos - Vec2::new(eps, 0.0));
-        let dy = sample_generated_sdf(world_pos + Vec2::new(0.0, eps))
-            - sample_generated_sdf(world_pos - Vec2::new(0.0, eps));
+        let dx = sample_terrain_sdf(terrain, world_pos + Vec2::new(eps, 0.0))
+            - sample_terrain_sdf(terrain, world_pos - Vec2::new(eps, 0.0));
+        let dy = sample_terrain_sdf(terrain, world_pos + Vec2::new(0.0, eps))
+            - sample_terrain_sdf(terrain, world_pos - Vec2::new(0.0, eps));
         Vec2::new(dx, dy).normalize_or_zero()
     }
 
     pub fn sample_block_nodes(
         &mut self,
         block: &GridBlock,
-        _terrain: &TerrainWorld,
+        terrain: &TerrainWorld,
     ) -> Vec<TerrainBoundarySample> {
         let _span = tracing::info_span!("physics::terrain_boundary::sample_block_nodes").entered();
         let start = Instant::now();
@@ -148,7 +147,7 @@ impl TerrainBoundarySampler {
         }
 
         if needs_rebuild {
-            cache.samples = build_block_samples(block, cache.lod_level);
+            cache.samples = build_block_samples(block, cache.lod_level, terrain);
             self.step_stats.cache_miss_count = self
                 .step_stats
                 .cache_miss_count
@@ -178,24 +177,24 @@ fn desired_lod_level(block: &GridBlock) -> u8 {
     }
 }
 
-fn generated_solid_at_world(world_pos: Vec2) -> bool {
+fn terrain_solid_at_world(terrain: &TerrainWorld, world_pos: Vec2) -> bool {
     matches!(
-        generated_cell_for_world(world_to_cell(world_pos)),
+        terrain.get_cell_or_generated(world_to_cell(world_pos)),
         TerrainCell::Solid { .. }
     )
 }
 
-fn sample_generated_sdf(world_pos: Vec2) -> f32 {
+fn sample_terrain_sdf(terrain: &TerrainWorld, world_pos: Vec2) -> f32 {
     let center_cell = world_to_cell(world_pos);
-    let inside = matches!(
-        generated_cell_for_world(center_cell),
-        TerrainCell::Solid { .. }
-    );
+    let inside = matches!(terrain.get_cell_or_generated(center_cell), TerrainCell::Solid { .. });
     let mut best = SDF_INF;
     for dy in -SDF_QUERY_RADIUS_CELLS..=SDF_QUERY_RADIUS_CELLS {
         for dx in -SDF_QUERY_RADIUS_CELLS..=SDF_QUERY_RADIUS_CELLS {
             let cell = center_cell + IVec2::new(dx, dy);
-            let cell_is_solid = matches!(generated_cell_for_world(cell), TerrainCell::Solid { .. });
+            let cell_is_solid = matches!(
+                terrain.get_cell_or_generated(cell),
+                TerrainCell::Solid { .. }
+            );
             if cell_is_solid == inside {
                 continue;
             }
@@ -211,7 +210,11 @@ fn sample_generated_sdf(world_pos: Vec2) -> f32 {
     if inside { -best } else { best }
 }
 
-fn build_block_samples(block: &GridBlock, lod_level: u8) -> Vec<TerrainBoundarySample> {
+fn build_block_samples(
+    block: &GridBlock,
+    lod_level: u8,
+    terrain: &TerrainWorld,
+) -> Vec<TerrainBoundarySample> {
     let width = block.node_dims.x as usize;
     let height = block.node_dims.y as usize;
     if width == 0 || height == 0 {
@@ -223,120 +226,53 @@ fn build_block_samples(block: &GridBlock, lod_level: u8) -> Vec<TerrainBoundaryS
     } else {
         1i32 << lod_level.saturating_sub(1)
     };
-    let mut solid_mask = vec![false; width * height];
+    let eps = (0.5 * block.h_b).max(1e-4);
+    let mut samples = vec![TerrainBoundarySample::default(); width * height];
     for y in 0..height {
         for x in 0..width {
+            let i = y * width + x;
             let world_node = block.origin_node + IVec2::new(x as i32, y as i32);
             let world_pos = world_node.as_vec2() * block.h_b;
-            let mut solid = generated_solid_at_world(world_pos);
+            let (mut sdf_m, mut normal) =
+                if let Some((signed_distance, sample_normal)) =
+                    terrain.sample_signed_distance_and_normal(world_pos)
+                {
+                    (signed_distance, sample_normal)
+                } else {
+                    let signed_distance = sample_terrain_sdf(terrain, world_pos);
+                    let dx = sample_terrain_sdf(terrain, world_pos + Vec2::new(eps, 0.0))
+                        - sample_terrain_sdf(terrain, world_pos - Vec2::new(eps, 0.0));
+                    let dy = sample_terrain_sdf(terrain, world_pos + Vec2::new(0.0, eps))
+                        - sample_terrain_sdf(terrain, world_pos - Vec2::new(0.0, eps));
+                    (signed_distance, Vec2::new(dx, dy).normalize_or_zero())
+                };
+
+            let mut solid = sdf_m < 0.0;
             if !solid && dilation_cells > 0 {
                 let cell = world_to_cell(world_pos);
                 'scan: for dy in -dilation_cells..=dilation_cells {
                     for dx in -dilation_cells..=dilation_cells {
                         let c = cell + IVec2::new(dx, dy);
-                        if matches!(generated_cell_for_world(c), TerrainCell::Solid { .. }) {
+                        if matches!(terrain.get_cell_or_generated(c), TerrainCell::Solid { .. }) {
                             solid = true;
+                            sdf_m = sdf_m.min(0.0);
                             break 'scan;
                         }
                     }
                 }
             }
-            solid_mask[y * width + x] = solid;
-        }
-    }
-
-    let non_solid_mask: Vec<bool> = solid_mask.iter().map(|&v| !v).collect();
-    let distance_to_solid = distance_transform(&solid_mask, width, height, block.h_b);
-    let distance_to_non_solid = distance_transform(&non_solid_mask, width, height, block.h_b);
-    let half_sample = 0.5 * block.h_b;
-    let mut sdf = vec![0.0f32; width * height];
-    for i in 0..sdf.len() {
-        sdf[i] = if solid_mask[i] {
-            -distance_to_non_solid[i] + half_sample
-        } else {
-            distance_to_solid[i] - half_sample
-        };
-    }
-
-    let mut samples = vec![TerrainBoundarySample::default(); width * height];
-    for y in 0..height {
-        for x in 0..width {
-            let i = y * width + x;
-            let x0 = x.saturating_sub(1);
-            let x1 = (x + 1).min(width - 1);
-            let y0 = y.saturating_sub(1);
-            let y1 = (y + 1).min(height - 1);
-            let dx = sdf[y * width + x1] - sdf[y * width + x0];
-            let dy = sdf[y1 * width + x] - sdf[y0 * width + x];
-            let normal = Vec2::new(dx, dy).normalize_or_zero();
+            if normal == Vec2::ZERO {
+                normal = Vec2::Y;
+            }
             samples[i] = TerrainBoundarySample {
-                sdf_m: sdf[i],
-                normal: if normal == Vec2::ZERO { Vec2::Y } else { normal },
-                solid: solid_mask[i],
+                sdf_m,
+                normal,
+                solid,
                 lod_level,
             };
         }
     }
     samples
-}
-
-fn distance_transform(mask: &[bool], width: usize, height: usize, spacing: f32) -> Vec<f32> {
-    let mut dist = vec![SDF_INF; width * height];
-    for y in 0..height {
-        for x in 0..width {
-            let i = y * width + x;
-            if mask[i] {
-                dist[i] = 0.0;
-            }
-        }
-    }
-
-    for y in 0..height {
-        for x in 0..width {
-            let i = y * width + x;
-            let mut d = dist[i];
-            if x > 0 {
-                d = d.min(dist[y * width + (x - 1)] + 1.0);
-            }
-            if y > 0 {
-                d = d.min(dist[(y - 1) * width + x] + 1.0);
-            }
-            if x > 0 && y > 0 {
-                d = d.min(dist[(y - 1) * width + (x - 1)] + SDF_DIAGONAL_COST);
-            }
-            if x + 1 < width && y > 0 {
-                d = d.min(dist[(y - 1) * width + (x + 1)] + SDF_DIAGONAL_COST);
-            }
-            dist[i] = d;
-        }
-    }
-
-    for y in (0..height).rev() {
-        for x in (0..width).rev() {
-            let i = y * width + x;
-            let mut d = dist[i];
-            if x + 1 < width {
-                d = d.min(dist[y * width + (x + 1)] + 1.0);
-            }
-            if y + 1 < height {
-                d = d.min(dist[(y + 1) * width + x] + 1.0);
-            }
-            if x + 1 < width && y + 1 < height {
-                d = d.min(dist[(y + 1) * width + (x + 1)] + SDF_DIAGONAL_COST);
-            }
-            if x > 0 && y + 1 < height {
-                d = d.min(dist[(y + 1) * width + (x - 1)] + SDF_DIAGONAL_COST);
-            }
-            dist[i] = d;
-        }
-    }
-
-    for d in &mut dist {
-        if *d < SDF_INF {
-            *d *= spacing;
-        }
-    }
-    dist
 }
 
 #[cfg(test)]
@@ -346,10 +282,23 @@ mod tests {
 
     #[test]
     fn generated_sdf_sign_is_consistent_with_generated_occupancy() {
+        let terrain = TerrainWorld::default();
         let inside = Vec2::new(0.0, -8.0);
         let outside = Vec2::new(0.0, 8.0);
-        assert!(sample_generated_sdf(inside) < 0.0);
-        assert!(sample_generated_sdf(outside) > 0.0);
+        assert!(sample_terrain_sdf(&terrain, inside) < 0.0);
+        assert!(sample_terrain_sdf(&terrain, outside) > 0.0);
+    }
+
+    #[test]
+    fn disabled_generation_uses_loaded_terrain_only() {
+        let mut terrain = TerrainWorld::default();
+        terrain.set_generation_enabled(false);
+        terrain.ensure_chunk_loaded(IVec2::ZERO);
+        terrain.clear_loaded_cells();
+        terrain.set_cell(IVec2::new(0, 0), TerrainCell::stone());
+
+        let generated_ground = Vec2::new(0.0, -8.0);
+        assert!(sample_terrain_sdf(&terrain, generated_ground) > 0.0);
     }
 
     #[test]

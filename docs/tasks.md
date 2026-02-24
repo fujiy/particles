@@ -45,6 +45,7 @@
 - Subtasks:
   - [x] `sample_solid / sample_sdf / sample_normal` の境界サンプラAPIを定義する。
   - [x] 未改変領域は地形生成関数ベースで `sample_sdf` を直接評価する。
+  - [x] 固定地形（テストワールド）では生成関数を無効化し、ロード済み地形セルのみをSDFソースに使う切替を実装する。
   - [ ] 改変領域は `Chunk` 差分を優先するLoDキャッシュ（occupancy/TSDF）を実装する。
   - [x] Active block単位のSDF/法線キャッシュを遅延構築し、再利用する。
   - [ ] 地形編集時の局所invalidation（影響block + 近傍margin）を実装する。

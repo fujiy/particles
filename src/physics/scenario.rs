@@ -417,8 +417,10 @@ pub fn apply_scenario_spec(
     object_field: &mut ObjectPhysicsField,
 ) -> Result<(), String> {
     if spec.reset_fixed_world {
+        terrain.set_generation_enabled(true);
         terrain.reset_fixed_world();
     } else {
+        terrain.set_generation_enabled(false);
         terrain.clear();
         if let (Some(min_chunk), Some(max_chunk)) = (spec.loaded_chunk_min, spec.loaded_chunk_max) {
             for y in min_chunk.y.min(max_chunk.y)..=min_chunk.y.max(max_chunk.y) {
@@ -1167,7 +1169,11 @@ fn activity_label(state: ParticleActivityState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_toggle_value;
+    use super::{apply_scenario_spec, default_scenario_spec_by_name, parse_toggle_value};
+    use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
+    use crate::physics::world::particle::ParticleWorld;
+    use crate::physics::world::terrain::{TerrainCell, TerrainWorld};
+    use bevy::prelude::IVec2;
 
     #[test]
     fn parse_toggle_value_true_variants() {
@@ -1188,5 +1194,28 @@ mod tests {
         for raw in ["", "maybe", "2", "enable"] {
             assert_eq!(parse_toggle_value(raw), None);
         }
+    }
+
+    #[test]
+    fn water_drop_scenario_disables_background_generation() {
+        let spec = default_scenario_spec_by_name("water_drop").expect("water_drop must exist");
+        let mut terrain = TerrainWorld::default();
+        let mut particles = ParticleWorld::default();
+        let mut objects = ObjectWorld::default();
+        let mut object_field = ObjectPhysicsField::default();
+        apply_scenario_spec(
+            &spec,
+            &mut terrain,
+            &mut particles,
+            &mut objects,
+            &mut object_field,
+        )
+        .expect("scenario apply should succeed");
+
+        assert!(!terrain.generation_enabled());
+        assert_eq!(
+            terrain.get_cell_or_generated(IVec2::new(0, -128)),
+            TerrainCell::Empty
+        );
     }
 }

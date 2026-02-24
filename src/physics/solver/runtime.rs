@@ -60,7 +60,7 @@ pub(crate) fn stream_terrain_around_camera(
     streaming_settings: Res<TerrainStreamingSettings>,
     camera_transforms: Query<&Transform, With<Camera2d>>,
 ) {
-    if replay_state.enabled || !streaming_settings.enabled {
+    if replay_state.enabled || !streaming_settings.enabled || !terrain_world.generation_enabled() {
         return;
     }
     let Some(camera_transform) = camera_transforms.iter().next() else {

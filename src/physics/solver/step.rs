@@ -13,12 +13,13 @@ use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::GridHierarchy;
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
-use crate::physics::world::terrain::TerrainWorld;
+use crate::physics::world::terrain::{CELL_SIZE_M, TerrainWorld};
 
 const MPM_CFL_SAFETY: f32 = 0.35;
 const MPM_TARGET_SOUND_SPEED_MPS: f32 = 16.0;
 const MPM_TARGET_RHO0: f32 = 1_000.0;
 const MPM_MIN_DT_SUB: f32 = 1.0e-4;
+const MPM_BOUNDARY_SLOP_SCALE_DIAMETER: f32 = 2.0;
 
 pub(crate) fn step_simulation_once(
     terrain_world: &mut TerrainWorld,
@@ -53,7 +54,11 @@ pub(crate) fn step_simulation_once(
             bulk_modulus: MPM_TARGET_RHO0 * MPM_TARGET_SOUND_SPEED_MPS * MPM_TARGET_SOUND_SPEED_MPS,
             ..Default::default()
         };
-        let terrain_boundary_params = MpmTerrainBoundaryParams::default();
+        let particle_radius_m = (terrain_boundary_radius_m - 0.5 * CELL_SIZE_M).max(0.0);
+        let terrain_boundary_params = MpmTerrainBoundaryParams {
+            penetration_slop_m: particle_radius_m * MPM_BOUNDARY_SLOP_SCALE_DIAMETER,
+            ..Default::default()
+        };
         if continuum_world.len() != water_particle_count {
             let _ = rebuild_continuum_from_particle_world(
                 particle_world,

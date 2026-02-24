@@ -24,6 +24,8 @@ struct SaveSnapshot {
     save_version: u32,
     #[serde(default)]
     generator_version: u32,
+    #[serde(default = "default_terrain_generation_enabled")]
+    terrain_generation_enabled: bool,
     simulation: SimulationSnapshot,
     #[serde(default)]
     loaded_chunks: Vec<ChunkSnapshot>,
@@ -35,6 +37,10 @@ struct SaveSnapshot {
 #[derive(Debug, Serialize, Deserialize)]
 struct SimulationSnapshot {
     running: bool,
+}
+
+fn default_terrain_generation_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -221,6 +227,7 @@ pub fn save_to_path(
     let snapshot = SaveSnapshot {
         save_version: SAVE_VERSION,
         generator_version: TERRAIN_GENERATOR_VERSION,
+        terrain_generation_enabled: terrain.generation_enabled(),
         simulation: SimulationSnapshot {
             running: sim_state.running,
         },
@@ -319,6 +326,7 @@ pub fn load_from_path(
     }
     validate_snapshot(&snapshot)?;
 
+    terrain.set_generation_enabled(snapshot.terrain_generation_enabled);
     terrain.clear();
     if snapshot.loaded_chunks.is_empty() {
         let mut seen_chunks = HashSet::new();
