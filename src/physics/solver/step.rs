@@ -2,14 +2,22 @@ use std::time::Instant;
 
 use bevy::log::tracing;
 
-use super::mpm_water::{MpmWaterParams, step_single_rate, sync_continuum_to_particle_world};
+use super::mpm_water::{
+    MpmWaterParams, apply_terrain_boundary_to_continuum, sound_speed_mps, step_single_rate,
+    sync_continuum_to_particle_world,
+};
 use super::types::StepSimulationTiming;
 use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::GridHierarchy;
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
-use crate::physics::world::particle::ParticleWorld;
+use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use crate::physics::world::terrain::TerrainWorld;
+
+const MPM_CFL_SAFETY: f32 = 0.35;
+const MPM_TARGET_SOUND_SPEED_MPS: f32 = 16.0;
+const MPM_TARGET_RHO0: f32 = 1_000.0;
+const MPM_MIN_DT_SUB: f32 = 1.0e-4;
 
 pub(crate) fn step_simulation_once(
     terrain_world: &mut TerrainWorld,
@@ -24,12 +32,7 @@ pub(crate) fn step_simulation_once(
     let water_particle_count = particle_world
         .materials()
         .iter()
-        .filter(|&&m| {
-            matches!(
-                m,
-                crate::physics::world::particle::ParticleMaterial::WaterLiquid
-            )
-        })
+        .filter(|&&m| matches!(m, ParticleMaterial::WaterLiquid))
         .count();
     if !continuum_world.is_empty()
         && grid_hierarchy.block_count() > 0
@@ -38,15 +41,33 @@ pub(crate) fn step_simulation_once(
         let particle_step_start = Instant::now();
         let particle_step_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
         let _span = tracing::info_span!("physics::mpm_water_step").entered();
-        let _metrics = step_single_rate(
-            continuum_world,
-            grid_hierarchy,
-            &MpmWaterParams {
-                dt: particle_world.solver_params.fixed_dt,
-                gravity: particle_world.solver_params.gravity_mps2,
-                ..Default::default()
-            },
-        );
+        let mut mpm_params = MpmWaterParams {
+            dt: particle_world.solver_params.fixed_dt,
+            gravity: particle_world.solver_params.gravity_mps2,
+            rho0: MPM_TARGET_RHO0,
+            bulk_modulus: MPM_TARGET_RHO0 * MPM_TARGET_SOUND_SPEED_MPS * MPM_TARGET_SOUND_SPEED_MPS,
+            ..Default::default()
+        };
+        let h = grid_hierarchy
+            .blocks()
+            .first()
+            .map(|b| b.h_b.max(1e-6))
+            .unwrap_or(0.25);
+        let c = sound_speed_mps(&mpm_params).max(1e-4);
+        let dt_cfl = (MPM_CFL_SAFETY * h / c).max(MPM_MIN_DT_SUB);
+        let substeps = (particle_world.solver_params.fixed_dt / dt_cfl).ceil() as usize;
+        let substeps = substeps.max(1);
+        let dt_sub = particle_world.solver_params.fixed_dt / substeps as f32;
+        mpm_params.dt = dt_sub;
+        for _ in 0..substeps {
+            let _ = step_single_rate(continuum_world, grid_hierarchy, &mpm_params);
+            let _ = apply_terrain_boundary_to_continuum(
+                continuum_world,
+                terrain_world,
+                0.01,
+                0.05,
+            );
+        }
         if sync_continuum_to_particle_world(particle_world, continuum_world) {
             let particle_step_secs = particle_step_start.elapsed().as_secs_f64();
             let particle_step_cpu_secs = (process_cpu_time_seconds()

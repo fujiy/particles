@@ -4,6 +4,7 @@ use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::{GridBlock, GridHierarchy};
 use crate::physics::world::kernel::evaluate_quadratic_bspline_stencil_2d;
 use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
+use crate::physics::world::terrain::TerrainWorld;
 
 const GRID_MASS_EPSILON: f32 = 1e-8;
 const DET_EPSILON: f32 = 1e-6;
@@ -19,6 +20,9 @@ pub struct MpmWaterParams {
     pub j_max: f32,
     pub active_mass_threshold: f32,
     pub cfl_limit: f32,
+    pub c_max_norm: f32,
+    pub c_damping: f32,
+    pub f_relaxation: f32,
 }
 
 impl Default for MpmWaterParams {
@@ -27,12 +31,15 @@ impl Default for MpmWaterParams {
             dt: 1.0 / 60.0,
             gravity: Vec2::new(0.0, -9.81),
             rho0: 1_000.0,
-            bulk_modulus: 2.0e5,
-            viscosity: 2.0,
+            bulk_modulus: 6.0e4,
+            viscosity: 0.0,
             j_min: 0.6,
             j_max: 1.4,
             active_mass_threshold: 1e-6,
             cfl_limit: 1.0,
+            c_max_norm: 80.0,
+            c_damping: 0.05,
+            f_relaxation: 1.0,
         }
     }
 }
@@ -108,6 +115,56 @@ pub fn sync_continuum_to_particle_world(
     true
 }
 
+pub fn apply_terrain_boundary_to_continuum(
+    particles: &mut ContinuumParticleWorld,
+    terrain: &TerrainWorld,
+    penetration_slop_m: f32,
+    tangential_damping: f32,
+) -> usize {
+    let mut corrected = 0usize;
+    let penetration_slop_m = penetration_slop_m.max(0.0);
+    let tangential_scale = (1.0 - tangential_damping).clamp(0.0, 1.0);
+    for i in 0..particles.len() {
+        let mut had_penetration = false;
+        let mut boundary_normal = Vec2::ZERO;
+        for _ in 0..4 {
+            let Some((signed_distance, normal)) =
+                terrain.sample_signed_distance_and_normal(particles.x[i])
+            else {
+                break;
+            };
+            if normal == Vec2::ZERO {
+                break;
+            }
+            let penetration = penetration_slop_m - signed_distance;
+            if penetration <= 0.0 {
+                break;
+            }
+            particles.x[i] += normal * penetration;
+            boundary_normal = normal;
+            had_penetration = true;
+        }
+        if !had_penetration {
+            continue;
+        }
+
+        let normal = if boundary_normal == Vec2::ZERO {
+            Vec2::Y
+        } else {
+            boundary_normal
+        };
+        let normal_speed = particles.v[i].dot(normal);
+        let mut corrected_v = particles.v[i];
+        if normal_speed < 0.0 {
+            corrected_v -= normal * normal_speed;
+        }
+        let tangent = corrected_v - normal * corrected_v.dot(normal);
+        particles.v[i] = corrected_v - tangent * (1.0 - tangential_scale);
+        corrected += 1;
+    }
+    corrected
+}
+
 pub fn step_single_rate(
     particles: &mut ContinuumParticleWorld,
     grid: &mut GridHierarchy,
@@ -138,34 +195,61 @@ pub fn step_single_rate(
 fn p2g(particles: &ContinuumParticleWorld, block: &mut GridBlock, params: &MpmWaterParams) {
     block.clear_nodes();
     let dt = params.dt.max(0.0);
-    let inv_h = 1.0 / block.h_b.max(DET_EPSILON);
+    let h = block.h_b.max(DET_EPSILON);
+    let inv_h = 1.0 / h;
+    let inv_cell_area = inv_h * inv_h;
 
+    // Pass 1: transfer only mass and momentum.
     for i in 0..particles.len() {
         let x_p = particles.x[i];
         let v_p = particles.v[i];
-        let m_p = particles.m[i].max(0.0);
-        let v0_p = particles.v0[i].max(0.0);
         let c_p = particles.c[i];
-        let f_p = particles.f[i];
-        let j = f_p.determinant();
-        let j_stable = j.clamp(params.j_min, params.j_max).max(DET_EPSILON);
-        let pressure = params.bulk_modulus * (j_stable - 1.0);
-        let viscous = (c_p + c_p.transpose()) * params.viscosity;
+        let m_p = particles.m[i].max(0.0);
+        let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h);
+        for sample in stencil.samples() {
+            let node_world = sample.node.as_vec2() * h;
+            let affine_velocity = c_p * (node_world - x_p);
+            let Some(node) = block.node_mut_by_world(sample.node) else {
+                continue;
+            };
+            let mass_contrib = sample.weight * m_p;
+            node.m += mass_contrib;
+            node.p += mass_contrib * (v_p + affine_velocity);
+        }
+    }
+
+    // Pass 2: estimate particle density from the transferred grid mass.
+    let mut density = vec![0.0f32; particles.len()];
+    for (i, rho) in density.iter_mut().enumerate() {
+        let x_p = particles.x[i];
+        let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h);
+        let mut rho_acc = 0.0f32;
+        for sample in stencil.samples() {
+            let Some(node) = block.node_by_world(sample.node) else {
+                continue;
+            };
+            rho_acc += sample.weight * node.m * inv_cell_area;
+        }
+        *rho = rho_acc.max(0.0);
+    }
+
+    // Pass 3: pressure/viscous internal force contribution.
+    for (i, &rho_p) in density.iter().enumerate() {
+        let x_p = particles.x[i];
+        let v0_p = particles.v0[i].max(0.0);
+        let compression = (rho_p / params.rho0.max(DET_EPSILON) - 1.0).max(0.0);
+        let pressure = params.bulk_modulus * compression;
+        let viscous = Mat2::ZERO;
         let stress =
             Mat2::from_cols(Vec2::new(-pressure, 0.0), Vec2::new(0.0, -pressure)) + viscous;
 
         let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h);
         for sample in stencil.samples() {
-            let node_world = sample.node.as_vec2() * block.h_b;
-            let dpos = node_world - x_p;
             let Some(node) = block.node_mut_by_world(sample.node) else {
                 continue;
             };
-
-            let apic_velocity = v_p + c_p * dpos;
             let internal_force = -(stress * sample.grad) * v0_p;
-            node.m += sample.weight * m_p;
-            node.p += sample.weight * m_p * apic_velocity + dt * internal_force;
+            node.p += dt * internal_force;
         }
     }
 }
@@ -194,13 +278,12 @@ fn g2p(
 ) {
     let dt = params.dt.max(0.0);
     let inv_h = 1.0 / block.h_b.max(DET_EPSILON);
-    let apic_scale = 4.0 * inv_h * inv_h;
 
     for i in 0..particles.len() {
         let x_p = particles.x[i];
         let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h);
         let mut next_v = Vec2::ZERO;
-        let mut next_c = Mat2::ZERO;
+        let mut next_grad_v = Mat2::ZERO;
 
         for sample in stencil.samples() {
             let Some(node) = block.node_by_world(sample.node) else {
@@ -210,20 +293,25 @@ fn g2p(
                 continue;
             }
 
-            let node_world = sample.node.as_vec2() * block.h_b;
-            let dpos = node_world - x_p;
             next_v += sample.weight * node.v;
-            next_c += outer_product(node.v, dpos * (sample.weight * apic_scale));
+            next_grad_v += outer_product(node.v, sample.grad);
         }
+        let next_c = clamp_mat2_by_frobenius(next_grad_v, params.c_max_norm.max(1e-3))
+            * (1.0 - params.c_damping.clamp(0.0, 1.0));
 
         particles.v[i] = next_v;
         particles.c[i] = next_c;
         particles.x[i] += dt * next_v;
-        particles.f[i] = clamp_f_determinant(
+        let f_limited = clamp_f_determinant(
             (Mat2::IDENTITY + next_c * dt) * particles.f[i],
             params.j_min,
             params.j_max,
             &mut metrics.clamped_particle_count,
+        );
+        particles.f[i] = mix_mat2(
+            f_limited,
+            Mat2::IDENTITY,
+            params.f_relaxation.clamp(0.0, 1.0),
         );
         metrics.max_particle_speed_mps = metrics.max_particle_speed_mps.max(next_v.length());
     }
@@ -244,12 +332,41 @@ fn outer_product(lhs: Vec2, rhs: Vec2) -> Mat2 {
     Mat2::from_cols(lhs * rhs.x, lhs * rhs.y)
 }
 
+fn clamp_mat2_by_frobenius(matrix: Mat2, max_norm: f32) -> Mat2 {
+    let max_norm = max_norm.max(1e-6);
+    let norm = matrix
+        .to_cols_array()
+        .into_iter()
+        .map(|v| v * v)
+        .sum::<f32>()
+        .sqrt();
+    if norm <= max_norm {
+        matrix
+    } else {
+        matrix * (max_norm / norm)
+    }
+}
+
+fn mix_mat2(a: Mat2, b: Mat2, t: f32) -> Mat2 {
+    let t = t.clamp(0.0, 1.0);
+    let a_cols = a.to_cols_array();
+    let b_cols = b.to_cols_array();
+    Mat2::from_cols_array(&[
+        a_cols[0] + (b_cols[0] - a_cols[0]) * t,
+        a_cols[1] + (b_cols[1] - a_cols[1]) * t,
+        a_cols[2] + (b_cols[2] - a_cols[2]) * t,
+        a_cols[3] + (b_cols[3] - a_cols[3]) * t,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, terrain_boundary_radius_m};
     use crate::physics::world::continuum::ContinuumMaterial;
     use crate::physics::world::grid::GridBlock;
     use crate::physics::world::particle::ParticleWorld;
+    use crate::physics::world::terrain::{TerrainCell, TerrainWorld, cell_to_world_center};
 
     fn make_world_with_single_block() -> (ContinuumParticleWorld, GridHierarchy) {
         let mut particles = ContinuumParticleWorld::default();
@@ -408,5 +525,35 @@ mod tests {
         assert_eq!(particles.pos[1], Vec2::new(1.0, 0.0));
         assert_eq!(particles.pos[2], Vec2::new(7.0, 8.0));
         assert_eq!(particles.vel[2], Vec2::new(3.0, 4.0));
+    }
+
+    #[test]
+    fn terrain_boundary_projection_pushes_particle_outside_solid() {
+        let mut terrain = TerrainWorld::default();
+        terrain.clear();
+        terrain.ensure_chunk_loaded(IVec2::ZERO);
+        terrain.clear_loaded_cells();
+        terrain.set_cell(IVec2::ZERO, TerrainCell::stone());
+        terrain
+            .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
+
+        let mut continuum = ContinuumParticleWorld::default();
+        continuum.spawn_water_particle(
+            cell_to_world_center(IVec2::ZERO),
+            Vec2::new(0.0, -1.0),
+            1.0,
+            0.001,
+        );
+
+        let corrected = apply_terrain_boundary_to_continuum(&mut continuum, &terrain, 0.0, 0.1);
+        assert_eq!(corrected, 1);
+        let (signed_distance, _) = terrain
+            .sample_signed_distance_and_normal(continuum.x[0])
+            .expect("signed distance should be available after projection");
+        assert!(signed_distance >= -1e-3);
+        let (_, normal) = terrain
+            .sample_signed_distance_and_normal(continuum.x[0])
+            .expect("normal should be available after projection");
+        assert!(continuum.v[0].dot(normal) >= -1e-4);
     }
 }

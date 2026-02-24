@@ -42,19 +42,21 @@ $$
 \mathbf{D} = \frac{1}{2}(\nabla\mathbf{u} + \nabla\mathbf{u}^T)
 $$
 
-圧力は体積比 $J = \det(\mathbf{F})$ を用いて
+圧力は密度圧縮（EOS系）を標準とし、
+
+$$
+p = K\max\left(\frac{\rho}{\rho_0}-1,\,0\right)
+$$
+
+を基本形として使う（弱圧縮、引張側は0で打ち切る）。
+
+体積比 $J = \det(\mathbf{F})$ を使う
 
 $$
 p = K(J-1)
 $$
 
-または EOS 形式
-
-$$
-p = k\left[\left(\frac{\rho}{\rho_0}\right)^\gamma - 1\right]
-$$
-
-を使う。初期実装は前者（$J$ ベース）を標準とする。
+は簡易近似（比較・デバッグ用途）として扱う。
 
 ## 3. 離散状態（粒子・格子）
 
@@ -105,10 +107,24 @@ $$
 
 ここで $\mathbf{P}_p$ は第一Piola応力。
 
-圧力のみの近似では
+本実装の標準（密度圧縮）では、まず格子質量から粒子密度を推定する。
+$$
+\rho_p \approx \sum_i w_{ip}\,m_i / h^d
+$$
+$$
+p_p = K\max\left(\frac{\rho_p}{\rho_0}-1,\,0\right)
+$$
+
+その上で等方圧力応力を使う。
+$$
+\boldsymbol{\sigma}_p \approx -p_p\mathbf{I}
+$$
+
+Jベース圧力を使う簡易近似では
 $$
 \mathbf{P}_p \approx -p_p\,J_p\,\mathbf{F}_p^{-T}
 $$
+とできる。
 
 ### 4.3 格子更新
 
@@ -168,6 +184,12 @@ $$
 $$
 
 安定化のため $J_p = \det(\mathbf{F}_p)$ に上下限クランプを設ける。
+
+実装上は、数値ドリフト抑制のために
+$$
+\mathbf{F}_p \leftarrow (1-\alpha_F)\mathbf{F}_p + \alpha_F\mathbf{I}
+$$
+の緩和（`f_relaxation = \alpha_F`）を任意で入れてよい。これは物理モデルではなく数値安定化項である。
 
 ## 5. 時間刻み制御（CFL）
 
