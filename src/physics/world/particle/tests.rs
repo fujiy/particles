@@ -938,8 +938,8 @@ fn sub_block_gravity_accumulates_with_effective_step_time() {
     particles.vel.push(Vec2::ZERO);
     particles
         .mass
-        .push(particle_properties(ParticleMaterial::SandGranular).mass);
-    particles.material.push(ParticleMaterial::SandGranular);
+        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+    particles.material.push(ParticleMaterial::WaterLiquid);
     particles.resize_work_buffers();
 
     let sub_block = world_pos_to_sub_block(

@@ -6,6 +6,7 @@ use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::solver::granular;
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::{ParticleStepBreakdown, ParticleWorld};
+use crate::physics::world::particle::helpers::is_granular_particle;
 use crate::physics::world::terrain::TerrainWorld;
 
 pub(super) fn step_substeps(
@@ -75,7 +76,9 @@ pub(super) fn step_single_substep(
             if effective_dt <= 0.0 {
                 continue;
             }
-            particles.vel[i] += particles.solver_params.gravity_mps2 * effective_dt;
+            if !is_granular_particle(particles.material[i]) {
+                particles.vel[i] += particles.solver_params.gravity_mps2 * effective_dt;
+            }
             particles.pos[i] += particles.vel[i] * effective_dt;
         }
     }

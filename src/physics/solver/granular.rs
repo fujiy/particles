@@ -228,6 +228,7 @@ pub(crate) fn solve_contacts(
                                 object_field,
                                 object_world,
                                 i,
+                                dt_sub,
                                 dt_granular,
                                 inv_dt_granular,
                                 alpha_n,
@@ -253,6 +254,7 @@ pub(crate) fn solve_contacts(
                             object_field,
                             object_world,
                             i,
+                            dt_sub,
                             dt_granular,
                             inv_dt_granular,
                             alpha_n,
@@ -336,6 +338,7 @@ fn accumulate_terrain_object_contacts_for_particle(
     object_field: &ObjectPhysicsField,
     object_world: &ObjectWorld,
     i: usize,
+    dt_sub: f32,
     dt_granular: f32,
     inv_dt_granular: f32,
     alpha_n: f32,
@@ -355,11 +358,16 @@ fn accumulate_terrain_object_contacts_for_particle(
     }
     let props_i = particle_properties(material_i);
     let inv_mass_i = 1.0 / particles.mass[i].max(1e-6);
+    let effective_dt = particles.particle_execution_dt_substep(i).max(dt_sub);
+    // Granular particles skip direct gravity velocity integration and receive gravity only
+    // through XPBD contact constraints. Encode expected free-fall displacement here.
+    let gravity_bias = particles.solver_params.gravity_mps2 * (effective_dt * effective_dt);
 
     if let Some((signed_distance, normal)) =
         terrain.sample_signed_distance_and_normal(particles.pos[i])
     {
-        let c_n = signed_distance - props_i.terrain_push_radius_m;
+        let gravity_bias_n = gravity_bias.dot(normal);
+        let c_n = signed_distance - props_i.terrain_push_radius_m + gravity_bias_n;
         if c_n < 0.0 {
             let key = i;
             let prev_lambda_n = *lambda_n_terrain.get(key).unwrap_or(&0.0);
@@ -404,7 +412,8 @@ fn accumulate_terrain_object_contacts_for_particle(
         let Some(sample) = object_world.evaluate_object_sdf(object_id, particles.pos[i]) else {
             continue;
         };
-        let c_n = sample.distance_m - props_i.object_push_radius_m;
+        let gravity_bias_n = gravity_bias.dot(sample.normal_world);
+        let c_n = sample.distance_m - props_i.object_push_radius_m + gravity_bias_n;
         if c_n >= 0.0 {
             continue;
         }
