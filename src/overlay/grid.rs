@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use super::*;
+use crate::physics::world::grid::GridHierarchy;
 use crate::physics::world::sub_block::{rate_level_from_divisor, sub_block_world_bounds};
 
 pub(super) fn draw_tile_overlay(
@@ -30,113 +31,136 @@ pub(super) fn draw_physics_area_overlay(
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     object_world: Res<ObjectWorld>,
     particle_world: Res<ParticleWorld>,
+    grid_hierarchy: Res<GridHierarchy>,
 ) {
     if !overlay_state.enabled {
         return;
     }
 
-    let (Some(min_chunk), Some(max_chunk)) = (active_region.chunk_min, active_region.chunk_max)
-    else {
-        return;
+    let active_world_bounds = if let (Some(min_chunk), Some(max_chunk)) =
+        (active_region.chunk_min, active_region.chunk_max)
+    {
+        let min_x = min_chunk.x as f32 * CHUNK_WORLD_SIZE_M;
+        let max_x = (max_chunk.x + 1) as f32 * CHUNK_WORLD_SIZE_M;
+        let min_y = min_chunk.y as f32 * CHUNK_WORLD_SIZE_M;
+        let max_y = (max_chunk.y + 1) as f32 * CHUNK_WORLD_SIZE_M;
+        Some((
+            min_chunk,
+            max_chunk,
+            Vec2::new(min_x, min_y),
+            Vec2::new(max_x, max_y),
+        ))
+    } else {
+        None
     };
-    let min_x = min_chunk.x as f32 * CHUNK_WORLD_SIZE_M;
-    let max_x = (max_chunk.x + 1) as f32 * CHUNK_WORLD_SIZE_M;
-    let min_y = min_chunk.y as f32 * CHUNK_WORLD_SIZE_M;
-    let max_y = (max_chunk.y + 1) as f32 * CHUNK_WORLD_SIZE_M;
 
-    let neighbor_step = WATER_KERNEL_RADIUS_M;
-    let min_neighbor_x = (min_x / neighbor_step).floor() as i32;
-    let max_neighbor_x = (max_x / neighbor_step).ceil() as i32;
-    let min_neighbor_y = (min_y / neighbor_step).floor() as i32;
-    let max_neighbor_y = (max_y / neighbor_step).ceil() as i32;
+    if let Some((min_chunk, max_chunk, world_min, world_max)) = active_world_bounds {
+        let min_x = world_min.x;
+        let max_x = world_max.x;
+        let min_y = world_min.y;
+        let max_y = world_max.y;
 
-    for gx in min_neighbor_x..=max_neighbor_x {
-        let x = gx as f32 * neighbor_step;
-        gizmos.line_2d(
-            Vec2::new(x, min_y),
-            Vec2::new(x, max_y),
-            GRID_NEIGHBOR_COLOR,
-        );
-    }
-    for gy in min_neighbor_y..=max_neighbor_y {
-        let y = gy as f32 * neighbor_step;
-        gizmos.line_2d(
-            Vec2::new(min_x, y),
-            Vec2::new(max_x, y),
-            GRID_NEIGHBOR_COLOR,
-        );
-    }
+        let neighbor_step = WATER_KERNEL_RADIUS_M;
+        let min_neighbor_x = (min_x / neighbor_step).floor() as i32;
+        let max_neighbor_x = (max_x / neighbor_step).ceil() as i32;
+        let min_neighbor_y = (min_y / neighbor_step).floor() as i32;
+        let max_neighbor_y = (max_y / neighbor_step).ceil() as i32;
 
-    for &chunk in &active_region.active_chunks {
-        draw_chunk_outline(&mut gizmos, chunk, GRID_ACTIVE_CHUNK_COLOR);
-    }
+        for gx in min_neighbor_x..=max_neighbor_x {
+            let x = gx as f32 * neighbor_step;
+            gizmos.line_2d(
+                Vec2::new(x, min_y),
+                Vec2::new(x, max_y),
+                GRID_NEIGHBOR_COLOR,
+            );
+        }
+        for gy in min_neighbor_y..=max_neighbor_y {
+            let y = gy as f32 * neighbor_step;
+            gizmos.line_2d(
+                Vec2::new(min_x, y),
+                Vec2::new(max_x, y),
+                GRID_NEIGHBOR_COLOR,
+            );
+        }
 
-    let halo_chunks = region_settings.active_halo_chunks.max(0);
-    if halo_chunks > 0 {
-        let halo_min = min_chunk - IVec2::splat(halo_chunks);
-        let halo_max = max_chunk + IVec2::splat(halo_chunks);
-        for y in halo_min.y..=halo_max.y {
-            for x in halo_min.x..=halo_max.x {
-                let chunk = IVec2::new(x, y);
-                if x >= min_chunk.x && x <= max_chunk.x && y >= min_chunk.y && y <= max_chunk.y {
-                    continue;
+        for &chunk in &active_region.active_chunks {
+            draw_chunk_outline(&mut gizmos, chunk, GRID_ACTIVE_CHUNK_COLOR);
+        }
+
+        let halo_chunks = region_settings.active_halo_chunks.max(0);
+        if halo_chunks > 0 {
+            let halo_min = min_chunk - IVec2::splat(halo_chunks);
+            let halo_max = max_chunk + IVec2::splat(halo_chunks);
+            for y in halo_min.y..=halo_max.y {
+                for x in halo_min.x..=halo_max.x {
+                    let chunk = IVec2::new(x, y);
+                    if x >= min_chunk.x && x <= max_chunk.x && y >= min_chunk.y && y <= max_chunk.y
+                    {
+                        continue;
+                    }
+                    draw_chunk_outline(&mut gizmos, chunk, GRID_HALO_CHUNK_COLOR);
                 }
-                draw_chunk_outline(&mut gizmos, chunk, GRID_HALO_CHUNK_COLOR);
+            }
+        }
+
+        draw_sub_block_rate_digits(
+            &mut gizmos,
+            &particle_world,
+            min_chunk - IVec2::splat(halo_chunks),
+            max_chunk + IVec2::splat(halo_chunks),
+        );
+
+        for &chunk in render_diagnostics
+            .terrain_updated_chunk_highlight_frames
+            .keys()
+        {
+            if chunk.x < min_chunk.x
+                || chunk.x > max_chunk.x
+                || chunk.y < min_chunk.y
+                || chunk.y > max_chunk.y
+            {
+                continue;
+            }
+            draw_chunk_outline(&mut gizmos, chunk, GRID_TERRAIN_UPDATED_COLOR);
+        }
+        for &chunk in render_diagnostics
+            .particle_updated_chunk_highlight_frames
+            .keys()
+        {
+            if chunk.x < min_chunk.x
+                || chunk.x > max_chunk.x
+                || chunk.y < min_chunk.y
+                || chunk.y > max_chunk.y
+            {
+                continue;
+            }
+            draw_chunk_outline(&mut gizmos, chunk, GRID_PARTICLE_UPDATED_COLOR);
+        }
+
+        draw_rect_outline(
+            &mut gizmos,
+            Vec2::new(min_x, min_y),
+            Vec2::new(max_x, max_y),
+            GRID_PHYSICS_REGION_COLOR,
+        );
+
+        let particle_positions = particle_world.positions();
+        let particle_masses = particle_world.masses();
+        for object in object_world.objects() {
+            if let Some((center, theta)) =
+                object_pose_for_overlay(object, particle_positions, particle_masses)
+            {
+                draw_object_grid_cells(&mut gizmos, object, center, theta);
+                draw_object_pose_axes(&mut gizmos, center, theta);
             }
         }
     }
 
-    draw_sub_block_rate_digits(
+    draw_mpm_grid_overlay(
         &mut gizmos,
-        &particle_world,
-        min_chunk - IVec2::splat(halo_chunks),
-        max_chunk + IVec2::splat(halo_chunks),
+        &grid_hierarchy,
+        active_world_bounds.map(|(_, _, min, max)| (min, max)),
     );
-
-    for &chunk in render_diagnostics
-        .terrain_updated_chunk_highlight_frames
-        .keys()
-    {
-        if chunk.x < min_chunk.x
-            || chunk.x > max_chunk.x
-            || chunk.y < min_chunk.y
-            || chunk.y > max_chunk.y
-        {
-            continue;
-        }
-        draw_chunk_outline(&mut gizmos, chunk, GRID_TERRAIN_UPDATED_COLOR);
-    }
-    for &chunk in render_diagnostics
-        .particle_updated_chunk_highlight_frames
-        .keys()
-    {
-        if chunk.x < min_chunk.x
-            || chunk.x > max_chunk.x
-            || chunk.y < min_chunk.y
-            || chunk.y > max_chunk.y
-        {
-            continue;
-        }
-        draw_chunk_outline(&mut gizmos, chunk, GRID_PARTICLE_UPDATED_COLOR);
-    }
-
-    draw_rect_outline(
-        &mut gizmos,
-        Vec2::new(min_x, min_y),
-        Vec2::new(max_x, max_y),
-        GRID_PHYSICS_REGION_COLOR,
-    );
-
-    let particle_positions = particle_world.positions();
-    let particle_masses = particle_world.masses();
-    for object in object_world.objects() {
-        if let Some((center, theta)) =
-            object_pose_for_overlay(object, particle_positions, particle_masses)
-        {
-            draw_object_grid_cells(&mut gizmos, object, center, theta);
-            draw_object_pose_axes(&mut gizmos, center, theta);
-        }
-    }
 }
 
 fn draw_object_grid_cells(gizmos: &mut Gizmos, object: &ObjectData, center: Vec2, theta: f32) {
@@ -165,6 +189,79 @@ fn draw_rect_outline(gizmos: &mut Gizmos, min: Vec2, max: Vec2, color: Color) {
     gizmos.line_2d(Vec2::new(max.x, min.y), Vec2::new(max.x, max.y), color);
     gizmos.line_2d(Vec2::new(max.x, max.y), Vec2::new(min.x, max.y), color);
     gizmos.line_2d(Vec2::new(min.x, max.y), Vec2::new(min.x, min.y), color);
+}
+
+fn draw_mpm_grid_overlay(
+    gizmos: &mut Gizmos,
+    grid_hierarchy: &GridHierarchy,
+    clip_rect: Option<(Vec2, Vec2)>,
+) {
+    for block in grid_hierarchy.blocks() {
+        if block.node_dims.x == 0 || block.node_dims.y == 0 {
+            continue;
+        }
+        let block_min = block.world_node_min();
+        let block_max = block.world_node_max();
+        let Some((draw_min, draw_max)) = clipped_rect(block_min, block_max, clip_rect) else {
+            continue;
+        };
+
+        draw_rect_outline(gizmos, block_min, block_max, GRID_MPM_BLOCK_COLOR);
+
+        let step = block.h_b.max(1e-6);
+        let max_x_index = block.node_dims.x as i32 - 1;
+        let max_y_index = block.node_dims.y as i32 - 1;
+        let start_x = (((draw_min.x - block_min.x) / step).floor() as i32).clamp(0, max_x_index);
+        let end_x = (((draw_max.x - block_min.x) / step).ceil() as i32).clamp(0, max_x_index);
+        let start_y = (((draw_min.y - block_min.y) / step).floor() as i32).clamp(0, max_y_index);
+        let end_y = (((draw_max.y - block_min.y) / step).ceil() as i32).clamp(0, max_y_index);
+
+        for ix in start_x..=end_x {
+            let x = block_min.x + ix as f32 * step;
+            gizmos.line_2d(
+                Vec2::new(x, draw_min.y),
+                Vec2::new(x, draw_max.y),
+                GRID_MPM_NODE_COLOR,
+            );
+        }
+        for iy in start_y..=end_y {
+            let y = block_min.y + iy as f32 * step;
+            gizmos.line_2d(
+                Vec2::new(draw_min.x, y),
+                Vec2::new(draw_max.x, y),
+                GRID_MPM_NODE_COLOR,
+            );
+        }
+
+        let marker_half = (step * 0.12).clamp(0.01, 0.05);
+        for &node in block.active_nodes() {
+            let p = node.as_vec2() * block.h_b;
+            if p.x < draw_min.x || p.x > draw_max.x || p.y < draw_min.y || p.y > draw_max.y {
+                continue;
+            }
+            gizmos.line_2d(
+                Vec2::new(p.x - marker_half, p.y),
+                Vec2::new(p.x + marker_half, p.y),
+                GRID_MPM_ACTIVE_NODE_COLOR,
+            );
+            gizmos.line_2d(
+                Vec2::new(p.x, p.y - marker_half),
+                Vec2::new(p.x, p.y + marker_half),
+                GRID_MPM_ACTIVE_NODE_COLOR,
+            );
+        }
+    }
+}
+
+fn clipped_rect(min: Vec2, max: Vec2, clip_rect: Option<(Vec2, Vec2)>) -> Option<(Vec2, Vec2)> {
+    let (clip_min, clip_max) = clip_rect.unwrap_or((min, max));
+    let draw_min = Vec2::new(min.x.max(clip_min.x), min.y.max(clip_min.y));
+    let draw_max = Vec2::new(max.x.min(clip_max.x), max.y.min(clip_max.y));
+    if draw_min.x > draw_max.x || draw_min.y > draw_max.y {
+        None
+    } else {
+        Some((draw_min, draw_max))
+    }
 }
 
 fn blend_color(from: Color, to: Color, t: f32) -> Color {
@@ -201,7 +298,8 @@ fn draw_sub_block_rate_digits(
             GRID_SUB_BLOCK_DEBT_HOT_COLOR,
             sample.debt_ratio,
         );
-        let level = rate_level_from_divisor(sample.rate_divisor, particle_world.sub_block_max_level());
+        let level =
+            rate_level_from_divisor(sample.rate_divisor, particle_world.sub_block_max_level());
         draw_number_stroke(gizmos, level, center, size, color);
     }
 }

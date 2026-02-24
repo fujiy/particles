@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use super::*;
+use crate::physics::world::grid::GridHierarchy;
 
 pub(super) fn setup_overlay_ui(mut commands: Commands) {
     commands
@@ -184,12 +185,14 @@ pub(super) fn update_physics_area_overlay_button_label(
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     active_region: Res<PhysicsActiveRegion>,
     particle_world: Res<ParticleWorld>,
+    grid_hierarchy: Res<GridHierarchy>,
     mut labels: Query<&mut Text, With<PhysicsAreaOverlayToggleButtonLabel>>,
 ) {
     if !overlay_state.is_changed()
         && !render_diagnostics.is_changed()
         && !active_region.is_changed()
         && !particle_world.is_changed()
+        && !grid_hierarchy.is_changed()
     {
         return;
     }
@@ -201,9 +204,15 @@ pub(super) fn update_physics_area_overlay_button_label(
             .iter()
             .map(|sample| sample.debt_ratio)
             .fold(0.0, f32::max);
+        let mpm_block_count = grid_hierarchy.block_count();
+        let mpm_active_nodes: usize = grid_hierarchy
+            .blocks()
+            .iter()
+            .map(|block| block.active_node_count())
+            .sum();
         label.0 = if overlay_state.enabled {
             format!(
-                "Physics Area Overlay: ON (A:{} T:{} P:{} SB:{} D:{:.2})",
+                "Physics Area Overlay: ON (A:{} T:{} P:{} SB:{} D:{:.2} MPM:{} AN:{})",
                 active_region.active_chunks.len(),
                 render_diagnostics
                     .terrain_updated_chunk_highlight_frames
@@ -213,6 +222,8 @@ pub(super) fn update_physics_area_overlay_button_label(
                     .len(),
                 sub_block_count,
                 max_debt,
+                mpm_block_count,
+                mpm_active_nodes,
             )
         } else {
             "Physics Area Overlay: OFF".to_string()
@@ -243,6 +254,7 @@ pub(super) fn update_overlay_info_text(
     active_region: Res<PhysicsActiveRegion>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     particle_world: Res<ParticleWorld>,
+    grid_hierarchy: Res<GridHierarchy>,
     mut labels: Query<&mut Text, With<OverlayInfoText>>,
 ) {
     if !tile_overlay_state.is_changed()
@@ -250,6 +262,7 @@ pub(super) fn update_overlay_info_text(
         && !active_region.is_changed()
         && !render_diagnostics.is_changed()
         && !particle_world.is_changed()
+        && !grid_hierarchy.is_changed()
     {
         return;
     }
@@ -269,6 +282,16 @@ pub(super) fn update_overlay_info_text(
                 "Sub-blocks: {} (Debt max {:.2})",
                 particle_world.sub_block_overlay_samples().len(),
                 max_debt,
+            ));
+            let mpm_block_count = grid_hierarchy.block_count();
+            let mpm_active_nodes: usize = grid_hierarchy
+                .blocks()
+                .iter()
+                .map(|block| block.active_node_count())
+                .sum();
+            lines.push(format!(
+                "MPM Grid: blocks {} active nodes {}",
+                mpm_block_count, mpm_active_nodes
             ));
         }
         if tile_overlay_state.enabled {

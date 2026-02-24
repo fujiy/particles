@@ -42,6 +42,10 @@ impl GridBlock {
         &self.active_nodes
     }
 
+    pub fn active_node_count(&self) -> usize {
+        self.active_nodes.len()
+    }
+
     pub fn nodes(&self) -> &[GridNode] {
         &self.nodes
     }
@@ -100,6 +104,19 @@ impl GridBlock {
                 }
             }
         }
+    }
+
+    pub fn world_node_min(&self) -> Vec2 {
+        self.origin_node.as_vec2() * self.h_b
+    }
+
+    pub fn world_node_max(&self) -> Vec2 {
+        let max_node = self.origin_node
+            + IVec2::new(
+                self.node_dims.x.saturating_sub(1) as i32,
+                self.node_dims.y.saturating_sub(1) as i32,
+            );
+        max_node.as_vec2() * self.h_b
     }
 }
 
