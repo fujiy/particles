@@ -3,8 +3,8 @@ use std::time::Instant;
 use bevy::log::tracing;
 
 use super::mpm_water::{
-    MpmWaterParams, apply_terrain_boundary_to_continuum, sound_speed_mps, step_single_rate,
-    sync_continuum_to_particle_world,
+    MpmWaterParams, apply_terrain_boundary_to_continuum, rebuild_continuum_from_particle_world,
+    sound_speed_mps, step_single_rate, sync_continuum_to_particle_world,
 };
 use super::types::StepSimulationTiming;
 use crate::physics::profiler::process_cpu_time_seconds;
@@ -34,10 +34,13 @@ pub(crate) fn step_simulation_once(
         .iter()
         .filter(|&&m| matches!(m, ParticleMaterial::WaterLiquid))
         .count();
-    if !continuum_world.is_empty()
-        && grid_hierarchy.block_count() > 0
-        && continuum_world.len() == water_particle_count
-    {
+    if water_particle_count == 0 {
+        continuum_world.clear();
+    }
+    if water_particle_count > 0 {
+        if grid_hierarchy.block_count() == 0 {
+            return StepSimulationTiming::default();
+        }
         let particle_step_start = Instant::now();
         let particle_step_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
         let _span = tracing::info_span!("physics::mpm_water_step").entered();
@@ -48,6 +51,13 @@ pub(crate) fn step_simulation_once(
             bulk_modulus: MPM_TARGET_RHO0 * MPM_TARGET_SOUND_SPEED_MPS * MPM_TARGET_SOUND_SPEED_MPS,
             ..Default::default()
         };
+        if continuum_world.len() != water_particle_count {
+            let _ = rebuild_continuum_from_particle_world(
+                particle_world,
+                continuum_world,
+                &mpm_params,
+            );
+        }
         let h = grid_hierarchy
             .blocks()
             .first()
@@ -68,18 +78,24 @@ pub(crate) fn step_simulation_once(
                 0.05,
             );
         }
-        if sync_continuum_to_particle_world(particle_world, continuum_world) {
-            let particle_step_secs = particle_step_start.elapsed().as_secs_f64();
-            let particle_step_cpu_secs = (process_cpu_time_seconds()
-                .unwrap_or(particle_step_cpu_start)
-                - particle_step_cpu_start)
-                .max(0.0);
-            return StepSimulationTiming {
-                particle_step_secs,
-                particle_step_cpu_secs,
-                ..StepSimulationTiming::default()
-            };
+        if !sync_continuum_to_particle_world(particle_world, continuum_world) {
+            let _ = rebuild_continuum_from_particle_world(
+                particle_world,
+                continuum_world,
+                &mpm_params,
+            );
+            let _ = sync_continuum_to_particle_world(particle_world, continuum_world);
         }
+        let particle_step_secs = particle_step_start.elapsed().as_secs_f64();
+        let particle_step_cpu_secs = (process_cpu_time_seconds()
+            .unwrap_or(particle_step_cpu_start)
+            - particle_step_cpu_start)
+            .max(0.0);
+        return StepSimulationTiming {
+            particle_step_secs,
+            particle_step_cpu_secs,
+            ..StepSimulationTiming::default()
+        };
     }
     particle_world.set_parallel_enabled(parallel_enabled);
     let particle_step_start = Instant::now();

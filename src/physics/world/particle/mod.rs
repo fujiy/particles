@@ -261,8 +261,8 @@ pub enum ParticleActivityState {
 }
 
 pub(crate) mod helpers;
-#[path = "../../solver/liquid.rs"]
-mod liquid_solver;
+#[path = "../../solver/particle_step.rs"]
+mod particle_step_solver;
 #[path = "../../solver/object.rs"]
 mod object_solver;
 
@@ -1093,7 +1093,7 @@ impl ParticleWorld {
         object_world: &mut ObjectWorld,
     ) -> ParticleStepBreakdown {
         self.begin_sub_block_fixed_step();
-        liquid_solver::step_substeps(self, terrain, object_field, object_world)
+        particle_step_solver::step_substeps(self, terrain, object_field, object_world)
     }
 
     pub(crate) fn prepare_sub_block_rate_scheduler(&mut self, terrain: &TerrainWorld) {
