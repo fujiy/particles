@@ -1,330 +1,244 @@
-# Physics Notes (Granular / XPBD)
+# Physics Report: Water MLS-MPM (Explicit)
 
-このドキュメントは、現行実装における**粉体（granular）XPBDソルバ**を、
-XPBD未経験者でも追えるように基礎から説明するためのノートである。
+## 1. 目的
 
-対象は「粉体」だけであり、流体（PBD/XPBD）は扱わない。
-また、ここでの式は理論一般ではなく、**現在のコード挙動**を説明することを優先する。
+本書は、水（単相）を対象とした明示 MLS-MPM ソルバの実装仕様を、連続体方程式から離散化、計算手順、安定条件まで一貫して定義する。
 
-参照実装:
-- `src/physics/solver/liquid.rs`
-- `src/physics/solver/granular.rs`
-- `src/physics/world/particle/mod.rs`
+対象外:
+- 剛体ソルバ本体
+- 粉体系（granular）ソルバ本体
+- 陰解法ベースの圧力投影
 
----
+## 2. 連続体モデル
 
-## 1. まず「XPBDで何をしているか」
+### 2.1 支配方程式
 
-### 1.1 PBDの直感
+連続体の質量保存・運動量保存を以下で扱う。
 
-PBD（Position-Based Dynamics）は、
-「速度や力を直接解く」よりも先に「位置が満たすべき条件（拘束）」を解き、
-最後に位置差分から速度を作る手法である。
-
-例えば接触なら、「粒子同士が重ならない」を拘束
+- 質量保存:
 $$
-C(\mathbf{x}) \ge 0
+\frac{D\rho}{Dt} + \rho\,\nabla\cdot\mathbf{u} = 0
 $$
-として定義し、反復的に位置補正して満たす。
 
-長所は安定性、短所は剛性（硬さ）と時間刻みの依存が強いこと。
-
-### 1.2 XPBDの追加要素
-
-XPBD（Extended PBD）は、拘束にコンプライアンス（柔らかさ）を導入し、
-時間刻みを変えても挙動が崩れにくいようにした拡張である。
-
-拘束ごとにラグランジュ乗数 $\lambda$ を持ち、1反復の更新は典型的に
+- 運動量保存:
 $$
-\Delta \lambda =
-\frac{-C(\mathbf{x}) - \alpha \lambda}
-{\sum_k w_k \lVert \nabla_{\mathbf{x}_k} C \rVert^2 + \alpha}
+\rho\frac{D\mathbf{u}}{Dt} = \nabla\cdot\boldsymbol{\sigma} + \rho\mathbf{g}
 $$
-となる（$w_k=1/m_k$ は逆質量）。
 
 ここで
+- $\rho$: 密度
+- $\mathbf{u}$: 速度
+- $\boldsymbol{\sigma}$: Cauchy 応力
+- $\mathbf{g}$: 重力加速度
+
+### 2.2 水の構成則（弱圧縮）
+
+水は等方圧力 + 粘性で近似する。
+
 $$
-\alpha = \frac{c}{\Delta t^2}
-$$
-で、$c$ はコンプライアンス（$c=0$ に近いほど硬い）。
-
-この $\Delta\lambda$ で位置補正を行う：
-$$
-\Delta \mathbf{x}_k = w_k \, \nabla_{\mathbf{x}_k} C \, \Delta\lambda
-$$
-
----
-
-## 2. この実装のデータと記号
-
-以降で使う記号:
-
-- 粒子 index: $i, j$
-- 位置: $\mathbf{x}_i$
-- 速度: $\mathbf{v}_i$
-- 質量: $m_i$、逆質量: $w_i = 1/m_i$
-- 法線: $\mathbf{n}$
-- 接線単位ベクトル: $\mathbf{t}$
-- 固定サブステップ: $\Delta t_{\text{sub}}$
-- 粉体内部サブステップ: $\Delta t_g = \Delta t_{\text{sub}}/N_g$
-- XPBD法線コンプライアンス項: $\alpha_n = c_n/\Delta t_g^2$
-- XPBD接線コンプライアンス項: $\alpha_t = c_t/\Delta t_g^2$
-
-この実装では、粒子ごとに「この substep で実際に進めた時間」$\Delta t_i$ を持つ。
-これは `particle_execution_dt_substep[i]` として保存される。
-
----
-
-## 3. マルチレートの前提
-
-`Sub-block` ごとに更新レベルがあり、
-$$
-r = 2^{\text{level}}
-$$
-を divisor（更新間引き率）とする。
-
-substep index を $s$ とすると、scheduled 条件は
-$$
-(s+1)\bmod r = 0
-$$
-である。
-
-このとき有効時間幅は次のように扱う:
-
-- 非マルチレート対象粒子: $\Delta t_i = \Delta t_{\text{sub}}$
-- マルチレート対象粒子
-  - scheduled: $\Delta t_i = r\,\Delta t_{\text{sub}}$
-  - unscheduled: $\Delta t_i = 0$
-
-重要なのは、後段の速度再構成もこの $\Delta t_i$ を使うこと。
-つまり「予測で進めた時間」と「速度再構成の分母」が一致する。
-
----
-
-## 4. 1 fixed substep における粉体の計算順
-
-粉体に関係する大枠:
-
-1. 予測段（`predict_positions`）
-2. `Sub-block` スケジューラ更新
-3. 粉体XPBD接触（`granular::solve_contacts`）
-4. 速度再構成（`update_velocity`）
-5. 反発（`granular::apply_restitution`）
-
-この順序の意味は以下。
-
-- 予測段で「拘束を無視した仮位置」を作る
-- XPBDで拘束を満たすよう位置を戻す
-- 最後に位置差分から速度を作る
-
----
-
-## 5. 予測段（現行: 粉体は重力を直接積分しない）
-
-現在の実装では、粉体については
-「重力で速度を直接更新」しない。
-
-予測段の粉体は
-$$
-\mathbf{v}_i^* = \mathbf{v}_i
+\boldsymbol{\sigma} = -p\mathbf{I} + 2\mu\mathbf{D}
 $$
 $$
-\mathbf{x}_i^* = \mathbf{x}_i + \mathbf{v}_i \Delta t_i
-$$
-のみである。
-
-unscheduled 粒子は $\Delta t_i=0$ なので、その substep では凍結される。
-
-この設計意図は、外力（少なくとも重力）を接触拘束側に寄せるためである。
-
----
-
-## 6. 粉体XPBD: 粒子-粒子接触
-
-### 6.1 法線拘束（非貫通）
-
-2粒子の半径を $r_i, r_j$ とし、
-$$
-C_n = \lVert \mathbf{x}_i-\mathbf{x}_j \rVert - (r_i+r_j)
-$$
-を拘束とする。重なっていれば $C_n<0$。
-
-法線:
-$$
-\mathbf{n}_{ij}=
-\frac{\mathbf{x}_i-\mathbf{x}_j}
-{\lVert \mathbf{x}_i-\mathbf{x}_j \rVert}
+\mathbf{D} = \frac{1}{2}(\nabla\mathbf{u} + \nabla\mathbf{u}^T)
 $$
 
-XPBD更新:
+圧力は体積比 $J = \det(\mathbf{F})$ を用いて
+
 $$
-\Delta\lambda_n =
-\frac{-C_n-\alpha_n\lambda_n}
-{(w_i+w_j)+\alpha_n}
-$$
-$$
-\lambda_n \leftarrow \lambda_n+\Delta\lambda_n
+p = K(J-1)
 $$
 
-位置補正:
+または EOS 形式
+
 $$
-\Delta\mathbf{x}_i^{(n)} = +w_i\,\mathbf{n}_{ij}\,\Delta\lambda_n
-,\quad
-\Delta\mathbf{x}_j^{(n)} = -w_j\,\mathbf{n}_{ij}\,\Delta\lambda_n
+p = k\left[\left(\frac{\rho}{\rho_0}\right)^\gamma - 1\right]
 $$
 
-### 6.2 接線拘束（摩擦）
+を使う。初期実装は前者（$J$ ベース）を標準とする。
 
-相対速度:
+## 3. 離散状態（粒子・格子）
+
+### 3.1 粒子状態
+
+粒子 $p$ は以下を持つ。
+
+- 位置 $\mathbf{x}_p$
+- 速度 $\mathbf{v}_p$
+- 質量 $m_p$
+- 初期体積 $V^0_p$
+- 変形勾配 $\mathbf{F}_p$
+- APIC affine 行列 $\mathbf{C}_p$
+
+### 3.2 格子状態
+
+格子ノード $i$ は以下を持つ。
+
+- 質量 $m_i$
+- 運動量 $\mathbf{p}_i$
+- 速度 $\mathbf{v}_i = \mathbf{p}_i/m_i$
+
+## 4. MLS-MPM 更新式
+
+### 4.1 補間カーネル
+
+粒子からノードへの重みを $w_{ip} = N(\mathbf{x}_i-\mathbf{x}_p)$ とする。
+
+- 一貫して同じ次数（例: quadratic B-spline）を P2G/G2P で使用する。
+- 勾配は $\nabla w_{ip}$ として事前計算またはオンザフライ評価する。
+
+### 4.2 P2G（質量・運動量転送）
+
+ノード質量:
 $$
-\mathbf{v}_{rel}=\mathbf{v}_i-\mathbf{v}_j
-$$
-接線方向（法線成分を除去して正規化）:
-$$
-\mathbf{t}=
-\frac{\mathbf{v}_{rel}-(\mathbf{v}_{rel}\cdot\mathbf{n}_{ij})\mathbf{n}_{ij}}
-{\lVert \mathbf{v}_{rel}-(\mathbf{v}_{rel}\cdot\mathbf{n}_{ij})\mathbf{n}_{ij}\rVert}
+m_i = \sum_p w_{ip} m_p
 $$
 
-速度ベース近似の接線拘束:
+APIC を含むノード運動量:
 $$
-C_t=(\mathbf{v}_{rel}\cdot\mathbf{t})\Delta t_g
-$$
-
-更新:
-$$
-\Delta\lambda_t =
-\frac{-C_t-\alpha_t\lambda_t}
-{(w_i+w_j)+\alpha_t}
+\mathbf{p}_i = \sum_p w_{ip} m_p\left(\mathbf{v}_p + \mathbf{C}_p(\mathbf{x}_i-\mathbf{x}_p)\right)
 $$
 
-クーロン上限でクランプ:
+内部力寄与を明示時間積分で組み込む形は
 $$
-\lambda_t^{new} =
-\mathrm{clamp}\left(
-\lambda_t+\Delta\lambda_t,\,
--\mu_k|\lambda_n|,\,
-+\mu_k|\lambda_n|
+\Delta \mathbf{p}^{int}_i = -\Delta t\sum_p V^0_p\,\mathbf{P}_p\mathbf{F}_p^T\nabla w_{ip}
+$$
+
+ここで $\mathbf{P}_p$ は第一Piola応力。
+
+圧力のみの近似では
+$$
+\mathbf{P}_p \approx -p_p\,J_p\,\mathbf{F}_p^{-T}
+$$
+
+### 4.3 格子更新
+
+ノード速度更新:
+$$
+\mathbf{v}_i^* = \frac{\mathbf{p}_i + \Delta \mathbf{p}^{int}_i}{m_i}
+$$
+$$
+\mathbf{v}_i^{n+1} = \mathbf{v}_i^* + \Delta t\,\mathbf{g}
+$$
+
+`m_i` が閾値未満のノードは無効としてスキップする。
+
+### 4.4 境界条件（地形SDF）
+
+地形SDFを $\phi(\mathbf{x})$、法線を
+$$
+\mathbf{n} = \frac{\nabla\phi}{\|\nabla\phi\|}
+$$
+とする。
+
+$\phi(\mathbf{x}_i)<0$ のノードで
+
+1. 法線成分を非貫通化
+$$
+\mathbf{v}_i \leftarrow \mathbf{v}_i - \min(\mathbf{v}_i\cdot\mathbf{n},0)\mathbf{n}
+$$
+
+2. 接線減衰（摩擦係数 $\mu_b$）
+$$
+\mathbf{v}_{t} = \mathbf{v}_i - (\mathbf{v}_i\cdot\mathbf{n})\mathbf{n}
+$$
+$$
+\mathbf{v}_{t} \leftarrow \max(0,1-\mu_b)\,\mathbf{v}_{t}
+$$
+
+### 4.5 G2P（速度・位置・内部状態更新）
+
+粒子速度:
+$$
+\mathbf{v}_p^{n+1} = \sum_i w_{ip}\mathbf{v}_i^{n+1}
+$$
+
+APIC affine:
+$$
+\mathbf{C}_p^{n+1} = \frac{4}{h^2}\sum_i w_{ip}\,\mathbf{v}_i^{n+1}(\mathbf{x}_i-\mathbf{x}_p)^T
+$$
+
+粒子位置:
+$$
+\mathbf{x}_p^{n+1} = \mathbf{x}_p^n + \Delta t\,\mathbf{v}_p^{n+1}
+$$
+
+変形勾配:
+$$
+\mathbf{F}_p^{n+1} = (\mathbf{I}+\Delta t\,\mathbf{C}_p^{n+1})\mathbf{F}_p^n
+$$
+
+安定化のため $J_p = \det(\mathbf{F}_p)$ に上下限クランプを設ける。
+
+## 5. 時間刻み制御（CFL）
+
+block $b$ の時間刻みは
+
+$$
+\Delta t_b = \min\left(
+C_u\frac{h_b}{u_{\max,b}},
+C_c\frac{h_b}{c_b+u_{\max,b}},
+C_a\sqrt{\frac{h_b}{a_{\max,b}}}
 \right)
 $$
 
-位置補正:
-$$
-\Delta\mathbf{x}_i^{(t)} = +w_i\mathbf{t}(\lambda_t^{new}-\lambda_t)
-,\quad
-\Delta\mathbf{x}_j^{(t)} = -w_j\mathbf{t}(\lambda_t^{new}-\lambda_t)
-$$
+- $u_{\max,b}$: block内最大速度
+- $c_b$: EOSから得る見かけ音速
+- $a_{\max,b}$: block内最大加速度
 
----
+実装では `dt_b <= dt_frame` を満たす整数 subcycling 回数に丸める。
 
-## 7. 粉体XPBD: 粒子-地形 / 粒子-オブジェクト接触
+## 6. LoD と subcycling
 
-ここが現行実装の要点で、重力を拘束側へ入れる。
+### 6.1 空間LoD
 
-### 7.1 重力バイアス項
+- 細格子 block: 境界や高せん断領域
+- 粗格子 block: 低活動・遠方領域
 
-粒子 $i$ の有効時間 $\Delta t_i$ から
-$$
-\mathbf{b}_g=\mathbf{g}\Delta t_i^2
-$$
-を作る。
+### 6.2 時間LoD
 
-これは「その有効時間で自由落下したときの変位スケール」に対応する。
+- 各 block は独自 `dt_b` で更新する。
+- フレーム内で更新回数が異なる block 同士は、境界フラックス交換を同期点で解決する。
 
-### 7.2 地形（SDF）接触
+### 6.3 境界交換ポリシー
 
-SDF距離を $d$、押し出し半径を $r$、法線を $\mathbf{n}$ とすると
-$$
-C_n = d-r + \mathbf{b}_g\cdot\mathbf{n}
-$$
+- LoD 境界で交換する量:
+  - 質量フラックス
+  - 運動量フラックス
+- 対称更新を保証し、片側のみ更新を禁止する。
 
-更新は片側質量なので
-$$
-\Delta\lambda_n =
-\frac{-C_n-\alpha_n\lambda_n}
-{w_i+\alpha_n}
-$$
-$$
-\Delta\mathbf{x}_i^{(n)} = w_i\mathbf{n}\Delta\lambda_n
-$$
+## 7. 最小実装アルゴリズム（水優先）
 
-### 7.3 オブジェクト（SDF）接触
+1. `active blocks` を確定する。  
+2. 各 block で `dt_b` を算出する。  
+3. フレーム区間を subcycle タイムラインへ分割する。  
+4. サイクルごとに対象 block のみ `P2G -> Grid -> Boundary -> G2P` を実行する。  
+5. 同期点で LoD 境界フラックスを双方向に調停する。  
+6. フレーム末で保存量誤差（質量・運動量）と CFL 余裕を記録する。  
 
-候補オブジェクトのうち最深接触1件を採用し、同様に
-$$
-C_n = d_{obj}-r_{obj}+\mathbf{b}_g\cdot\mathbf{n}_{obj}
-$$
-を解く。
+## 8. 検証指標
 
-接線拘束は地形・オブジェクトとも同型:
+- 質量誤差率:
 $$
-\Delta\lambda_t=
-\frac{-C_t-\alpha_t\lambda_t}
-{w_i+\alpha_t}
-$$
-を計算し、$\pm \mu_k|\lambda_n|$ でクランプする。
-
----
-
-## 8. 反復・位置適用・速度再構成
-
-`granular_iters` 回の反復で各拘束補正を蓄積した後、scheduled 粒子のみ
-$$
-\mathbf{x}_i \leftarrow \mathbf{x}_i + \Delta\mathbf{x}_i
-$$
-を適用する。
-
-その後、`update_velocity` で
-$$
-\mathbf{v}_i \leftarrow
-\frac{\mathbf{x}_i-\mathbf{x}_i^{prev}}
-{\Delta t_i}
-$$
-と再構成する（$\Delta t_i=0$ の粒子は更新しない）。
-
----
-
-## 9. 反発（restitution）
-
-接触していて法線相対速度が接近中なら impulse を与える。
-
-$$
-v_n = (\mathbf{v}_i-\mathbf{v}_j)\cdot\mathbf{n}_{ij}<0
-$$
-$$
-J = -\frac{(1+e)v_n}{w_i+w_j}
-$$
-$$
-\mathbf{v}_i \leftarrow \mathbf{v}_i + w_iJ\mathbf{n}_{ij}
-,\quad
-\mathbf{v}_j \leftarrow \mathbf{v}_j - w_jJ\mathbf{n}_{ij}
+\epsilon_m = \frac{|M(t)-M(0)|}{M(0)}
 $$
 
-ここで $e$ は反発係数。
+- 運動量誤差率:
+$$
+\epsilon_p = \frac{\|\mathbf{P}(t)-\mathbf{P}(0)-\int_0^t M\mathbf{g}\,dt\|}{\|\mathbf{P}(0)\|+\epsilon}
+$$
 
----
+- 最大CFL比:
+$$
+r_{CFL} = \max_b \frac{\Delta t_b}{\Delta t_{limit,b}}
+$$
 
-## 10. 現行モデルの意味と限界
+- 境界侵入率: `phi(x_p) < 0` 粒子比率
 
-現行挙動の重要点:
+受け入れ基準は `docs/tasks.md` の Work Unit 完了条件で定義する。
 
-1. unscheduled 粒子は接触解法も反発もスキップされる
-2. 粉体の重力は拘束側にのみ入る
-3. したがって、**非接触状態の粉体は加速しない**
+## 9. 実装上の注意
 
-この 3 はユーザー観点で「空中で重力が効かない」に対応する。
-現在の実装は「接触安定化」を優先した中間段階であり、
-自由落下と接触安定を同時に満たすには外力モデルの次段設計が必要になる。
-
----
-
-## 11. 次に設計すべき論点（粉体）
-
-外力をXPBDへ寄せたまま自由落下も表現するための代表的な論点:
-
-- 接触拘束とは別に「運動量更新（外力）」をどこで持つか
-- マルチレート粒子での $\Delta t_i$ とコンプライアンス再正規化の整合
-- 非接触時の運動と接触時の拘束解法を、同じエネルギー観で接続できるか
-
-本ドキュメントはまず現行実装の説明を目的とし、
-上記の改良案そのものは別セクション（将来版）で扱う。
+- カーネル重みと勾配評価は P2G/G2P で同一実装を使う。
+- 無効ノード判定閾値を固定し、フレームごとに変えない（決定論性維持）。
+- 並列化時はノード加算をスレッドローカル集計 + reduce で実装する。
+- 乱数や非決定順序和を避け、headlessテストの再現性を優先する。
