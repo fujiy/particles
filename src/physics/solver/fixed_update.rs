@@ -11,13 +11,21 @@ use crate::physics::state::{
     PhysicsActiveRegion, PhysicsRegionSettings, PhysicsStepProfileSegment, PhysicsStepProfiler,
     ReplayState, SimulationParallelSettings, SimulationPerfMetrics, SimulationState,
 };
+use crate::physics::world::constants::{
+    CELL_SIZE_M, CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
+    WORLD_MIN_CHUNK_Y,
+};
+use crate::physics::world::continuum::ContinuumParticleWorld;
+use crate::physics::world::grid::{GridBlock, GridHierarchy};
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::{ParticleActivityState, ParticleWorld};
-use crate::physics::world::terrain::{CHUNK_SIZE_I32, TerrainWorld, world_to_cell};
+use crate::physics::world::terrain::{TerrainWorld, world_to_cell};
 
 pub(crate) fn initialize_default_world(
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
+    mut continuum_world: ResMut<ContinuumParticleWorld>,
+    mut grid_hierarchy: ResMut<GridHierarchy>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
     mut sim_state: ResMut<SimulationState>,
@@ -30,6 +38,8 @@ pub(crate) fn initialize_default_world(
     terrain_world.reset_fixed_world();
     terrain_world.rebuild_static_particles_if_dirty(terrain_boundary_radius_m);
     *particle_world = ParticleWorld::default();
+    continuum_world.clear();
+    reset_mpm_grid_hierarchy(&mut grid_hierarchy, solver_params.fixed_dt);
     object_world.clear();
     object_field.clear();
     sim_state.running = false;
@@ -46,6 +56,8 @@ pub(crate) fn step_physics(
     mut replay_state: ResMut<ReplayState>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
+    mut continuum_world: ResMut<ContinuumParticleWorld>,
+    mut grid_hierarchy: ResMut<GridHierarchy>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
     mut perf_metrics: ResMut<SimulationPerfMetrics>,
@@ -167,6 +179,8 @@ pub(crate) fn step_physics(
         let sim_step = step_simulation_once(
             &mut terrain_world,
             &mut particle_world,
+            &mut continuum_world,
+            &mut grid_hierarchy,
             &mut object_world,
             &mut object_field,
             parallel_settings.enabled,
@@ -264,4 +278,26 @@ fn ensure_chunks_loaded_in_rect(
             terrain_world.ensure_chunk_loaded(IVec2::new(x, y));
         }
     }
+}
+
+pub(crate) fn reset_mpm_grid_hierarchy(grid_hierarchy: &mut GridHierarchy, dt: f32) {
+    grid_hierarchy.clear();
+
+    let padding_cells = 8;
+    let min_cell = IVec2::new(
+        WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32 - padding_cells,
+        WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32 - padding_cells,
+    );
+    let max_cell_exclusive = IVec2::new(
+        (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 + padding_cells,
+        (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 + padding_cells,
+    );
+    let node_dims = (max_cell_exclusive - min_cell + IVec2::ONE).max(IVec2::ONE);
+    grid_hierarchy.add_block(GridBlock::new(
+        0,
+        CELL_SIZE_M,
+        dt.max(1e-6),
+        min_cell,
+        UVec2::new(node_dims.x as u32, node_dims.y as u32),
+    ));
 }

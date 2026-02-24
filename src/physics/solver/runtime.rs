@@ -1,6 +1,7 @@
 use bevy::log::tracing;
 use bevy::prelude::*;
 
+use super::fixed_update::reset_mpm_grid_hierarchy;
 use super::step::step_simulation_once;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::save_load;
@@ -13,6 +14,8 @@ use crate::physics::state::{
     ReplayState, ResetSimulationRequest, SaveMapRequest, SimulationParallelSettings,
     SimulationState, TerrainStreamingSettings,
 };
+use crate::physics::world::continuum::ContinuumParticleWorld;
+use crate::physics::world::grid::GridHierarchy;
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{CHUNK_SIZE_I32, TerrainWorld, world_to_cell};
@@ -82,6 +85,8 @@ pub(crate) fn handle_replay_requests(
     mut sim_state: ResMut<SimulationState>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
+    mut continuum_world: ResMut<ContinuumParticleWorld>,
+    mut grid_hierarchy: ResMut<GridHierarchy>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
     parallel_settings: Res<SimulationParallelSettings>,
@@ -93,6 +98,8 @@ pub(crate) fn handle_replay_requests(
             continue;
         };
         *particle_world = ParticleWorld::default();
+        continuum_world.clear();
+        reset_mpm_grid_hierarchy(&mut grid_hierarchy, particle_world.solver_params.fixed_dt);
         object_world.clear();
         object_field.clear();
         sim_state.running = false;
@@ -139,6 +146,8 @@ pub(crate) fn handle_replay_requests(
                 let _ = step_simulation_once(
                     &mut terrain_world,
                     &mut particle_world,
+                    &mut continuum_world,
+                    &mut grid_hierarchy,
                     &mut object_world,
                     &mut object_field,
                     parallel_settings.enabled,
@@ -173,6 +182,8 @@ pub(crate) fn apply_sim_reset(
     mut replay_state: ResMut<ReplayState>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
+    mut continuum_world: ResMut<ContinuumParticleWorld>,
+    mut grid_hierarchy: ResMut<GridHierarchy>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
     material_params: Res<MaterialParams>,
@@ -203,6 +214,11 @@ pub(crate) fn apply_sim_reset(
                 replay_state.baseline_solid_cell_count = count_solid_cells(&terrain_world);
                 sim_state.running = false;
                 sim_state.step_once = false;
+                continuum_world.clear();
+                reset_mpm_grid_hierarchy(
+                    &mut grid_hierarchy,
+                    particle_world.solver_params.fixed_dt,
+                );
                 replay_state.status_message = format!("Reloaded replay scenario: {}", spec.name);
                 return;
             }
@@ -212,6 +228,8 @@ pub(crate) fn apply_sim_reset(
     terrain_world.reset_fixed_world();
     terrain_world.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(*material_params));
     *particle_world = ParticleWorld::default();
+    continuum_world.clear();
+    reset_mpm_grid_hierarchy(&mut grid_hierarchy, particle_world.solver_params.fixed_dt);
     object_world.clear();
     object_field.clear();
     sim_state.running = false;

@@ -46,6 +46,10 @@ impl GridBlock {
         &self.nodes
     }
 
+    pub fn nodes_mut(&mut self) -> &mut [GridNode] {
+        &mut self.nodes
+    }
+
     pub fn clear_nodes(&mut self) {
         self.nodes.fill(GridNode::default());
         self.active_nodes.clear();
@@ -75,6 +79,12 @@ impl GridBlock {
         let local = self.world_node_to_local(world_node)?;
         let index = self.local_node_index(local)?;
         self.nodes.get_mut(index)
+    }
+
+    pub fn node_by_world(&self, world_node: IVec2) -> Option<&GridNode> {
+        let local = self.world_node_to_local(world_node)?;
+        let index = self.local_node_index(local)?;
+        self.nodes.get(index)
     }
 
     pub fn rebuild_active_nodes(&mut self, mass_threshold: f32) {

@@ -1,5 +1,6 @@
 mod fixed_update;
 pub(crate) mod granular;
+pub mod mpm_water;
 pub(crate) mod params_defaults;
 pub(crate) mod params_types;
 mod runtime;
