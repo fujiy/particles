@@ -824,3 +824,398 @@ fn fractured_granular_particles_remain_awake_during_sleep_lock() {
         );
     }
 }
+
+#[test]
+fn sub_block_promotes_to_high_rate_when_debt_exceeds_threshold() {
+    let terrain = TerrainWorld::default();
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    particles.pos.push(Vec2::new(0.0, 2.0));
+    particles.prev_pos.push(Vec2::new(0.0, 2.0));
+    particles.vel.push(Vec2::ZERO);
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+    particles.material.push(ParticleMaterial::WaterLiquid);
+    particles.resize_work_buffers();
+
+    let sub_block = world_pos_to_sub_block(
+        particles.pos[0],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    let debt_threshold = particles.solver_params.sub_block_debt_promote_threshold;
+    let slow_divisor = rate_divisor_from_level(particles.solver_params.sub_block_max_level);
+    let state = particles.sub_block_states.entry(sub_block).or_default();
+    state.rate_divisor = slow_divisor;
+    state.boundary_debt_impulse = Vec2::new(debt_threshold * 1.1, 0.0);
+
+    particles.prepare_sub_block_rate_scheduler(&terrain);
+
+    let promoted = particles
+        .sub_block_states
+        .get(&sub_block)
+        .expect("sub-block state should exist");
+    assert_eq!(promoted.rate_divisor, RATE_DIVISOR_MIN);
+}
+
+#[test]
+fn sub_block_slow_intrusion_does_not_force_high_rate() {
+    let terrain = TerrainWorld::default();
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    particles.pos.push(Vec2::new(2.10, 4.0));
+    particles.prev_pos.push(Vec2::new(1.90, 4.0));
+    particles.vel.push(Vec2::new(0.05, 0.0));
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+    particles.material.push(ParticleMaterial::WaterLiquid);
+    particles.resize_work_buffers();
+
+    let sub_block = world_pos_to_sub_block(
+        particles.pos[0],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    let level_one_divisor = rate_divisor_from_level(1);
+    let state = particles.sub_block_states.entry(sub_block).or_default();
+    state.rate_divisor = level_one_divisor;
+
+    particles.prepare_sub_block_rate_scheduler(&terrain);
+
+    let refreshed = particles
+        .sub_block_states
+        .get(&sub_block)
+        .expect("sub-block state should exist");
+    assert_eq!(refreshed.rate_divisor, level_one_divisor);
+}
+
+#[test]
+fn sub_block_fast_intrusion_forces_high_rate() {
+    let terrain = TerrainWorld::default();
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    particles.solver_params.sub_block_level0_max_norm_disp = 0.03;
+    particles.pos.push(Vec2::new(2.10, 4.0));
+    particles.prev_pos.push(Vec2::new(1.90, 4.0));
+    particles.vel.push(Vec2::new(0.90, 0.0));
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+    particles.material.push(ParticleMaterial::WaterLiquid);
+    particles.resize_work_buffers();
+
+    let sub_block = world_pos_to_sub_block(
+        particles.pos[0],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    let level_one_divisor = rate_divisor_from_level(1);
+    let state = particles.sub_block_states.entry(sub_block).or_default();
+    state.rate_divisor = level_one_divisor;
+
+    particles.prepare_sub_block_rate_scheduler(&terrain);
+
+    let refreshed = particles
+        .sub_block_states
+        .get(&sub_block)
+        .expect("sub-block state should exist");
+    assert_eq!(refreshed.rate_divisor, RATE_DIVISOR_MIN);
+}
+
+#[test]
+fn sub_block_gravity_accumulates_with_effective_step_time() {
+    let terrain = TerrainWorld::default();
+    let object_field = ObjectPhysicsField::default();
+    let mut object_world = ObjectWorld::default();
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    particles.solver_params.substeps = 1;
+    particles.solver_params.fixed_dt = 1.0 / 60.0;
+    particles.solver_params.sub_block_demote_frames = u16::MAX;
+    particles.solver_params.sub_block_promote_frames = u16::MAX;
+    particles.solver_params.sub_block_max_level = 8;
+    particles.pos.push(Vec2::new(0.0, 4.0));
+    particles.prev_pos.push(Vec2::new(0.0, 4.0));
+    particles.vel.push(Vec2::ZERO);
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::SandGranular).mass);
+    particles.material.push(ParticleMaterial::SandGranular);
+    particles.resize_work_buffers();
+
+    let sub_block = world_pos_to_sub_block(
+        particles.pos[0],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    let state = particles.sub_block_states.entry(sub_block).or_default();
+    state.rate_divisor = rate_divisor_from_level(2);
+
+    for _ in 0..4 {
+        particles.step_if_running(&terrain, &object_field, &mut object_world, true);
+    }
+
+    let total_time = 4.0 * particles.solver_params.fixed_dt;
+    let expected_vy = particles.solver_params.gravity_mps2.y * total_time;
+    assert!(
+        (particles.vel[0].y - expected_vy).abs() < 1e-4,
+        "expected vy={expected_vy}, got {}",
+        particles.vel[0].y
+    );
+}
+
+#[test]
+fn sub_block_level_reaches_configured_max_for_tiny_displacement() {
+    let terrain = TerrainWorld::default();
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    particles.solver_params.sub_block_demote_frames = 1;
+    particles.solver_params.sub_block_max_level = 6;
+    particles.pos.push(Vec2::new(0.0, 4.0));
+    particles.prev_pos.push(Vec2::new(0.0, 4.0));
+    particles.vel.push(Vec2::ZERO);
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+    particles.material.push(ParticleMaterial::WaterLiquid);
+    particles.resize_work_buffers();
+
+    let sub_block = world_pos_to_sub_block(
+        particles.pos[0],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    particles.prepare_sub_block_rate_scheduler(&terrain);
+
+    let refreshed = particles
+        .sub_block_states
+        .get(&sub_block)
+        .expect("sub-block state should exist");
+    assert_eq!(refreshed.rate_divisor, rate_divisor_from_level(6));
+}
+
+#[test]
+fn sub_block_neighbor_level_difference_is_limited_to_one() {
+    let terrain = TerrainWorld::default();
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    particles.solver_params.sub_block_demote_frames = 1;
+    particles.solver_params.sub_block_promote_frames = 1;
+    particles.solver_params.sub_block_max_level = 6;
+
+    particles.pos.push(Vec2::new(0.1, 4.0));
+    particles.prev_pos.push(Vec2::new(0.1, 4.0));
+    particles.vel.push(Vec2::new(1.0, 0.0));
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+    particles.material.push(ParticleMaterial::WaterLiquid);
+
+    particles.pos.push(Vec2::new(2.1, 4.0));
+    particles.prev_pos.push(Vec2::new(2.1, 4.0));
+    particles.vel.push(Vec2::ZERO);
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+    particles.material.push(ParticleMaterial::WaterLiquid);
+    particles.resize_work_buffers();
+
+    let left_block = world_pos_to_sub_block(
+        particles.pos[0],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    let right_block = world_pos_to_sub_block(
+        particles.pos[1],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    assert_eq!(right_block, left_block + IVec2::X);
+
+    particles.prepare_sub_block_rate_scheduler(&terrain);
+
+    let left = particles
+        .sub_block_states
+        .get(&left_block)
+        .expect("left sub-block state should exist");
+    let right = particles
+        .sub_block_states
+        .get(&right_block)
+        .expect("right sub-block state should exist");
+    let left_level = rate_level_from_divisor(left.rate_divisor, particles.solver_params.sub_block_max_level);
+    let right_level =
+        rate_level_from_divisor(right.rate_divisor, particles.solver_params.sub_block_max_level);
+    assert!((left_level as i16 - right_level as i16).abs() <= 1);
+}
+
+#[test]
+fn sub_block_crossing_particle_is_forced_to_update_this_substep() {
+    let terrain = TerrainWorld::default();
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    particles.solver_params.sub_block_max_level = 6;
+
+    particles.pos.push(Vec2::new(2.10, 4.0));
+    particles.prev_pos.push(Vec2::new(1.90, 4.0));
+    particles.vel.push(Vec2::new(0.10, 0.0));
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+    particles.material.push(ParticleMaterial::WaterLiquid);
+    particles.resize_work_buffers();
+
+    let dst_block = world_pos_to_sub_block(
+        particles.pos[0],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    let state = particles.sub_block_states.entry(dst_block).or_default();
+    state.rate_divisor = rate_divisor_from_level(1);
+
+    particles.prepare_sub_block_rate_scheduler(&terrain);
+
+    let refreshed = particles
+        .sub_block_states
+        .get(&dst_block)
+        .expect("sub-block state should exist");
+    assert!(
+        !refreshed.scheduled_this_substep,
+        "destination block should remain unscheduled on odd substep for divisor=2"
+    );
+    assert!(
+        particles.particle_sub_block_update_mask[0],
+        "crossing particle must still be updated this substep"
+    );
+}
+
+#[test]
+fn overlay_includes_granular_only_sub_block() {
+    let terrain = TerrainWorld::default();
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    particles.solver_params.sub_block_max_level = 6;
+
+    particles.pos.push(Vec2::new(0.0, 4.0));
+    particles.prev_pos.push(Vec2::new(0.0, 4.0));
+    particles.vel.push(Vec2::ZERO);
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::SandGranular).mass);
+    particles.material.push(ParticleMaterial::SandGranular);
+    particles.resize_work_buffers();
+
+    let coord = world_pos_to_sub_block(
+        particles.pos[0],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    particles.prepare_sub_block_rate_scheduler(&terrain);
+
+    let state = particles
+        .sub_block_states
+        .get(&coord)
+        .expect("granular-only block state should exist");
+    let sample = particles
+        .sub_block_overlay_samples()
+        .iter()
+        .find(|sample| sample.coord == coord)
+        .expect("granular-only block should be visible in overlay samples");
+    assert_eq!(sample.rate_divisor, state.rate_divisor);
+}
+
+#[test]
+fn granular_particle_uses_sub_block_schedule_mask() {
+    let terrain = TerrainWorld::default();
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    particles.solver_params.sub_block_max_level = 6;
+
+    particles.pos.push(Vec2::new(2.0, 4.0));
+    particles.prev_pos.push(Vec2::new(2.0, 4.0));
+    particles.vel.push(Vec2::ZERO);
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::SandGranular).mass);
+    particles.material.push(ParticleMaterial::SandGranular);
+    particles.resize_work_buffers();
+
+    let coord = world_pos_to_sub_block(
+        particles.pos[0],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    let state = particles.sub_block_states.entry(coord).or_default();
+    state.rate_divisor = rate_divisor_from_level(1);
+
+    particles.prepare_sub_block_rate_scheduler(&terrain);
+
+    let refreshed = particles
+        .sub_block_states
+        .get(&coord)
+        .expect("sub-block state should exist");
+    assert!(
+        !refreshed.scheduled_this_substep,
+        "divisor=2 should be unscheduled on first scheduler substep"
+    );
+    assert!(
+        !particles.is_particle_scheduled_in_sub_block(0),
+        "granular particle should follow sub-block schedule mask"
+    );
+}
+
+#[test]
+fn sub_block_debt_apply_updates_velocity_before_constraints() {
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    particles.pos.push(Vec2::new(0.0, 2.0));
+    particles.prev_pos.push(Vec2::new(0.0, 2.0));
+    particles.vel.push(Vec2::ZERO);
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+    particles.material.push(ParticleMaterial::WaterLiquid);
+    particles.resize_work_buffers();
+
+    let sub_block = world_pos_to_sub_block(
+        particles.pos[0],
+        particles.solver_params.sub_block_size_cells.max(1),
+    );
+    particles.particle_sub_block_coords[0] = sub_block;
+    particles.particle_sub_block_update_mask[0] = true;
+    let state = particles.sub_block_states.entry(sub_block).or_default();
+    state.scheduled_this_substep = true;
+    state.boundary_debt_impulse = Vec2::new(0.2, 0.0);
+    state.rate_divisor = rate_divisor_from_level(1);
+
+    let dt_sub = particles.solver_params.fixed_dt / particles.solver_params.substeps as f32;
+    particles.apply_sub_block_debt_before_constraints(dt_sub);
+
+    assert!(particles.vel[0].x > 0.0);
+    assert!(particles.pos[0].x > 0.0);
+    assert!(
+        particles
+            .sub_block_states
+            .get(&sub_block)
+            .expect("sub-block state should remain")
+            .boundary_debt_impulse
+            .length()
+            <= 1e-6
+    );
+}
+
+#[test]
+fn near_field_boundary_crossing_skips_far_field_boundary_buffer() {
+    let mut particles = ParticleWorld::default();
+    clear_particles(&mut particles);
+    let center_chunk = IVec2::ZERO;
+    let prev_pos = Vec2::new(CHUNK_WORLD_SIZE_M * 1.2, 0.5);
+    let now_pos = Vec2::new(CHUNK_WORLD_SIZE_M * 2.2, 0.5);
+    particles.pos.push(now_pos);
+    particles.prev_pos.push(prev_pos);
+    particles.vel.push(Vec2::new(0.5, 0.0));
+    particles
+        .mass
+        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
+    particles.material.push(ParticleMaterial::WaterLiquid);
+    particles.resize_work_buffers();
+    particles.configure_far_field_queue(Some(center_chunk), 3, 1, 0, 0.0, 0);
+    particles.active_halo_chunks = 1;
+
+    let mut object_world = ObjectWorld::default();
+    particles.capture_far_field_intrusions(&mut object_world);
+
+    assert_eq!(particles.particle_count(), 1);
+    assert!(particles.deferred_boundary_particles.is_empty());
+}

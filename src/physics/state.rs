@@ -27,7 +27,7 @@ impl Default for TerrainStreamingSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            load_radius_chunks: 3,
+            load_radius_chunks: 5,
         }
     }
 }
@@ -47,9 +47,9 @@ impl Default for PhysicsRegionSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            active_radius_chunks: 2,
+            active_radius_chunks: 4,
             active_halo_chunks: 1,
-            far_field_freeze_margin_chunks: 3,
+            far_field_freeze_margin_chunks: 4,
             far_field_release_particles_per_frame: 24,
             far_field_release_clearance_radius_m: 0.35,
             far_field_release_clearance_max_wait_frames: 30,

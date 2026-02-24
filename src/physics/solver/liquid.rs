@@ -57,6 +57,7 @@ pub(super) fn step_single_substep(
     {
         let _span = tracing::info_span!("physics::predict_positions").entered();
         for i in 0..particles.particle_count() {
+            particles.particle_execution_dt_substep[i] = 0.0;
             particles.prev_pos[i] = particles.pos[i];
             if !particles.is_active_particle(i) {
                 if particles.is_halo_particle(i) {
@@ -69,8 +70,13 @@ pub(super) fn step_single_substep(
                 particles.pos[i] += particles.vel[i] * dt_sub;
                 continue;
             }
-            particles.vel[i] += particles.solver_params.gravity_mps2 * dt_sub;
-            particles.pos[i] += particles.vel[i] * dt_sub;
+            let effective_dt = particles.particle_execution_dt_before_scheduler(i, dt_sub);
+            particles.particle_execution_dt_substep[i] = effective_dt;
+            if effective_dt <= 0.0 {
+                continue;
+            }
+            particles.vel[i] += particles.solver_params.gravity_mps2 * effective_dt;
+            particles.pos[i] += particles.vel[i] * effective_dt;
         }
     }
     breakdown.predict_positions_secs += phase_wall_start.elapsed().as_secs_f64();
@@ -88,6 +94,25 @@ pub(super) fn step_single_substep(
     breakdown.cull_escaped_particles_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
     phase_wall_start = Instant::now();
     phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
+    {
+        let _span = tracing::info_span!("physics::sub_block_rate_scheduler").entered();
+        particles.prepare_sub_block_rate_scheduler(terrain);
+    }
+    breakdown.sub_block_rate_scheduler_secs += phase_wall_start.elapsed().as_secs_f64();
+    let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+    breakdown.sub_block_rate_scheduler_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+    phase_wall_start = Instant::now();
+    phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
+
+    {
+        let _span = tracing::info_span!("physics::sub_block_debt_apply").entered();
+        particles.apply_sub_block_debt_before_constraints(dt_sub);
+    }
+    breakdown.sub_block_debt_apply_secs += phase_wall_start.elapsed().as_secs_f64();
+    let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+    breakdown.sub_block_debt_apply_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
+    phase_wall_start = Instant::now();
+    phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
 
     {
         let _span = tracing::info_span!("physics::rebuild_neighbor_grid").entered();
@@ -101,16 +126,18 @@ pub(super) fn step_single_substep(
     let mut refresh_density_neighbors = true;
     for iter in 0..particles.solver_params.solver_iters {
         let _iter_span = tracing::info_span!("physics::solve_density_constraints", iter).entered();
-        let max_density_error = particles.solve_density_constraints(
+        let solve_result = particles.solve_density_constraints(
             terrain,
             object_field,
             object_world,
             dt_sub,
             refresh_density_neighbors,
         );
+        breakdown.sub_block_debt_accumulate_secs += solve_result.debt_accumulate_wall_secs;
+        breakdown.sub_block_debt_accumulate_cpu_secs += solve_result.debt_accumulate_cpu_secs;
         refresh_density_neighbors = particles.neighbor_cache_requires_rebuild();
         if iter + 1 >= particles.solver_params.solver_min_iters
-            && max_density_error <= particles.solver_params.solver_error_tolerance
+            && solve_result.max_density_error <= particles.solver_params.solver_error_tolerance
         {
             break;
         }
@@ -155,7 +182,14 @@ pub(super) fn step_single_substep(
     {
         let _span = tracing::info_span!("physics::update_velocity").entered();
         for i in 0..particles.particle_count() {
-            particles.vel[i] = (particles.pos[i] - particles.prev_pos[i]) / dt_sub;
+            if !particles.is_active_particle(i) {
+                continue;
+            }
+            let effective_dt = particles.particle_execution_dt_substep[i];
+            if effective_dt <= 0.0 {
+                continue;
+            }
+            particles.vel[i] = (particles.pos[i] - particles.prev_pos[i]) / effective_dt;
             particles.vel[i] = particles.vel[i]
                 .clamp_length_max(particles.material_params.particle_speed_limit_mps);
         }
@@ -214,14 +248,18 @@ pub(super) fn step_single_substep(
     breakdown.final_velocity_clamp_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
     phase_wall_start = Instant::now();
     phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
-    {
-        let _span = tracing::info_span!("physics::wake_detection").entered();
-        particles.neighbor_grid.rebuild(&particles.pos);
-        particles.detect_wake_events(terrain, object_field, object_world);
-        particles.propagate_and_apply_wake_requests();
-    }
-    breakdown.wake_detection_secs += phase_wall_start.elapsed().as_secs_f64();
-    let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+    let phase_cpu_end = if particles.solver_params.enable_sleep_wake {
+        {
+            let _span = tracing::info_span!("physics::wake_detection").entered();
+            particles.neighbor_grid.rebuild(&particles.pos);
+            particles.detect_wake_events(terrain, object_field, object_world);
+            particles.propagate_and_apply_wake_requests();
+        }
+        breakdown.wake_detection_secs += phase_wall_start.elapsed().as_secs_f64();
+        process_cpu_time_seconds().unwrap_or(phase_cpu_start)
+    } else {
+        phase_cpu_start
+    };
     breakdown.wake_detection_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
     phase_wall_start = Instant::now();
     phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
@@ -235,11 +273,15 @@ pub(super) fn step_single_substep(
     breakdown.fracture_detection_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
     phase_wall_start = Instant::now();
     phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
-    {
-        let _span = tracing::info_span!("physics::sleep_update").entered();
-        particles.update_sleep_states(object_world);
-    }
-    breakdown.sleep_update_secs += phase_wall_start.elapsed().as_secs_f64();
-    let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
+    let phase_cpu_end = if particles.solver_params.enable_sleep_wake {
+        {
+            let _span = tracing::info_span!("physics::sleep_update").entered();
+            particles.update_sleep_states(object_world);
+        }
+        breakdown.sleep_update_secs += phase_wall_start.elapsed().as_secs_f64();
+        process_cpu_time_seconds().unwrap_or(phase_cpu_start)
+    } else {
+        phase_cpu_start
+    };
     breakdown.sleep_update_cpu_secs += (phase_cpu_end - phase_cpu_start).max(0.0);
 }

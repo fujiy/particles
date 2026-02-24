@@ -108,7 +108,7 @@ pub(crate) fn is_water_particle(material: ParticleMaterial) -> bool {
     matches!(material, ParticleMaterial::WaterLiquid)
 }
 
-pub(super) fn is_granular_particle(material: ParticleMaterial) -> bool {
+pub(crate) fn is_granular_particle(material: ParticleMaterial) -> bool {
     matches!(
         material,
         ParticleMaterial::StoneGranular

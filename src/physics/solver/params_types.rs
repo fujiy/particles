@@ -4,6 +4,7 @@ use bevy::prelude::{Resource, Vec2};
 pub struct SolverParams {
     pub gravity_mps2: Vec2,
     pub fixed_dt: f32,
+    // Runtime clamps to at least 1 to avoid zero substep execution.
     pub substeps: usize,
     pub solver_iters: usize,
     pub solver_min_iters: usize,
@@ -11,6 +12,7 @@ pub struct SolverParams {
     pub epsilon_lambda: f32,
     pub terrain_ghost_density_scale: f32,
     pub terrain_ghost_delta_scale: f32,
+    // Runtime clamps to at least 1 before parallel loop partitioning.
     pub parallel_particle_threshold: usize,
     pub particle_contact_push_factor: f32,
     pub detach_flood_fill_max_cells: usize,
@@ -20,6 +22,8 @@ pub struct SolverParams {
     pub wake_disp_threshold: f32,
     pub wake_radius_m: f32,
     pub active_min_frames: u16,
+    pub enable_sleep_wake: bool,
+    // Runtime clamps to at least 1 to keep granular dt finite.
     pub granular_substeps: usize,
     pub granular_iters: usize,
     pub xpbd_contact_compliance_n: f32,
@@ -46,6 +50,26 @@ pub struct SolverParams {
     pub particle_escape_margin_top_cells: i32,
     pub far_field_edge_inset_m: f32,
     pub neighbor_list_skin_m: f32,
+    // Runtime clamps to at least 1 cell.
+    pub sub_block_size_cells: i32,
+    // Runtime clamps to at least 1 frame.
+    pub sub_block_promote_frames: u16,
+    // Runtime clamps to at least 1 frame.
+    pub sub_block_demote_frames: u16,
+    pub sub_block_min_active_frames: u16,
+    // Runtime clamps to at least 0.
+    pub sub_block_promote_neighbor_radius: i32,
+    pub sub_block_debt_promote_threshold: f32,
+    pub sub_block_mass_flux_promote_threshold: f32,
+    pub sub_block_penetration_promote_threshold_m: f32,
+    // Runtime clamps to at least 1 frame.
+    pub sub_block_contact_promote_frames: u16,
+    // Runtime clamps by `RATE_LEVEL_MAX_SUPPORTED` (current divisor storage limit).
+    pub sub_block_max_level: u8,
+    // Runtime clamps to at least 1e-6 to keep intrusion threshold finite.
+    pub sub_block_level0_max_norm_disp: f32,
+    // Runtime clamps to at least 0.
+    pub sub_block_near_field_extra_chunks: i32,
 
     pub object_shape_stiffness_alpha: f32,
     pub object_shape_iters: usize,

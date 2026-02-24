@@ -183,19 +183,27 @@ pub(super) fn update_physics_area_overlay_button_label(
     overlay_state: Res<PhysicsAreaOverlayState>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     active_region: Res<PhysicsActiveRegion>,
+    particle_world: Res<ParticleWorld>,
     mut labels: Query<&mut Text, With<PhysicsAreaOverlayToggleButtonLabel>>,
 ) {
     if !overlay_state.is_changed()
         && !render_diagnostics.is_changed()
         && !active_region.is_changed()
+        && !particle_world.is_changed()
     {
         return;
     }
 
     for mut label in &mut labels {
+        let sub_block_count = particle_world.sub_block_overlay_samples().len();
+        let max_debt = particle_world
+            .sub_block_overlay_samples()
+            .iter()
+            .map(|sample| sample.debt_ratio)
+            .fold(0.0, f32::max);
         label.0 = if overlay_state.enabled {
             format!(
-                "Physics Area Overlay: ON (A:{} T:{} P:{})",
+                "Physics Area Overlay: ON (A:{} T:{} P:{} SB:{} D:{:.2})",
                 active_region.active_chunks.len(),
                 render_diagnostics
                     .terrain_updated_chunk_highlight_frames
@@ -203,6 +211,8 @@ pub(super) fn update_physics_area_overlay_button_label(
                 render_diagnostics
                     .particle_updated_chunk_highlight_frames
                     .len(),
+                sub_block_count,
+                max_debt,
             )
         } else {
             "Physics Area Overlay: OFF".to_string()
@@ -232,12 +242,14 @@ pub(super) fn update_overlay_info_text(
     physics_overlay_state: Res<PhysicsAreaOverlayState>,
     active_region: Res<PhysicsActiveRegion>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
+    particle_world: Res<ParticleWorld>,
     mut labels: Query<&mut Text, With<OverlayInfoText>>,
 ) {
     if !tile_overlay_state.is_changed()
         && !physics_overlay_state.is_changed()
         && !active_region.is_changed()
         && !render_diagnostics.is_changed()
+        && !particle_world.is_changed()
     {
         return;
     }
@@ -247,6 +259,16 @@ pub(super) fn update_overlay_info_text(
             lines.push(format!(
                 "Physics Chunks: {}",
                 active_region.active_chunks.len()
+            ));
+            let max_debt = particle_world
+                .sub_block_overlay_samples()
+                .iter()
+                .map(|sample| sample.debt_ratio)
+                .fold(0.0, f32::max);
+            lines.push(format!(
+                "Sub-blocks: {} (Debt max {:.2})",
+                particle_world.sub_block_overlay_samples().len(),
+                max_debt,
             ));
         }
         if tile_overlay_state.enabled {

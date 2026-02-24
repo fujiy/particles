@@ -8,7 +8,7 @@ use crate::physics::material::particle_properties;
 use crate::physics::world::object::{ObjectId, ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::particle::helpers::{
-    granular_contact_friction_pair_scale, is_water_particle, pack_pair_key,
+    granular_contact_friction_pair_scale, is_granular_particle, is_water_particle, pack_pair_key,
 };
 use crate::physics::world::terrain::TerrainWorld;
 
@@ -123,23 +123,34 @@ pub(crate) fn solve_contacts(
                 let _span =
                     tracing::info_span!("physics::granular_pair_contacts", substep, iter).entered();
                 for i in 0..n {
-                    if !particles.is_active_particle(i) || is_water_particle(particles.material[i])
+                    let material_i = particles.material[i];
+                    if !particles.is_active_particle(i) || is_water_particle(material_i) {
+                        continue;
+                    }
+                    if is_granular_particle(material_i)
+                        && !particles.is_particle_scheduled_in_sub_block(i)
                     {
                         continue;
                     }
 
-                    let props_i = particle_properties(particles.material[i]);
+                    let props_i = particle_properties(material_i);
                     let inv_mass_i = 1.0 / particles.mass[i].max(1e-6);
 
                     for &j in &particles.neighbor_cache[i] {
+                        let material_j = particles.material[j];
                         if j <= i
                             || !particles.is_active_particle(j)
-                            || is_water_particle(particles.material[j])
+                            || is_water_particle(material_j)
+                        {
+                            continue;
+                        }
+                        if is_granular_particle(material_j)
+                            && !particles.is_particle_scheduled_in_sub_block(j)
                         {
                             continue;
                         }
 
-                        let props_j = particle_properties(particles.material[j]);
+                        let props_j = particle_properties(material_j);
                         let r = particles.pos[i] - particles.pos[j];
                         let dist2 = r.length_squared();
                         if dist2 <= 1e-12 {
@@ -170,8 +181,8 @@ pub(crate) fn solve_contacts(
                         delta_pos[j] += corr_j_n;
 
                         if let Some(scale) = granular_contact_friction_pair_scale(
-                            particles.material[i],
-                            particles.material[j],
+                            material_i,
+                            material_j,
                         ) {
                             let mu_k =
                                 0.5 * (props_i.friction_dynamic + props_j.friction_dynamic) * scale;
@@ -287,7 +298,12 @@ pub(crate) fn solve_contacts(
                 let _span = tracing::info_span!("physics::granular_apply_positions", substep, iter)
                     .entered();
                 for i in 0..n {
-                    if !particles.is_active_particle(i) || is_water_particle(particles.material[i])
+                    let material = particles.material[i];
+                    if !particles.is_active_particle(i) || is_water_particle(material) {
+                        continue;
+                    }
+                    if is_granular_particle(material)
+                        && !particles.is_particle_scheduled_in_sub_block(i)
                     {
                         continue;
                     }
@@ -330,10 +346,14 @@ fn accumulate_terrain_object_contacts_for_particle(
     lambda_t_object: &HashMap<GranularObjectContactKey, f32>,
     scratch: &mut GranularContactThreadScratch,
 ) {
-    if !particles.is_active_particle(i) || is_water_particle(particles.material[i]) {
+    let material_i = particles.material[i];
+    if !particles.is_active_particle(i) || is_water_particle(material_i) {
         return;
     }
-    let props_i = particle_properties(particles.material[i]);
+    if is_granular_particle(material_i) && !particles.is_particle_scheduled_in_sub_block(i) {
+        return;
+    }
+    let props_i = particle_properties(material_i);
     let inv_mass_i = 1.0 / particles.mass[i].max(1e-6);
 
     if let Some((signed_distance, normal)) =
@@ -442,17 +462,25 @@ pub(crate) fn apply_restitution(particles: &mut ParticleWorld, _dt_sub: f32) {
     let mut neighbors = Vec::new();
     let _span = tracing::info_span!("physics::granular_restitution_pairs").entered();
     for i in 0..particles.particle_count() {
-        if !particles.is_active_particle(i) || is_water_particle(particles.material[i]) {
+        let material_i = particles.material[i];
+        if !particles.is_active_particle(i) || is_water_particle(material_i) {
+            continue;
+        }
+        if is_granular_particle(material_i) && !particles.is_particle_scheduled_in_sub_block(i) {
             continue;
         }
         particles
             .neighbor_grid
             .gather(particles.pos[i], &mut neighbors);
         for &j in &neighbors {
+            let material_j = particles.material[j];
             if j <= i
                 || !particles.is_active_particle(j)
-                || is_water_particle(particles.material[j])
+                || is_water_particle(material_j)
             {
+                continue;
+            }
+            if is_granular_particle(material_j) && !particles.is_particle_scheduled_in_sub_block(j) {
                 continue;
             }
             let r = particles.pos[i] - particles.pos[j];
@@ -460,8 +488,8 @@ pub(crate) fn apply_restitution(particles: &mut ParticleWorld, _dt_sub: f32) {
             if dist2 <= 1e-12 {
                 continue;
             }
-            let props_i = particle_properties(particles.material[i]);
-            let props_j = particle_properties(particles.material[j]);
+            let props_i = particle_properties(material_i);
+            let props_j = particle_properties(material_j);
             let contact_radius = props_i.radius_m + props_j.radius_m;
             if dist2 >= contact_radius * contact_radius {
                 continue;

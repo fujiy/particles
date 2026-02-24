@@ -2,17 +2,25 @@ use bevy::log::tracing;
 use bevy::prelude::*;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::time::Instant;
 
 use crate::physics::connectivity::{FOUR_NEIGHBOR_OFFSETS, flood_fill_4_limited};
 use crate::physics::material::{
-    DEFAULT_MATERIAL_PARAMS, MaterialParams, particle_properties, particles_per_cell,
+    DEFAULT_MATERIAL_PARAMS, MaterialParams, particle_properties, particle_spacing_m,
+    particles_per_cell,
     solid_break_properties, terrain_fracture_particle, terrain_solid_particle,
     water_kernel_radius_m,
 };
+use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::solver::params_types::SolverParams;
 use crate::physics::world::neighbor_grid::NeighborGrid;
 use crate::physics::world::object::{
     OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectId, ObjectPhysicsField, ObjectWorld,
+};
+use crate::physics::world::sub_block::{
+    RATE_DIVISOR_MIN, SubBlockOverlaySample, SubBlockState, clamp_rate_level,
+    normalize_rate_class_with_max, rate_divisor_from_level, rate_level_from_divisor,
+    sub_block_to_chunk, world_pos_to_sub_block,
 };
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, cell_to_world_center, world_to_cell,
@@ -56,6 +64,7 @@ const PARTICLE_ESCAPE_MARGIN_TOP_CELLS: i32 =
     DEFAULT_SOLVER_PARAMS.particle_escape_margin_top_cells;
 const FAR_FIELD_EDGE_INSET_M: f32 = DEFAULT_SOLVER_PARAMS.far_field_edge_inset_m;
 const NEIGHBOR_LIST_SKIN_M: f32 = DEFAULT_SOLVER_PARAMS.neighbor_list_skin_m;
+const SUB_BLOCK_NEIGHBOR_LEVEL_MAX_DELTA: u8 = 1;
 
 pub use crate::physics::material::ParticleMaterial;
 
@@ -80,12 +89,18 @@ pub struct ParticleStepBreakdown {
     pub clear_reaction_impulses_cpu_secs: f64,
     pub predict_positions_secs: f64,
     pub predict_positions_cpu_secs: f64,
+    pub sub_block_rate_scheduler_secs: f64,
+    pub sub_block_rate_scheduler_cpu_secs: f64,
     pub cull_escaped_particles_secs: f64,
     pub cull_escaped_particles_cpu_secs: f64,
+    pub sub_block_debt_apply_secs: f64,
+    pub sub_block_debt_apply_cpu_secs: f64,
     pub rebuild_neighbor_grid_secs: f64,
     pub rebuild_neighbor_grid_cpu_secs: f64,
     pub solve_density_constraints_secs: f64,
     pub solve_density_constraints_cpu_secs: f64,
+    pub sub_block_debt_accumulate_secs: f64,
+    pub sub_block_debt_accumulate_cpu_secs: f64,
     pub granular_solver_secs: f64,
     pub granular_solver_cpu_secs: f64,
     pub shape_matching_secs: f64,
@@ -127,7 +142,7 @@ impl ParticleStepBreakdown {
             .sum::<f64>()
     }
 
-    pub fn phases(&self) -> [ParticleStepPhaseTiming; 17] {
+    pub fn phases(&self) -> [ParticleStepPhaseTiming; 20] {
         [
             ParticleStepPhaseTiming {
                 name: "clear_reaction_impulses",
@@ -140,9 +155,19 @@ impl ParticleStepBreakdown {
                 cpu_duration_secs: self.predict_positions_cpu_secs,
             },
             ParticleStepPhaseTiming {
+                name: "sub_block_rate_scheduler",
+                wall_duration_secs: self.sub_block_rate_scheduler_secs,
+                cpu_duration_secs: self.sub_block_rate_scheduler_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
                 name: "cull_escaped_particles",
                 wall_duration_secs: self.cull_escaped_particles_secs,
                 cpu_duration_secs: self.cull_escaped_particles_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "sub_block_debt_apply",
+                wall_duration_secs: self.sub_block_debt_apply_secs,
+                cpu_duration_secs: self.sub_block_debt_apply_cpu_secs,
             },
             ParticleStepPhaseTiming {
                 name: "rebuild_neighbor_grid",
@@ -153,6 +178,11 @@ impl ParticleStepBreakdown {
                 name: "solve_density_constraints",
                 wall_duration_secs: self.solve_density_constraints_secs,
                 cpu_duration_secs: self.solve_density_constraints_cpu_secs,
+            },
+            ParticleStepPhaseTiming {
+                name: "sub_block_debt_accumulate",
+                wall_duration_secs: self.sub_block_debt_accumulate_secs,
+                cpu_duration_secs: self.sub_block_debt_accumulate_cpu_secs,
             },
             ParticleStepPhaseTiming {
                 name: "granular_solver",
@@ -305,6 +335,23 @@ struct BoundaryReleaseLock {
     wait_frames: u16,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DensitySolveResult {
+    pub max_density_error: f32,
+    pub debt_accumulate_wall_secs: f64,
+    pub debt_accumulate_cpu_secs: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SubBlockMetrics {
+    water_particles: usize,
+    max_norm_disp: f32,
+    mass_flux: f32,
+    intrusion: bool,
+    max_penetration_m: f32,
+    had_contact: bool,
+}
+
 #[derive(Resource, Debug)]
 pub struct ParticleWorld {
     pub pos: Vec<Vec2>,
@@ -347,6 +394,17 @@ pub struct ParticleWorld {
     deferred_inactive_chunk_particles: HashMap<IVec2, VecDeque<DeferredParticleState>>,
     deferred_boundary_particles: HashMap<DeferredEdgeKey, VecDeque<DeferredParticleState>>,
     deferred_boundary_release_locks: HashMap<DeferredEdgeKey, BoundaryReleaseLock>,
+    sub_block_states: HashMap<IVec2, SubBlockState>,
+    particle_sub_block_coords: Vec<IVec2>,
+    particle_sub_block_update_mask: Vec<bool>,
+    particle_execution_dt_substep: Vec<f32>,
+    sub_block_substep_index: u64,
+    sub_block_dirty_frame: u64,
+    sub_block_dirty_set: HashSet<IVec2>,
+    sub_block_dirty_sub_blocks: Vec<IVec2>,
+    sub_block_dirty_chunks: Vec<IVec2>,
+    sub_block_overlay_samples: Vec<SubBlockOverlaySample>,
+    sub_block_multirate_active: bool,
     pub(crate) parallel_enabled: bool,
     pub(crate) solver_params: SolverParams,
     pub(crate) material_params: MaterialParams,
@@ -397,6 +455,17 @@ impl Default for ParticleWorld {
             deferred_inactive_chunk_particles: HashMap::new(),
             deferred_boundary_particles: HashMap::new(),
             deferred_boundary_release_locks: HashMap::new(),
+            sub_block_states: HashMap::new(),
+            particle_sub_block_coords: Vec::new(),
+            particle_sub_block_update_mask: Vec::new(),
+            particle_execution_dt_substep: Vec::new(),
+            sub_block_substep_index: 0,
+            sub_block_dirty_frame: 0,
+            sub_block_dirty_set: HashSet::new(),
+            sub_block_dirty_sub_blocks: Vec::new(),
+            sub_block_dirty_chunks: Vec::new(),
+            sub_block_overlay_samples: Vec::new(),
+            sub_block_multirate_active: false,
             parallel_enabled: true,
             solver_params: SolverParams::default(),
             material_params: MaterialParams::default(),
@@ -429,6 +498,7 @@ impl ParticleWorld {
         self.active_hold_frames.fill(0);
         self.sleep_lock_frames.fill(0);
         self.pending_wake.fill(false);
+        self.reset_sub_block_runtime();
         self.resize_work_buffers();
     }
 
@@ -499,6 +569,70 @@ impl ParticleWorld {
         &self.activity_state
     }
 
+    pub fn sub_block_overlay_samples(&self) -> &[SubBlockOverlaySample] {
+        &self.sub_block_overlay_samples
+    }
+
+    pub fn sub_block_size_cells(&self) -> i32 {
+        self.solver_params.sub_block_size_cells.max(1)
+    }
+
+    pub fn sub_block_max_level(&self) -> u8 {
+        // `sub_block_max_level` is clamped by representable divisor width (u16).
+        clamp_rate_level(self.solver_params.sub_block_max_level, u8::MAX)
+    }
+
+    pub(crate) fn is_particle_scheduled_in_sub_block(&self, index: usize) -> bool {
+        self.particle_sub_block_update_mask
+            .get(index)
+            .copied()
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn is_particle_scheduled_for_solver(&self, index: usize) -> bool {
+        if index >= self.particle_count() {
+            return false;
+        }
+        if !is_multirate_particle(self.material[index]) {
+            return true;
+        }
+        self.is_particle_scheduled_in_sub_block(index)
+    }
+
+    pub(crate) fn particle_execution_dt_before_scheduler(&self, index: usize, dt_sub: f32) -> f32 {
+        if index >= self.particle_count() || dt_sub <= 0.0 {
+            return 0.0;
+        }
+        if !is_multirate_particle(self.material[index]) {
+            return dt_sub;
+        }
+        let coord = world_pos_to_sub_block(self.pos[index], self.sub_block_size_cells());
+        let Some(state) = self.sub_block_states.get(&coord) else {
+            return dt_sub;
+        };
+        let divisor = normalize_rate_class_with_max(state.rate_divisor, self.sub_block_max_level());
+        if divisor <= RATE_DIVISOR_MIN {
+            return dt_sub;
+        }
+        let predicted_substep_index = self.sub_block_substep_index.wrapping_add(1);
+        if predicted_substep_index % divisor as u64 != 0 {
+            return 0.0;
+        }
+        dt_sub * divisor as f32
+    }
+
+    pub fn sub_block_dirty_frame(&self) -> u64 {
+        self.sub_block_dirty_frame
+    }
+
+    pub fn sub_block_dirty_chunks(&self) -> &[IVec2] {
+        &self.sub_block_dirty_chunks
+    }
+
+    pub fn sub_block_dirty_sub_blocks(&self) -> &[IVec2] {
+        &self.sub_block_dirty_sub_blocks
+    }
+
     pub fn for_each_deferred_particle<F>(&self, mut f: F)
     where
         F: FnMut(IVec2, Vec2, ParticleMaterial),
@@ -560,6 +694,7 @@ impl ParticleWorld {
         self.active_hold_frames.fill(0);
         self.sleep_lock_frames.fill(0);
         self.pending_wake.fill(false);
+        self.reset_sub_block_runtime();
         self.resize_work_buffers();
         Ok(())
     }
@@ -790,6 +925,7 @@ impl ParticleWorld {
         let mut new_active_hold_frames = Vec::with_capacity(new_count);
         let mut new_sleep_lock_frames = Vec::with_capacity(new_count);
         let mut new_pending_wake = Vec::with_capacity(new_count);
+        let mut new_particle_execution_dt_substep = Vec::with_capacity(new_count);
         for old_index in 0..old_count {
             if !keep[old_index] {
                 continue;
@@ -804,6 +940,7 @@ impl ParticleWorld {
             new_active_hold_frames.push(self.active_hold_frames[old_index]);
             new_sleep_lock_frames.push(self.sleep_lock_frames[old_index]);
             new_pending_wake.push(self.pending_wake[old_index]);
+            new_particle_execution_dt_substep.push(self.particle_execution_dt_substep[old_index]);
         }
 
         self.pos = new_pos;
@@ -948,7 +1085,282 @@ impl ParticleWorld {
         object_field: &ObjectPhysicsField,
         object_world: &mut ObjectWorld,
     ) -> ParticleStepBreakdown {
+        self.begin_sub_block_fixed_step();
         liquid_solver::step_substeps(self, terrain, object_field, object_world)
+    }
+
+    pub(crate) fn prepare_sub_block_rate_scheduler(&mut self, terrain: &TerrainWorld) {
+        self.sub_block_substep_index = self.sub_block_substep_index.wrapping_add(1);
+        let count = self.particle_count();
+        self.particle_sub_block_coords.resize(count, IVec2::ZERO);
+        self.particle_sub_block_update_mask.resize(count, true);
+        self.sub_block_dirty_set.clear();
+        if count == 0 {
+            self.sub_block_multirate_active = false;
+            self.sub_block_states.clear();
+            self.sub_block_overlay_samples.clear();
+            self.sub_block_dirty_sub_blocks.clear();
+            self.sub_block_dirty_chunks.clear();
+            return;
+        }
+
+        let sub_block_size_cells = self.solver_params.sub_block_size_cells.max(1);
+        let mut metrics = HashMap::<IVec2, SubBlockMetrics>::new();
+        let mut particle_crossed_sub_block = vec![false; count];
+        for state in self.sub_block_states.values_mut() {
+            state.latest_intrusion = false;
+            state.latest_mass_flux = 0.0;
+            state.latest_penetration_m = 0.0;
+            state.scheduled_this_substep = false;
+        }
+
+        let max_level = self.sub_block_max_level();
+        let dt_sub = self.solver_params.fixed_dt / self.solver_params.substeps.max(1) as f32;
+        let particle_spacing = particle_spacing_m(self.material_params).max(1e-5);
+        let level0_norm_disp = self.solver_params.sub_block_level0_max_norm_disp.max(1e-6);
+        let intrusion_speed_threshold = level0_norm_disp * particle_spacing / dt_sub.max(1e-6);
+        for i in 0..count {
+            let coord = world_pos_to_sub_block(self.pos[i], sub_block_size_cells);
+            self.particle_sub_block_coords[i] = coord;
+            self.particle_sub_block_update_mask[i] = true;
+            if !self.is_active_or_halo_particle(i) || !is_multirate_particle(self.material[i]) {
+                continue;
+            }
+            let metric = metrics.entry(coord).or_default();
+            metric.water_particles = metric.water_particles.saturating_add(1);
+            let speed = self.vel[i].length();
+            let norm_disp = speed * dt_sub / particle_spacing;
+            metric.max_norm_disp = metric.max_norm_disp.max(norm_disp);
+            let prev_coord = world_pos_to_sub_block(self.prev_pos[i], sub_block_size_cells);
+            if prev_coord != coord {
+                particle_crossed_sub_block[i] = true;
+                metric.mass_flux += self.mass[i];
+                if self
+                    .sub_block_states
+                    .get(&coord)
+                    .map(|state| {
+                        normalize_rate_class_with_max(state.rate_divisor, max_level)
+                            > RATE_DIVISOR_MIN
+                    })
+                    .unwrap_or(false)
+                    && speed >= intrusion_speed_threshold
+                {
+                    metric.intrusion = true;
+                }
+            }
+            if let Some((signed_distance, _normal)) =
+                terrain.sample_signed_distance_and_normal(self.pos[i])
+            {
+                let penetration = particle_properties(self.material[i]).terrain_push_radius_m
+                    - signed_distance;
+                if penetration > 0.0 {
+                    metric.max_penetration_m = metric.max_penetration_m.max(penetration);
+                    metric.had_contact = true;
+                }
+            }
+        }
+
+        let promote_frames = self.solver_params.sub_block_promote_frames.max(1);
+        let demote_frames = self.solver_params.sub_block_demote_frames.max(1);
+        let min_active_frames = self.solver_params.sub_block_min_active_frames;
+        let mass_flux_promote_threshold = self
+            .solver_params
+            .sub_block_mass_flux_promote_threshold
+            .max(0.0);
+        let penetration_promote_threshold = self
+            .solver_params
+            .sub_block_penetration_promote_threshold_m
+            .max(0.0);
+        let contact_promote_frames = self.solver_params.sub_block_contact_promote_frames.max(1);
+        let debt_promote_threshold = self
+            .solver_params
+            .sub_block_debt_promote_threshold
+            .max(1e-6);
+        let mut all_coords = HashSet::<IVec2>::new();
+        all_coords.extend(metrics.keys().copied());
+        all_coords.extend(self.sub_block_states.keys().copied());
+
+        let mut promote_seeds = Vec::<IVec2>::new();
+        for coord in all_coords {
+            let metric = metrics.get(&coord).copied().unwrap_or_default();
+            let target_rate = self.sub_block_target_rate(&metric, max_level);
+            let state = self.sub_block_states.entry(coord).or_default();
+            state.rate_divisor = normalize_rate_class_with_max(state.rate_divisor, max_level);
+            state.latest_mass_flux = metric.mass_flux;
+            state.latest_penetration_m = metric.max_penetration_m;
+            state.latest_intrusion = metric.intrusion;
+            if metric.had_contact {
+                state.counters.contact_frames = state.counters.contact_frames.saturating_add(1);
+            } else {
+                state.counters.contact_frames = state.counters.contact_frames.saturating_sub(1);
+            }
+            let debt_magnitude = state.boundary_debt_impulse.length();
+            let sustained_contact_promote = state.counters.contact_frames >= contact_promote_frames
+                && metric.max_penetration_m >= penetration_promote_threshold * 0.6;
+            let force_promote = debt_magnitude >= debt_promote_threshold
+                || metric.intrusion
+                || metric.mass_flux >= mass_flux_promote_threshold
+                || metric.max_penetration_m >= penetration_promote_threshold
+                || sustained_contact_promote;
+            let prev_rate = state.rate_divisor;
+            if force_promote {
+                state.rate_divisor = RATE_DIVISOR_MIN;
+                state.counters.active_hold_frames = state.counters.active_hold_frames.max(min_active_frames);
+                state.counters.promote_counter = 0;
+                state.counters.demote_counter = 0;
+                promote_seeds.push(coord);
+                self.sub_block_dirty_set.insert(coord);
+            } else if state.counters.active_hold_frames > 0 {
+                state.counters.active_hold_frames -= 1;
+                state.rate_divisor = RATE_DIVISOR_MIN;
+                state.counters.promote_counter = 0;
+                state.counters.demote_counter = 0;
+            } else if target_rate < prev_rate {
+                state.counters.promote_counter = state.counters.promote_counter.saturating_add(1);
+                state.counters.demote_counter = 0;
+                if state.counters.promote_counter >= promote_frames {
+                    state.rate_divisor = target_rate;
+                    state.counters.promote_counter = 0;
+                    if target_rate == RATE_DIVISOR_MIN {
+                        promote_seeds.push(coord);
+                    }
+                    self.sub_block_dirty_set.insert(coord);
+                }
+            } else if target_rate > prev_rate {
+                state.counters.demote_counter = state.counters.demote_counter.saturating_add(1);
+                state.counters.promote_counter = 0;
+                if state.counters.demote_counter >= demote_frames {
+                    state.rate_divisor = target_rate;
+                    state.counters.demote_counter = 0;
+                    self.sub_block_dirty_set.insert(coord);
+                }
+            } else {
+                state.counters.promote_counter = 0;
+                state.counters.demote_counter = 0;
+            }
+            if metric.water_particles == 0
+                && state.boundary_debt_impulse.length_squared() <= 1e-10
+                && state.counters.active_hold_frames == 0
+            {
+                state.counters.idle_frames = state.counters.idle_frames.saturating_add(1);
+            } else {
+                state.counters.idle_frames = 0;
+            }
+        }
+        self.propagate_sub_block_promotions(&promote_seeds);
+        self.enforce_sub_block_neighbor_level_delta(max_level, SUB_BLOCK_NEIGHBOR_LEVEL_MAX_DELTA);
+
+        self.sub_block_states.retain(|coord, state| {
+            if metrics.contains_key(coord) {
+                return true;
+            }
+            if state.boundary_debt_impulse.length_squared() > 1e-10
+                || state.counters.active_hold_frames > 0
+                || state.counters.contact_frames > 0
+            {
+                return true;
+            }
+            state.counters.idle_frames = state.counters.idle_frames.saturating_add(1);
+            state.counters.idle_frames <= 90
+        });
+
+        self.sub_block_multirate_active = false;
+        for (&coord, state) in &mut self.sub_block_states {
+            state.rate_divisor = normalize_rate_class_with_max(state.rate_divisor, max_level);
+            state.scheduled_this_substep =
+                self.sub_block_substep_index % state.rate_divisor as u64 == 0;
+            if state.rate_divisor > RATE_DIVISOR_MIN
+                || state.boundary_debt_impulse.length_squared() > 1e-10
+            {
+                self.sub_block_multirate_active = true;
+            }
+            if state.scheduled_this_substep {
+                self.sub_block_dirty_set.insert(coord);
+            }
+        }
+        for i in 0..count {
+            if !self.is_active_or_halo_particle(i) || !is_multirate_particle(self.material[i]) {
+                self.particle_sub_block_update_mask[i] = true;
+                continue;
+            }
+            let coord = self.particle_sub_block_coords[i];
+            let scheduled_this_substep = self
+                .sub_block_states
+                .get(&coord)
+                .map(|state| state.scheduled_this_substep)
+                .unwrap_or(true);
+            self.particle_sub_block_update_mask[i] =
+                scheduled_this_substep || particle_crossed_sub_block[i];
+        }
+        self.refresh_sub_block_debug_views();
+    }
+
+    pub(crate) fn apply_sub_block_debt_before_constraints(&mut self, dt_sub: f32) {
+        if self.sub_block_states.is_empty() {
+            return;
+        }
+        let mut particles_by_block = HashMap::<IVec2, (f32, Vec<usize>)>::new();
+        for i in 0..self.particle_count() {
+            if !is_water_particle(self.material[i]) || !self.is_active_or_halo_particle(i) {
+                continue;
+            }
+            if !self
+                .particle_sub_block_update_mask
+                .get(i)
+                .copied()
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            let coord = self
+                .particle_sub_block_coords
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| {
+                    world_pos_to_sub_block(self.pos[i], self.solver_params.sub_block_size_cells)
+                });
+            let entry = particles_by_block.entry(coord).or_insert((0.0, Vec::new()));
+            entry.0 += self.mass[i];
+            entry.1.push(i);
+        }
+
+        let speed_limit = self.material_params.particle_speed_limit_mps;
+        let max_debt_apply_dv = self
+            .solver_params
+            .object_reaction_max_dv_per_substep_mps
+            .max(0.05);
+        let min_active_frames = self.solver_params.sub_block_min_active_frames;
+        let mut promote_seeds = Vec::new();
+        for (&coord, state) in &mut self.sub_block_states {
+            if !state.scheduled_this_substep {
+                continue;
+            }
+            if state.boundary_debt_impulse.length_squared() <= 1e-10 {
+                continue;
+            }
+            let Some((mass_sum, indices)) = particles_by_block.get(&coord) else {
+                state.boundary_debt_impulse = Vec2::ZERO;
+                state.boundary_debt_peak = 0.0;
+                self.sub_block_dirty_set.insert(coord);
+                continue;
+            };
+            if *mass_sum <= 1e-6 {
+                continue;
+            }
+            let dv = (state.boundary_debt_impulse / *mass_sum).clamp_length_max(max_debt_apply_dv);
+            for &index in indices {
+                self.vel[index] = (self.vel[index] + dv).clamp_length_max(speed_limit);
+                self.pos[index] += dv * dt_sub;
+            }
+            state.boundary_debt_impulse = Vec2::ZERO;
+            state.boundary_debt_peak = 0.0;
+            state.rate_divisor = RATE_DIVISOR_MIN;
+            state.counters.active_hold_frames = state.counters.active_hold_frames.max(min_active_frames);
+            promote_seeds.push(coord);
+            self.sub_block_dirty_set.insert(coord);
+        }
+        self.propagate_sub_block_promotions(&promote_seeds);
+        self.refresh_sub_block_debug_views();
     }
 
     fn solve_density_constraints(
@@ -958,12 +1370,14 @@ impl ParticleWorld {
         object_world: &mut ObjectWorld,
         dt_sub: f32,
         refresh_neighbors: bool,
-    ) -> f32 {
+    ) -> DensitySolveResult {
         let _span = tracing::info_span!("physics::density_constraint_pass").entered();
         let h_ww = WATER_KERNEL_RADIUS_M;
         let inv_dt = 1.0 / dt_sub.max(1e-6);
         let parallel_threshold = self.solver_params.parallel_particle_threshold.max(1);
-        let use_parallel = self.parallel_enabled && self.particle_count() >= parallel_threshold;
+        let use_parallel = self.parallel_enabled
+            && self.particle_count() >= parallel_threshold
+            && !self.sub_block_multirate_active;
 
         if refresh_neighbors {
             let _span = tracing::info_span!("physics::rebuild_neighbor_cache").entered();
@@ -980,6 +1394,8 @@ impl ParticleWorld {
             }
         };
 
+        let debt_wall_start = Instant::now();
+        let debt_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
         let reaction_impulses = {
             let _span = tracing::info_span!("physics::compute_delta").entered();
             if use_parallel {
@@ -988,6 +1404,7 @@ impl ParticleWorld {
                 self.compute_delta_sequential(terrain, object_field, object_world, inv_dt, h_ww)
             }
         };
+        let debt_cpu_end = process_cpu_time_seconds().unwrap_or(debt_cpu_start);
         for (object_id, impulse) in reaction_impulses {
             object_world.accumulate_reaction_impulse(object_id, impulse);
         }
@@ -998,7 +1415,11 @@ impl ParticleWorld {
                 self.pos[i] += self.delta_pos[i];
             }
         }
-        max_density_error
+        DensitySolveResult {
+            max_density_error,
+            debt_accumulate_wall_secs: debt_wall_start.elapsed().as_secs_f64(),
+            debt_accumulate_cpu_secs: (debt_cpu_end - debt_cpu_start).max(0.0),
+        }
     }
 
     pub(crate) fn rebuild_neighbor_cache(&mut self, use_parallel: bool) {
@@ -1046,7 +1467,13 @@ impl ParticleWorld {
     fn solve_density_lambda_sequential(&mut self, terrain: &TerrainWorld, h_ww: f32) -> f32 {
         let mut max_density_error = 0.0f32;
         for i in 0..self.particle_count() {
-            if !self.is_active_or_halo_particle(i) || !is_water_particle(self.material[i]) {
+            let is_water = is_water_particle(self.material[i]);
+            let scheduled = self
+                .particle_sub_block_update_mask
+                .get(i)
+                .copied()
+                .unwrap_or(true);
+            if !self.is_active_or_halo_particle(i) || !is_water || !scheduled {
                 self.density[i] = REST_DENSITY;
                 self.lambda[i] = 0.0;
                 continue;
@@ -1103,6 +1530,7 @@ impl ParticleWorld {
         let materials = &self.material;
         let activity_state = &self.activity_state;
         let neighbor_cache = &self.neighbor_cache;
+        let sub_block_update_mask = &self.particle_sub_block_update_mask;
         let active_chunk_min = self.active_chunk_min;
         let active_chunk_max = self.active_chunk_max;
         let active_halo_chunks = self.active_halo_chunks;
@@ -1119,6 +1547,7 @@ impl ParticleWorld {
                     active_chunk_max,
                     active_halo_chunks,
                 ) || !is_water_particle(materials[i])
+                    || !sub_block_update_mask.get(i).copied().unwrap_or(true)
                 {
                     *density_i = REST_DENSITY;
                     *lambda_i = 0.0;
@@ -1186,17 +1615,27 @@ impl ParticleWorld {
             let material = self.material[i];
             let props = particle_properties(material);
             let is_water = is_water_particle(material);
+            let is_scheduled = self
+                .particle_sub_block_update_mask
+                .get(i)
+                .copied()
+                .unwrap_or(true);
             if !is_water {
                 self.delta_pos[i] = Vec2::ZERO;
                 continue;
             }
-            let neighbors = &self.neighbor_cache[i];
+            if !is_scheduled {
+                self.delta_pos[i] = Vec2::ZERO;
+                continue;
+            }
+            let neighbors = self.neighbor_cache[i].clone();
 
             let mut delta = Vec2::ZERO;
             let mut boundary_push = Vec2::ZERO;
             let mut particle_contact_push = Vec2::ZERO;
             if is_water {
-                for &j in neighbors {
+                let mut debt_ops = Vec::<(usize, Vec2)>::new();
+                for &j in &neighbors {
                     if i == j || !is_water_particle(self.material[j]) {
                         continue;
                     }
@@ -1204,7 +1643,23 @@ impl ParticleWorld {
                     if r.length_squared() >= h_ww * h_ww {
                         continue;
                     }
-                    delta += (self.lambda[i] + self.lambda[j]) * kernel_spiky_grad(r, h_ww);
+                    let pair_delta = (self.lambda[i] + self.lambda[j]) * kernel_spiky_grad(r, h_ww);
+                    delta += pair_delta;
+                    let neighbor_scheduled = self
+                        .particle_sub_block_update_mask
+                        .get(j)
+                        .copied()
+                        .unwrap_or(true);
+                    if !neighbor_scheduled {
+                        debt_ops.push((j, -pair_delta));
+                    }
+                }
+                for (target, reaction_delta) in debt_ops {
+                    self.accumulate_sub_block_boundary_debt_for_particle(
+                        target,
+                        reaction_delta,
+                        inv_dt,
+                    );
                 }
                 if let Some(ghost_r) = terrain_ghost_neighbor_vector(self.pos[i], terrain, h_ww) {
                     delta += self.lambda[i]
@@ -1212,7 +1667,7 @@ impl ParticleWorld {
                         * TERRAIN_GHOST_DELTA_SCALE;
                 }
             }
-            for &j in neighbors {
+            for &j in &neighbors {
                 if i == j {
                     continue;
                 }
@@ -1551,6 +2006,9 @@ impl ParticleWorld {
             if !props.apply_contact_velocity_response {
                 continue;
             }
+            if !self.is_particle_scheduled_for_solver(i) {
+                continue;
+            }
 
             let mut normal_sum = Vec2::ZERO;
             let mut contact_count = 0usize;
@@ -1625,6 +2083,7 @@ impl ParticleWorld {
             let materials = &self.material;
             let activity = &self.activity_state;
             let neighbor_grid = &self.neighbor_grid;
+            let sub_block_update_mask = &self.particle_sub_block_update_mask;
             let active_chunk_min = self.active_chunk_min;
             let active_chunk_max = self.active_chunk_max;
             self.viscosity_work
@@ -1640,7 +2099,10 @@ impl ParticleWorld {
                         active_chunk_min,
                         active_chunk_max,
                     );
-                    if !active || !is_water_particle(materials[i]) {
+                    if !active
+                        || !is_water_particle(materials[i])
+                        || !sub_block_update_mask.get(i).copied().unwrap_or(true)
+                    {
                         *out = velocities[i];
                         return;
                     }
@@ -1649,7 +2111,10 @@ impl ParticleWorld {
 
                     let mut correction = Vec2::ZERO;
                     for &j in &neighbors {
-                        if i == j || !is_water_particle(materials[j]) {
+                        if i == j
+                            || !is_water_particle(materials[j])
+                            || !sub_block_update_mask.get(j).copied().unwrap_or(true)
+                        {
                             continue;
                         }
                         let r = positions[i] - positions[j];
@@ -1662,7 +2127,10 @@ impl ParticleWorld {
         } else {
             let mut neighbors = Vec::new();
             for i in 0..count {
-                if !self.is_active_particle(i) || !is_water_particle(self.material[i]) {
+                if !self.is_active_particle(i)
+                    || !is_water_particle(self.material[i])
+                    || !self.is_particle_scheduled_for_solver(i)
+                {
                     self.viscosity_work[i] = self.vel[i];
                     continue;
                 }
@@ -1670,7 +2138,10 @@ impl ParticleWorld {
 
                 let mut correction = Vec2::ZERO;
                 for &j in &neighbors {
-                    if i == j || !is_water_particle(self.material[j]) {
+                    if i == j
+                        || !is_water_particle(self.material[j])
+                        || !self.is_particle_scheduled_for_solver(j)
+                    {
                         continue;
                     }
                     let r = self.pos[i] - self.pos[j];
@@ -1708,7 +2179,10 @@ impl ParticleWorld {
 
     fn project_solids_out_of_terrain(&mut self, terrain: &TerrainWorld) {
         for i in 0..self.particle_count() {
-            if !self.is_active_particle(i) || is_water_particle(self.material[i]) {
+            if !self.is_active_particle(i)
+                || is_water_particle(self.material[i])
+                || !self.is_particle_scheduled_for_solver(i)
+            {
                 continue;
             }
             let props = particle_properties(self.material[i]);
@@ -2353,6 +2827,21 @@ impl ParticleWorld {
             let outside_freeze = is_chunk_outside_radius(chunk, center_chunk, freeze_radius);
 
             if crossed_active_boundary && !outside_freeze {
+                if self.should_skip_far_field_boundary_buffer(chunk) {
+                    self.request_wake(i);
+                    let sub_block = world_pos_to_sub_block(
+                        self.pos[i],
+                        self.solver_params.sub_block_size_cells.max(1),
+                    );
+                    let state = self.sub_block_states.entry(sub_block).or_default();
+                    state.rate_divisor = RATE_DIVISOR_MIN;
+                    state.counters.active_hold_frames = state
+                        .counters
+                        .active_hold_frames
+                        .max(self.solver_params.sub_block_min_active_frames);
+                    self.sub_block_dirty_set.insert(sub_block);
+                    continue;
+                }
                 let (edge, boundary_position, grid_segment) = edge_sample_for_active_boundary(
                     chunk,
                     self.pos[i],
@@ -2641,6 +3130,7 @@ impl ParticleWorld {
         let mut new_active_hold_frames = Vec::with_capacity(new_count);
         let mut new_sleep_lock_frames = Vec::with_capacity(new_count);
         let mut new_pending_wake = Vec::with_capacity(new_count);
+        let mut new_particle_execution_dt_substep = Vec::with_capacity(new_count);
         for old_index in 0..old_count {
             if !keep[old_index] {
                 continue;
@@ -2655,6 +3145,7 @@ impl ParticleWorld {
             new_active_hold_frames.push(self.active_hold_frames[old_index]);
             new_sleep_lock_frames.push(self.sleep_lock_frames[old_index]);
             new_pending_wake.push(self.pending_wake[old_index]);
+            new_particle_execution_dt_substep.push(self.particle_execution_dt_substep[old_index]);
         }
 
         self.pos = new_pos;
@@ -2667,8 +3158,215 @@ impl ParticleWorld {
         self.active_hold_frames = new_active_hold_frames;
         self.sleep_lock_frames = new_sleep_lock_frames;
         self.pending_wake = new_pending_wake;
+        self.particle_execution_dt_substep = new_particle_execution_dt_substep;
         object_world.apply_particle_remap(&old_to_new, self.masses());
         self.resize_work_buffers();
+    }
+
+    fn begin_sub_block_fixed_step(&mut self) {
+        self.sub_block_dirty_frame = self.sub_block_dirty_frame.wrapping_add(1);
+        self.sub_block_dirty_set.clear();
+        self.sub_block_dirty_sub_blocks.clear();
+        self.sub_block_dirty_chunks.clear();
+    }
+
+    fn reset_sub_block_runtime(&mut self) {
+        self.sub_block_states.clear();
+        self.sub_block_substep_index = 0;
+        self.sub_block_dirty_frame = self.sub_block_dirty_frame.wrapping_add(1);
+        self.sub_block_dirty_set.clear();
+        self.sub_block_dirty_sub_blocks.clear();
+        self.sub_block_dirty_chunks.clear();
+        self.sub_block_overlay_samples.clear();
+        self.sub_block_multirate_active = false;
+    }
+
+    fn sub_block_target_rate(&self, metric: &SubBlockMetrics, max_level: u8) -> u16 {
+        let clamped_max_level = clamp_rate_level(max_level, u8::MAX);
+        if metric.water_particles == 0 {
+            return rate_divisor_from_level(clamped_max_level);
+        }
+        let threshold = self.solver_params.sub_block_level0_max_norm_disp.max(1e-6);
+        let norm_disp = metric.max_norm_disp.max(1e-6);
+        let ratio = threshold / norm_disp;
+        let target_level = ratio.log2().floor().max(0.0) as u8;
+        rate_divisor_from_level(target_level.min(clamped_max_level))
+    }
+
+    fn propagate_sub_block_promotions(&mut self, promote_seeds: &[IVec2]) {
+        if promote_seeds.is_empty() {
+            return;
+        }
+        let radius = self.solver_params.sub_block_promote_neighbor_radius.max(0);
+        let min_active_frames = self.solver_params.sub_block_min_active_frames;
+        for &seed in promote_seeds {
+            for dy in -radius..=radius {
+                for dx in -radius..=radius {
+                    let coord = seed + IVec2::new(dx, dy);
+                    let state = self.sub_block_states.entry(coord).or_default();
+                    if state.rate_divisor != RATE_DIVISOR_MIN {
+                        state.rate_divisor = RATE_DIVISOR_MIN;
+                        self.sub_block_dirty_set.insert(coord);
+                    }
+                    state.counters.active_hold_frames = state
+                        .counters
+                        .active_hold_frames
+                        .max(min_active_frames);
+                }
+            }
+        }
+    }
+
+    fn enforce_sub_block_neighbor_level_delta(&mut self, max_level: u8, max_delta: u8) {
+        if self.sub_block_states.is_empty() || max_delta == 0 {
+            return;
+        }
+        let clamped_max_level = clamp_rate_level(max_level, u8::MAX);
+        let keys: Vec<_> = self.sub_block_states.keys().copied().collect();
+        if keys.is_empty() {
+            return;
+        }
+        let offsets = [IVec2::X, IVec2::NEG_X, IVec2::Y, IVec2::NEG_Y];
+        let mut changed = true;
+        let mut iteration = 0u8;
+        while changed && iteration <= clamped_max_level.saturating_add(1) {
+            changed = false;
+            let mut updates = HashMap::<IVec2, u8>::new();
+            for &coord in &keys {
+                let Some(state) = self.sub_block_states.get(&coord) else {
+                    continue;
+                };
+                let level = rate_level_from_divisor(state.rate_divisor, clamped_max_level);
+                let max_neighbor_level = level.saturating_add(max_delta).min(clamped_max_level);
+                for offset in offsets {
+                    let neighbor_coord = coord + offset;
+                    let Some(neighbor) = self.sub_block_states.get(&neighbor_coord) else {
+                        continue;
+                    };
+                    let neighbor_level =
+                        rate_level_from_divisor(neighbor.rate_divisor, clamped_max_level);
+                    if neighbor_level <= max_neighbor_level {
+                        continue;
+                    }
+                    updates
+                        .entry(neighbor_coord)
+                        .and_modify(|entry| *entry = (*entry).min(max_neighbor_level))
+                        .or_insert(max_neighbor_level);
+                }
+            }
+            for (coord, level) in updates {
+                let target_divisor = rate_divisor_from_level(level);
+                if let Some(state) = self.sub_block_states.get_mut(&coord) {
+                    if state.rate_divisor == target_divisor {
+                        continue;
+                    }
+                    state.rate_divisor = target_divisor;
+                    self.sub_block_dirty_set.insert(coord);
+                    changed = true;
+                }
+            }
+            iteration = iteration.saturating_add(1);
+        }
+    }
+
+    fn refresh_sub_block_debug_views(&mut self) {
+        let sub_block_size_cells = self.solver_params.sub_block_size_cells.max(1);
+        let mut dirty_sub_blocks: Vec<_> = self.sub_block_dirty_set.iter().copied().collect();
+        dirty_sub_blocks.sort_by_key(|coord| (coord.y, coord.x));
+        self.sub_block_dirty_sub_blocks = dirty_sub_blocks;
+
+        let mut dirty_chunks = HashSet::<IVec2>::new();
+        for &coord in &self.sub_block_dirty_sub_blocks {
+            dirty_chunks.insert(sub_block_to_chunk(coord, sub_block_size_cells));
+        }
+        let mut sorted_dirty_chunks: Vec<_> = dirty_chunks.into_iter().collect();
+        sorted_dirty_chunks.sort_by_key(|coord| (coord.y, coord.x));
+        self.sub_block_dirty_chunks = sorted_dirty_chunks;
+
+        let debt_threshold = self
+            .solver_params
+            .sub_block_debt_promote_threshold
+            .max(1e-6);
+        let max_level = self.sub_block_max_level();
+        let default_divisor = rate_divisor_from_level(max_level);
+        let mut overlay_coords = HashSet::<IVec2>::new();
+        overlay_coords.extend(self.sub_block_states.keys().copied());
+        for i in 0..self.particle_count() {
+            if !self.is_active_or_halo_particle(i) {
+                continue;
+            }
+            let coord = self
+                .particle_sub_block_coords
+                .get(i)
+                .copied()
+                .unwrap_or_else(|| world_pos_to_sub_block(self.pos[i], sub_block_size_cells));
+            overlay_coords.insert(coord);
+        }
+        let mut overlay_samples: Vec<_> = overlay_coords
+            .into_iter()
+            .map(|coord| {
+                let (rate_divisor, debt_ratio) =
+                    if let Some(state) = self.sub_block_states.get(&coord) {
+                        (
+                            normalize_rate_class_with_max(state.rate_divisor, max_level),
+                            (state.boundary_debt_impulse.length() / debt_threshold).clamp(0.0, 1.0),
+                        )
+                    } else {
+                        (default_divisor, 0.0)
+                    };
+                SubBlockOverlaySample {
+                    coord,
+                    rate_divisor,
+                    debt_ratio,
+                }
+            })
+            .collect();
+        overlay_samples.sort_by_key(|sample| (sample.coord.y, sample.coord.x));
+        self.sub_block_overlay_samples = overlay_samples;
+    }
+
+    fn accumulate_sub_block_boundary_debt_for_particle(
+        &mut self,
+        target_index: usize,
+        reaction_delta: Vec2,
+        inv_dt: f32,
+    ) {
+        if target_index >= self.particle_count() {
+            return;
+        }
+        let coord = self
+            .particle_sub_block_coords
+            .get(target_index)
+            .copied()
+            .unwrap_or_else(|| {
+                world_pos_to_sub_block(self.pos[target_index], self.solver_params.sub_block_size_cells)
+            });
+        let impulse = reaction_delta * self.mass[target_index] * inv_dt;
+        let debt_promote_threshold = self
+            .solver_params
+            .sub_block_debt_promote_threshold
+            .max(1e-6);
+        let min_active_frames = self.solver_params.sub_block_min_active_frames;
+        let state = self.sub_block_states.entry(coord).or_default();
+        state.boundary_debt_impulse += impulse;
+        state.boundary_debt_peak = state
+            .boundary_debt_peak
+            .max(state.boundary_debt_impulse.length());
+        if state.boundary_debt_impulse.length() >= debt_promote_threshold {
+            state.rate_divisor = RATE_DIVISOR_MIN;
+            state.counters.active_hold_frames = state.counters.active_hold_frames.max(min_active_frames);
+        }
+        self.sub_block_dirty_set.insert(coord);
+    }
+
+    fn should_skip_far_field_boundary_buffer(&self, chunk: IVec2) -> bool {
+        let Some(center_chunk) = self.far_field_center_chunk else {
+            return false;
+        };
+        let near_radius = self.far_field_release_radius_chunks.max(0)
+            + self.active_halo_chunks.max(0)
+            + self.solver_params.sub_block_near_field_extra_chunks.max(0);
+        !is_chunk_outside_radius(chunk, center_chunk, near_radius)
     }
 
     fn resize_work_buffers(&mut self) {
@@ -2690,6 +3388,9 @@ impl ParticleWorld {
         self.neighbor_cache_anchor_pos.resize(count, Vec2::ZERO);
         self.neighbor_cache_anchor_valid = false;
         self.viscosity_work.resize(count, Vec2::ZERO);
+        self.particle_sub_block_coords.resize(count, IVec2::ZERO);
+        self.particle_sub_block_update_mask.resize(count, true);
+        self.particle_execution_dt_substep.resize(count, 0.0);
     }
 
     fn terrain_fracture_seed_velocity(&self, fracture_cell: IVec2) -> Vec2 {
@@ -2977,6 +3678,10 @@ fn is_active_or_halo_particle_for_region(
         && chunk.x <= expanded_max.x
         && chunk.y >= expanded_min.y
         && chunk.y <= expanded_max.y
+}
+
+fn is_multirate_particle(material: ParticleMaterial) -> bool {
+    is_water_particle(material) || is_granular_particle(material)
 }
 
 #[derive(Debug, Default)]

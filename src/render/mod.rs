@@ -86,6 +86,8 @@ pub struct TerrainTileRenderState {
 pub struct TerrainRenderDiagnostics {
     pub terrain_updated_chunk_highlight_frames: HashMap<IVec2, u8>,
     pub particle_updated_chunk_highlight_frames: HashMap<IVec2, u8>,
+    pub particle_updated_sub_block_highlight_frames: HashMap<IVec2, u8>,
+    pub last_particle_dirty_frame: u64,
     pub visible_tiles: Vec<RenderVisibleTile>,
 }
 

@@ -83,6 +83,7 @@ pub(super) fn sync_required_render_tiles(
 
 pub(super) fn mark_dirty_render_tiles_from_world(
     mut terrain_world: ResMut<TerrainWorld>,
+    particles: Res<ParticleWorld>,
     mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     tile_state: Res<TerrainTileRenderState>,
     mut tile_query: Query<(&RenderTile, &mut RenderTileFlags)>,
@@ -105,22 +106,47 @@ pub(super) fn mark_dirty_render_tiles_from_world(
             }
             *frames_left > 0
         });
+    render_diagnostics
+        .particle_updated_sub_block_highlight_frames
+        .retain(|_, frames_left| {
+            if *frames_left > 0 {
+                *frames_left -= 1;
+            }
+            *frames_left > 0
+        });
 
     let dirty_chunks = terrain_world.take_dirty_chunks();
-    if dirty_chunks.is_empty() {
-        return;
-    }
-
     for &chunk in &dirty_chunks {
         render_diagnostics
             .terrain_updated_chunk_highlight_frames
             .insert(chunk, UPDATED_CHUNK_HIGHLIGHT_FRAMES);
     }
 
+    let mut particle_dirty_chunks = Vec::<IVec2>::new();
+    let particles_changed = particles.is_changed();
+    if render_diagnostics.last_particle_dirty_frame != particles.sub_block_dirty_frame() {
+        render_diagnostics.last_particle_dirty_frame = particles.sub_block_dirty_frame();
+        for &sub_block in particles.sub_block_dirty_sub_blocks() {
+            render_diagnostics
+                .particle_updated_sub_block_highlight_frames
+                .insert(sub_block, UPDATED_CHUNK_HIGHLIGHT_FRAMES);
+        }
+        for &chunk in particles.sub_block_dirty_chunks() {
+            render_diagnostics
+                .particle_updated_chunk_highlight_frames
+                .insert(chunk, UPDATED_CHUNK_HIGHLIGHT_FRAMES);
+            particle_dirty_chunks.push(chunk);
+        }
+    }
+
+    if dirty_chunks.is_empty() && particle_dirty_chunks.is_empty() {
+        return;
+    }
     if tile_state.target_tiles.is_empty() {
         return;
     }
-    let dirty_tiles: HashSet<_> = tile_state
+
+    let terrain_dirty_tiles: HashSet<_> = tile_state
         .target_tiles
         .iter()
         .copied()
@@ -130,20 +156,38 @@ pub(super) fn mark_dirty_render_tiles_from_world(
                 .any(|&chunk| tile_contains_chunk(*key, chunk))
         })
         .collect();
+    let particle_dirty_tiles: HashSet<_> = if !particle_dirty_chunks.is_empty() {
+        tile_state
+            .target_tiles
+            .iter()
+            .copied()
+            .filter(|key| {
+                particle_dirty_chunks
+                    .iter()
+                    .any(|&chunk| tile_contains_chunk(*key, chunk))
+            })
+            .collect()
+    } else if particles_changed {
+        tile_state.target_tiles.iter().copied().collect()
+    } else {
+        HashSet::new()
+    };
 
-    if dirty_tiles.is_empty() {
+    if terrain_dirty_tiles.is_empty() && particle_dirty_tiles.is_empty() {
         return;
     }
 
     for (tile, mut flags) in &mut tile_query {
-        if dirty_tiles.contains(&tile.key) {
+        if terrain_dirty_tiles.contains(&tile.key) {
             flags.terrain_dirty = true;
+        }
+        if particle_dirty_tiles.contains(&tile.key) {
+            flags.needs_upload = true;
         }
     }
 }
 
 pub(super) fn refresh_render_tile_particle_state(
-    particles: Res<ParticleWorld>,
     particle_chunk_cache: Res<ParticleRenderChunkCache>,
     tile_state: Res<TerrainTileRenderState>,
     mut tile_query: Query<(&RenderTile, &RenderTileFlags, &mut RenderTileParticleState)>,
@@ -154,7 +198,6 @@ pub(super) fn refresh_render_tile_particle_state(
         return;
     }
 
-    let particles_changed = particles.is_changed();
     for (tile, flags, mut particle_state) in &mut tile_query {
         if !tile_state.target_tiles.contains(&tile.key) {
             continue;
@@ -162,11 +205,7 @@ pub(super) fn refresh_render_tile_particle_state(
 
         particle_state.changed_this_frame = false;
 
-        let should_resample = particles_changed
-            || flags.needs_upload
-            || flags.terrain_dirty
-            || particle_state.has_particles
-            || particle_state.had_particles_last_compose;
+        let should_resample = flags.needs_upload || flags.terrain_dirty;
         if !should_resample {
             continue;
         }
@@ -183,8 +222,7 @@ pub(super) fn refresh_render_tile_particle_state(
         particle_state.indices = live_indices;
         particle_state.deferred = deferred;
         particle_state.has_particles = has_particles_now;
-        particle_state.changed_this_frame =
-            particles_changed && (has_particles_now || particle_state.had_particles_last_compose);
+        particle_state.changed_this_frame = true;
     }
 }
 
