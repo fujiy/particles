@@ -9,9 +9,7 @@ use crate::physics::material::{
 };
 use crate::physics::state::SimUpdateSet;
 use crate::physics::world::object::{ObjectData, ObjectId, ObjectWorld};
-use crate::physics::world::particle::{
-    ParticleMaterial, ParticleWorld, nominal_particle_draw_radius_m,
-};
+use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainCell, TerrainWorld,
     world_to_cell,
@@ -100,6 +98,7 @@ pub struct WaterRenderState {
     density: Vec<f32>,
     blur_tmp: Vec<f32>,
     blurred_density: Vec<f32>,
+    rendered_chunks_last_frame: HashSet<IVec2>,
     had_any_water: bool,
 }
 

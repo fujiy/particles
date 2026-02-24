@@ -311,6 +311,14 @@ fn p2g(particles: &ContinuumParticleWorld, block: &mut GridBlock, params: &MpmWa
         let v_p = particles.v[i];
         let c_p = particles.c[i];
         let m_p = particles.m[i].max(0.0);
+        let nearest_node = IVec2::new(
+            (x_p.x * inv_h).round() as i32,
+            (x_p.y * inv_h).round() as i32,
+        );
+        if let Some(node) = block.node_mut_by_world(nearest_node) {
+            node.render_mass_sum += m_p;
+            node.render_mass_pos_sum += m_p * x_p;
+        }
         let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h);
         for sample in stencil.samples() {
             let node_world = sample.node.as_vec2() * h;

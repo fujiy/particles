@@ -5,6 +5,8 @@ pub struct GridNode {
     pub m: f32,
     pub p: Vec2,
     pub v: Vec2,
+    pub render_mass_sum: f32,
+    pub render_mass_pos_sum: Vec2,
 }
 
 #[derive(Clone, Debug)]

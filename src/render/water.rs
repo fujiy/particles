@@ -1,21 +1,25 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 
 use super::*;
+use crate::physics::material::particle_properties;
+use crate::physics::world::grid::{GridBlock, GridHierarchy};
+use crate::physics::world::particle::ParticleMaterial;
 
 pub fn sync_water_dots_to_render(
     mut commands: Commands,
-    particles: Res<ParticleWorld>,
     terrain: Res<TerrainWorld>,
+    grid_hierarchy: Res<GridHierarchy>,
     particle_chunk_cache: Res<ParticleRenderChunkCache>,
     mut water_state: ResMut<WaterRenderState>,
     mut render_diagnostics: ResMut<TerrainRenderDiagnostics>,
     mut images: ResMut<Assets<Image>>,
 ) {
     let _span = tracing::info_span!("render::sync_water_dots_to_render").entered();
-    let loaded_chunks = terrain.loaded_chunk_coords();
     let has_any_water = !particle_chunk_cache.water_by_chunk.is_empty();
+    let target_render_chunks = collect_water_target_render_chunks(&terrain, &particle_chunk_cache);
+    let target_changed = target_render_chunks != water_state.rendered_chunks_last_frame;
     {
         let _span = tracing::info_span!("render::water_chunk_sprite_maintenance").entered();
         let stale_chunks: Vec<_> = water_state
@@ -32,7 +36,7 @@ pub fn sync_water_dots_to_render(
         }
 
         let mut created_chunks = false;
-        for &chunk_coord in &loaded_chunks {
+        for &chunk_coord in &target_render_chunks {
             if water_state.chunk_sprites.contains_key(&chunk_coord) {
                 continue;
             }
@@ -59,27 +63,38 @@ pub fn sync_water_dots_to_render(
             if water_state.had_any_water {
                 let _span = tracing::info_span!("render::water_clear_when_empty").entered();
                 let blank = vec![0_u8; (CHUNK_PIXEL_SIZE * CHUNK_PIXEL_SIZE * 4) as usize];
-                for entry in water_state.chunk_sprites.values() {
-                    if let Some(image) = images.get_mut(&entry.image) {
-                        image.data = Some(blank.clone());
+                for chunk in &water_state.rendered_chunks_last_frame {
+                    if let Some(entry) = water_state.chunk_sprites.get(chunk) {
+                        if let Some(image) = images.get_mut(&entry.image) {
+                            image.data = Some(blank.clone());
+                        }
                     }
                 }
                 water_state.had_any_water = false;
             }
+            water_state.rendered_chunks_last_frame.clear();
             return;
         }
 
-        if !(created_chunks || particle_chunk_cache.is_changed() || terrain.is_changed()) {
+        if !(created_chunks
+            || grid_hierarchy.is_changed()
+            || particle_chunk_cache.is_changed()
+            || terrain.is_changed()
+            || target_changed)
+        {
             return;
         }
     }
     water_state.had_any_water = true;
+    let rendered_chunks_prev = water_state.rendered_chunks_last_frame.clone();
 
-    let draw_radius = nominal_particle_draw_radius_m();
-    let draw_radius_px = (draw_radius * WATER_DOT_SCALE).ceil() as i32;
-    let dot_threshold = REST_DENSITY * WATER_DOT_THRESHOLD_REST_DENSITY_RATIO;
+    let Some(block) = grid_hierarchy.blocks().first() else {
+        return;
+    };
+    let dot_threshold = REST_DENSITY * WATER_GRID_DENSITY_THRESHOLD_REST_DENSITY_RATIO;
     let chunk_width = CHUNK_PIXEL_SIZE;
     let chunk_height = CHUNK_PIXEL_SIZE;
+    let splash_points_by_chunk = collect_splash_points_by_chunk(block);
 
     water_state
         .density
@@ -94,46 +109,20 @@ pub fn sync_water_dots_to_render(
     let mut updated_chunks = HashSet::new();
     {
         let _span = tracing::info_span!("render::water_rasterize_chunks").entered();
-        for &chunk_coord in &loaded_chunks {
-            let mut candidate_indices = Vec::new();
-            for y in (chunk_coord.y - 1)..=(chunk_coord.y + 1) {
-                for x in (chunk_coord.x - 1)..=(chunk_coord.x + 1) {
-                    if let Some(indices) =
-                        particle_chunk_cache.water_by_chunk.get(&IVec2::new(x, y))
-                    {
-                        candidate_indices.extend(indices.iter().copied());
-                    }
-                }
-            }
-
+        let mut render_chunks: Vec<_> = target_render_chunks.iter().copied().collect();
+        render_chunks.sort_by_key(|chunk| (chunk.y, chunk.x));
+        for chunk_coord in render_chunks {
             water_state.density.fill(0.0);
             let mut pixels = vec![0_u8; (chunk_width * chunk_height * 4) as usize];
 
-            for particle_index in candidate_indices {
-                let pos = particles.positions()[particle_index];
-                updated_chunks.insert(chunk_coord_from_world(pos));
-                let particle_mass = particles.masses()[particle_index];
-                let px_center = world_to_chunk_pixel(pos, chunk_coord);
-                for py in (px_center.y - draw_radius_px)..=(px_center.y + draw_radius_px) {
-                    if py < 0 || py >= chunk_height as i32 {
+            for py in 0..chunk_height as i32 {
+                for px in 0..chunk_width as i32 {
+                    let sample_world = chunk_pixel_to_world(IVec2::new(px, py), chunk_coord);
+                    if is_solid_terrain_at_world(&terrain, sample_world) {
                         continue;
                     }
-                    for px in (px_center.x - draw_radius_px)..=(px_center.x + draw_radius_px) {
-                        if px < 0 || px >= chunk_width as i32 {
-                            continue;
-                        }
-                        let sample_world = chunk_pixel_to_world(IVec2::new(px, py), chunk_coord);
-                        if is_solid_terrain_at_world(&terrain, sample_world) {
-                            continue;
-                        }
-                        let r2 = (sample_world - pos).length_squared();
-                        let w = kernel_poly6_for_render(r2, draw_radius);
-                        if w == 0.0 {
-                            continue;
-                        }
-                        let idx = chunk_density_index(px, py, chunk_width, chunk_height);
-                        water_state.density[idx] += particle_mass * w;
-                    }
+                    let idx = chunk_density_index(px, py, chunk_width, chunk_height);
+                    water_state.density[idx] = sample_grid_density_at_world(block, sample_world);
                 }
             }
 
@@ -177,28 +166,56 @@ pub fn sync_water_dots_to_render(
                     pixels[offset..offset + 4].copy_from_slice(&color);
                 }
             }
+            if let Some(points) = splash_points_by_chunk.get(&chunk_coord) {
+                draw_splash_points_for_chunk(
+                    &terrain,
+                    chunk_coord,
+                    &mut pixels,
+                    points,
+                    dot_threshold,
+                );
+            }
 
             if let Some(entry) = water_state.chunk_sprites.get(&chunk_coord) {
                 if let Some(image) = images.get_mut(&entry.image) {
                     image.data = Some(pixels);
                 }
             }
+            updated_chunks.insert(chunk_coord);
         }
     }
+
+    let blank = vec![0_u8; (CHUNK_PIXEL_SIZE * CHUNK_PIXEL_SIZE * 4) as usize];
+    for chunk in rendered_chunks_prev.difference(&target_render_chunks) {
+        if let Some(entry) = water_state.chunk_sprites.get(chunk) {
+            if let Some(image) = images.get_mut(&entry.image) {
+                image.data = Some(blank.clone());
+            }
+        }
+    }
+    water_state.rendered_chunks_last_frame = target_render_chunks;
 
     for chunk in updated_chunks {
         mark_particle_chunk_updated(&mut render_diagnostics, chunk);
     }
 }
 
-fn kernel_poly6_for_render(r2: f32, support_radius: f32) -> f32 {
-    let h2 = support_radius * support_radius;
-    if !(0.0..h2).contains(&r2) {
-        return 0.0;
+fn collect_water_target_render_chunks(
+    terrain: &TerrainWorld,
+    particle_chunk_cache: &ParticleRenderChunkCache,
+) -> HashSet<IVec2> {
+    let mut target = HashSet::new();
+    for &chunk in particle_chunk_cache.water_by_chunk.keys() {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let candidate = chunk + IVec2::new(dx, dy);
+                if terrain.chunk(candidate).is_some() {
+                    target.insert(candidate);
+                }
+            }
+        }
     }
-    let x = h2 - r2;
-    let coeff = 4.0 / (std::f32::consts::PI * h2.powi(4));
-    coeff * x.powi(3)
+    target
 }
 
 fn blur_density_gaussian_separable(
@@ -272,4 +289,137 @@ fn water_palette_color(x: i32, y: i32, density: f32, dot_threshold: f32) -> [u8;
     let base = deterministic_palette_index(x, y);
     let boost = if density > dot_threshold * 1.6 { 1 } else { 0 };
     palette[(base + boost).min(3)]
+}
+
+fn sample_grid_density_at_world(block: &GridBlock, world_pos: Vec2) -> f32 {
+    let inv_h = 1.0 / block.h_b.max(1e-6);
+    let node_f = world_pos * inv_h;
+    let x0 = node_f.x.floor() as i32;
+    let y0 = node_f.y.floor() as i32;
+    let tx = node_f.x - x0 as f32;
+    let ty = node_f.y - y0 as f32;
+
+    let m00 = sample_grid_node_mass(block, IVec2::new(x0, y0));
+    let m10 = sample_grid_node_mass(block, IVec2::new(x0 + 1, y0));
+    let m01 = sample_grid_node_mass(block, IVec2::new(x0, y0 + 1));
+    let m11 = sample_grid_node_mass(block, IVec2::new(x0 + 1, y0 + 1));
+
+    let mx0 = m00 + (m10 - m00) * tx;
+    let mx1 = m01 + (m11 - m01) * tx;
+    let m = mx0 + (mx1 - mx0) * ty;
+    m.max(0.0) / (block.h_b * block.h_b).max(1e-6)
+}
+
+fn sample_grid_node_mass(block: &GridBlock, world_node: IVec2) -> f32 {
+    block.node_by_world(world_node).map(|node| node.m).unwrap_or(0.0)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RenderSplashPoint {
+    world_pos: Vec2,
+    equivalent_particle_count: f32,
+}
+
+fn collect_splash_points_by_chunk(block: &GridBlock) -> HashMap<IVec2, Vec<RenderSplashPoint>> {
+    let mut points_by_chunk = HashMap::<IVec2, Vec<RenderSplashPoint>>::new();
+    let water_particle_mass = particle_properties(ParticleMaterial::WaterLiquid)
+        .mass
+        .max(1e-6);
+    let width = block.node_dims.x as usize;
+    let height = block.node_dims.y as usize;
+    for y in 0..height {
+        for x in 0..width {
+            let idx = y * width + x;
+            let node = block.nodes()[idx];
+            let render_mass = node.render_mass_sum;
+            if render_mass <= 1e-6 {
+                continue;
+            }
+            let equivalent_particle_count = render_mass / water_particle_mass;
+            if equivalent_particle_count > WATER_SPLASH_MAX_EQUIV_PARTICLE_COUNT {
+                continue;
+            }
+
+            let world_node = block.origin_node + IVec2::new(x as i32, y as i32);
+            let default_pos = world_node.as_vec2() * block.h_b;
+            let world_pos = if node.render_mass_pos_sum.is_finite() && render_mass > 1e-6 {
+                node.render_mass_pos_sum / render_mass
+            } else {
+                default_pos
+            };
+            if !world_pos.is_finite() {
+                continue;
+            }
+            let chunk = chunk_coord_from_world(world_pos);
+            points_by_chunk.entry(chunk).or_default().push(RenderSplashPoint {
+                world_pos,
+                equivalent_particle_count,
+            });
+        }
+    }
+    points_by_chunk
+}
+
+fn draw_splash_points_for_chunk(
+    terrain: &TerrainWorld,
+    chunk_coord: IVec2,
+    pixels: &mut [u8],
+    points: &[RenderSplashPoint],
+    dot_threshold: f32,
+) {
+    for point in points {
+        let radius = if point.equivalent_particle_count <= WATER_SPLASH_SINGLE_EQUIV_PARTICLE_COUNT
+        {
+            WATER_ISOLATED_SPLASH_RADIUS_DOTS
+        } else {
+            ((WATER_ISOLATED_SPLASH_RADIUS_DOTS as f32) * point.equivalent_particle_count.sqrt())
+                .ceil()
+                .max(WATER_ISOLATED_SPLASH_RADIUS_DOTS as f32) as i32
+        };
+        draw_splash_point(
+            terrain,
+            chunk_coord,
+            point.world_pos,
+            pixels,
+            radius,
+            dot_threshold,
+        );
+    }
+}
+
+fn draw_splash_point(
+    terrain: &TerrainWorld,
+    chunk_coord: IVec2,
+    world_pos: Vec2,
+    pixels: &mut [u8],
+    radius_px: i32,
+    dot_threshold: f32,
+) {
+    if radius_px <= 0 {
+        return;
+    }
+    let center_px = world_to_chunk_pixel(world_pos, chunk_coord);
+    let radius_sq = radius_px * radius_px;
+    for py in (center_px.y - radius_px)..=(center_px.y + radius_px) {
+        if py < 0 || py >= CHUNK_PIXEL_SIZE as i32 {
+            continue;
+        }
+        for px in (center_px.x - radius_px)..=(center_px.x + radius_px) {
+            if px < 0 || px >= CHUNK_PIXEL_SIZE as i32 {
+                continue;
+            }
+            let d = IVec2::new(px - center_px.x, py - center_px.y);
+            if d.length_squared() > radius_sq {
+                continue;
+            }
+            let sample_world = chunk_pixel_to_world(IVec2::new(px, py), chunk_coord);
+            if is_solid_terrain_at_world(terrain, sample_world) {
+                continue;
+            }
+            let mut splash_color = water_palette_color(px, py, dot_threshold * 2.0, dot_threshold);
+            splash_color[3] = ((splash_color[3] as f32) * 0.92).round().clamp(0.0, 255.0) as u8;
+            let idx = chunk_density_index(px, py, CHUNK_PIXEL_SIZE, CHUNK_PIXEL_SIZE) * 4;
+            blend_rgba8_over(&mut pixels[idx..idx + 4], splash_color);
+        }
+    }
 }
