@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 
+use super::terrain_boundary::{TerrainBoundarySample, TerrainBoundarySampler};
 use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::{GridBlock, GridHierarchy};
 use crate::physics::world::kernel::evaluate_quadratic_bspline_stencil_2d;
@@ -51,6 +52,25 @@ pub struct MpmWaterStepMetrics {
     pub max_particle_speed_mps: f32,
     pub max_cfl_ratio: f32,
     pub clamped_particle_count: usize,
+    pub boundary_penetrating_node_ratio: f32,
+    pub boundary_penetrating_particle_ratio: f32,
+    pub boundary_momentum_exchange: Vec2,
+    pub boundary_query_wall_secs: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MpmTerrainBoundaryParams {
+    pub penetration_slop_m: f32,
+    pub tangential_damping: f32,
+}
+
+impl Default for MpmTerrainBoundaryParams {
+    fn default() -> Self {
+        Self {
+            penetration_slop_m: 0.0,
+            tangential_damping: 0.05,
+        }
+    }
 }
 
 pub fn sound_speed_mps(params: &MpmWaterParams) -> f32 {
@@ -170,6 +190,25 @@ pub fn step_single_rate(
     grid: &mut GridHierarchy,
     params: &MpmWaterParams,
 ) -> MpmWaterStepMetrics {
+    step_single_rate_coupled(
+        particles,
+        grid,
+        None,
+        None,
+        params,
+        &MpmTerrainBoundaryParams::default(),
+    )
+}
+
+pub fn step_single_rate_coupled(
+    particles: &mut ContinuumParticleWorld,
+    grid: &mut GridHierarchy,
+    terrain: Option<&TerrainWorld>,
+    terrain_sampler: Option<&mut TerrainBoundarySampler>,
+    params: &MpmWaterParams,
+    terrain_boundary_params: &MpmTerrainBoundaryParams,
+) -> MpmWaterStepMetrics {
+    let mut terrain_sampler = terrain_sampler;
     let mut metrics = MpmWaterStepMetrics {
         particle_mass_sum: particles.m.iter().copied().sum(),
         ..Default::default()
@@ -183,13 +222,80 @@ pub fn step_single_rate(
     }
 
     p2g(particles, block, params);
-    grid_update(block, params);
+    let boundary_samples =
+        if let (Some(terrain), Some(sampler)) = (terrain, terrain_sampler.as_deref_mut()) {
+        let before = sampler.step_stats();
+        let samples = sampler.sample_block_nodes(block, terrain);
+        let after = sampler.step_stats();
+        metrics.boundary_query_wall_secs += (after.query_wall_secs - before.query_wall_secs).max(0.0);
+        Some(samples)
+    } else {
+        None
+    };
+    grid_update(
+        block,
+        params,
+        boundary_samples.as_deref(),
+        terrain_boundary_params,
+        &mut metrics,
+    );
     g2p(particles, block, params, &mut metrics);
 
     metrics.grid_mass_sum = block.nodes().iter().map(|n| n.m).sum();
     metrics.max_cfl_ratio = cfl_ratio(params, block.h_b, metrics.max_particle_speed_mps);
     block.rebuild_active_nodes(params.active_mass_threshold.max(0.0));
+    if block.node_count() > 0 {
+        metrics.boundary_penetrating_node_ratio /= block.node_count() as f32;
+    }
+    if let Some(samples) = boundary_samples.as_deref() {
+        metrics.boundary_penetrating_particle_ratio = estimate_penetrating_particle_ratio(
+            particles,
+            block,
+            samples,
+            terrain_boundary_params.penetration_slop_m,
+        );
+    }
     metrics
+}
+
+fn estimate_penetrating_particle_ratio(
+    particles: &ContinuumParticleWorld,
+    block: &GridBlock,
+    boundary_samples: &[TerrainBoundarySample],
+    penetration_slop_m: f32,
+) -> f32 {
+    if particles.is_empty() || boundary_samples.is_empty() {
+        return 0.0;
+    }
+    let width = block.node_dims.x as i32;
+    let height = block.node_dims.y as i32;
+    if width <= 0 || height <= 0 {
+        return 0.0;
+    }
+
+    let inv_h = 1.0 / block.h_b.max(DET_EPSILON);
+    let mut penetrating = 0usize;
+    for &x_p in &particles.x {
+        let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h);
+        let mut sdf_acc = 0.0f32;
+        let mut w_acc = 0.0f32;
+        for sample in stencil.samples() {
+            let local = sample.node - block.origin_node;
+            if local.x < 0 || local.y < 0 || local.x >= width || local.y >= height {
+                continue;
+            }
+            let index = (local.y as usize) * block.node_dims.x as usize + local.x as usize;
+            let Some(boundary) = boundary_samples.get(index) else {
+                continue;
+            };
+            sdf_acc += sample.weight * boundary.sdf_m;
+            w_acc += sample.weight;
+        }
+        if w_acc > 1e-6 && (sdf_acc / w_acc) < penetration_slop_m {
+            penetrating += 1;
+        }
+    }
+    penetrating as f32 / particles.len() as f32
 }
 
 fn p2g(particles: &ContinuumParticleWorld, block: &mut GridBlock, params: &MpmWaterParams) {
@@ -254,9 +360,15 @@ fn p2g(particles: &ContinuumParticleWorld, block: &mut GridBlock, params: &MpmWa
     }
 }
 
-fn grid_update(block: &mut GridBlock, params: &MpmWaterParams) {
+fn grid_update(
+    block: &mut GridBlock,
+    params: &MpmWaterParams,
+    boundary_samples: Option<&[TerrainBoundarySample]>,
+    boundary_params: &MpmTerrainBoundaryParams,
+    metrics: &mut MpmWaterStepMetrics,
+) {
     let dt = params.dt.max(0.0);
-    for node in block.nodes_mut().iter_mut() {
+    for (node_index, node) in block.nodes_mut().iter_mut().enumerate() {
         if node.m <= GRID_MASS_EPSILON {
             node.m = 0.0;
             node.p = Vec2::ZERO;
@@ -266,6 +378,27 @@ fn grid_update(block: &mut GridBlock, params: &MpmWaterParams) {
         let inv_m = 1.0 / node.m;
         node.v = node.p * inv_m;
         node.v += dt * params.gravity;
+        if let Some(samples) = boundary_samples {
+            if let Some(sample) = samples.get(node_index).copied() {
+                if sample.solid || sample.sdf_m < boundary_params.penetration_slop_m {
+                    metrics.boundary_penetrating_node_ratio += 1.0;
+                    let normal = if sample.normal == Vec2::ZERO {
+                        Vec2::Y
+                    } else {
+                        sample.normal
+                    };
+                    let mut corrected_v = node.v;
+                    let normal_speed = corrected_v.dot(normal);
+                    if normal_speed < 0.0 {
+                        corrected_v -= normal * normal_speed;
+                    }
+                    let tangent = corrected_v - normal * corrected_v.dot(normal);
+                    let next_v = corrected_v - tangent * boundary_params.tangential_damping.clamp(0.0, 1.0);
+                    metrics.boundary_momentum_exchange += (next_v - node.v) * node.m;
+                    node.v = next_v;
+                }
+            }
+        }
         node.p = node.v * node.m;
     }
 }
@@ -363,6 +496,7 @@ fn mix_mat2(a: Mat2, b: Mat2, t: f32) -> Mat2 {
 mod tests {
     use super::*;
     use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, terrain_boundary_radius_m};
+    use crate::physics::solver::terrain_boundary::TerrainBoundarySampler;
     use crate::physics::world::continuum::ContinuumMaterial;
     use crate::physics::world::grid::GridBlock;
     use crate::physics::world::particle::ParticleWorld;
@@ -555,5 +689,37 @@ mod tests {
             .sample_signed_distance_and_normal(continuum.x[0])
             .expect("normal should be available after projection");
         assert!(continuum.v[0].dot(normal) >= -1e-4);
+    }
+
+    #[test]
+    fn grid_boundary_coupling_applies_non_penetration_on_mpm_nodes() {
+        let mut terrain = TerrainWorld::default();
+        terrain.clear();
+        terrain.ensure_chunk_loaded(IVec2::ZERO);
+        terrain.clear_loaded_cells();
+        terrain.set_cell(IVec2::ZERO, TerrainCell::stone());
+        terrain
+            .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
+
+        let (mut particles, mut grid) = make_world_with_single_block();
+        particles.x[0] = cell_to_world_center(IVec2::ZERO);
+        particles.v[0] = Vec2::new(0.0, -2.0);
+
+        let mut sampler = TerrainBoundarySampler::default();
+        sampler.begin_step();
+        let metrics = step_single_rate_coupled(
+            &mut particles,
+            &mut grid,
+            Some(&terrain),
+            Some(&mut sampler),
+            &MpmWaterParams {
+                gravity: Vec2::ZERO,
+                ..Default::default()
+            },
+            &MpmTerrainBoundaryParams::default(),
+        );
+        sampler.end_step();
+        assert!(metrics.boundary_penetrating_node_ratio > 0.0);
+        assert!(metrics.boundary_momentum_exchange.length() > 0.0);
     }
 }

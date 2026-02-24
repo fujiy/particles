@@ -3,6 +3,7 @@ pub(crate) mod granular;
 pub mod mpm_water;
 pub(crate) mod params_defaults;
 pub(crate) mod params_types;
+pub(crate) mod terrain_boundary;
 mod runtime;
 mod step;
 mod types;

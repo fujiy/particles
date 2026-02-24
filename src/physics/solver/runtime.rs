@@ -3,6 +3,7 @@ use bevy::prelude::*;
 
 use super::fixed_update::reset_mpm_grid_hierarchy;
 use super::mpm_water::{MpmWaterParams, rebuild_continuum_from_particle_world};
+use super::terrain_boundary::TerrainBoundarySampler;
 use super::step::step_simulation_once;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::save_load;
@@ -88,6 +89,7 @@ pub(crate) fn handle_replay_requests(
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
     mut grid_hierarchy: ResMut<GridHierarchy>,
+    mut terrain_boundary_sampler: ResMut<TerrainBoundarySampler>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
     parallel_settings: Res<SimulationParallelSettings>,
@@ -101,6 +103,7 @@ pub(crate) fn handle_replay_requests(
         *particle_world = ParticleWorld::default();
         continuum_world.clear();
         reset_mpm_grid_hierarchy(&mut grid_hierarchy, particle_world.solver_params.fixed_dt);
+        terrain_boundary_sampler.clear();
         object_world.clear();
         object_field.clear();
         sim_state.running = false;
@@ -168,6 +171,7 @@ pub(crate) fn handle_replay_requests(
                     &mut grid_hierarchy,
                     &mut object_world,
                     &mut object_field,
+                    &mut terrain_boundary_sampler,
                     parallel_settings.enabled,
                     terrain_boundary_radius_m(*material_params),
                 );
@@ -202,6 +206,7 @@ pub(crate) fn apply_sim_reset(
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
     mut grid_hierarchy: ResMut<GridHierarchy>,
+    mut terrain_boundary_sampler: ResMut<TerrainBoundarySampler>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
     material_params: Res<MaterialParams>,
@@ -249,6 +254,7 @@ pub(crate) fn apply_sim_reset(
                     &mut grid_hierarchy,
                     particle_world.solver_params.fixed_dt,
                 );
+                terrain_boundary_sampler.clear();
                 replay_state.status_message = if spec.name == "water_drop" {
                     format!(
                         "Reloaded replay scenario: {} (MPM water enabled)",
@@ -267,6 +273,7 @@ pub(crate) fn apply_sim_reset(
     *particle_world = ParticleWorld::default();
     continuum_world.clear();
     reset_mpm_grid_hierarchy(&mut grid_hierarchy, particle_world.solver_params.fixed_dt);
+    terrain_boundary_sampler.clear();
     object_world.clear();
     object_field.clear();
     sim_state.running = false;

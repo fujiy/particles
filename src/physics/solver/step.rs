@@ -3,9 +3,10 @@ use std::time::Instant;
 use bevy::log::tracing;
 
 use super::mpm_water::{
-    MpmWaterParams, apply_terrain_boundary_to_continuum, rebuild_continuum_from_particle_world,
-    sound_speed_mps, step_single_rate, sync_continuum_to_particle_world,
+    MpmTerrainBoundaryParams, MpmWaterParams, rebuild_continuum_from_particle_world,
+    sound_speed_mps, step_single_rate_coupled, sync_continuum_to_particle_world,
 };
+use super::terrain_boundary::TerrainBoundarySampler;
 use super::types::StepSimulationTiming;
 use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::world::continuum::ContinuumParticleWorld;
@@ -26,6 +27,7 @@ pub(crate) fn step_simulation_once(
     grid_hierarchy: &mut GridHierarchy,
     object_world: &mut ObjectWorld,
     object_field: &mut ObjectPhysicsField,
+    terrain_boundary_sampler: &mut TerrainBoundarySampler,
     parallel_enabled: bool,
     terrain_boundary_radius_m: f32,
 ) -> StepSimulationTiming {
@@ -51,6 +53,7 @@ pub(crate) fn step_simulation_once(
             bulk_modulus: MPM_TARGET_RHO0 * MPM_TARGET_SOUND_SPEED_MPS * MPM_TARGET_SOUND_SPEED_MPS,
             ..Default::default()
         };
+        let terrain_boundary_params = MpmTerrainBoundaryParams::default();
         if continuum_world.len() != water_particle_count {
             let _ = rebuild_continuum_from_particle_world(
                 particle_world,
@@ -69,15 +72,18 @@ pub(crate) fn step_simulation_once(
         let substeps = substeps.max(1);
         let dt_sub = particle_world.solver_params.fixed_dt / substeps as f32;
         mpm_params.dt = dt_sub;
+        terrain_boundary_sampler.begin_step();
         for _ in 0..substeps {
-            let _ = step_single_rate(continuum_world, grid_hierarchy, &mpm_params);
-            let _ = apply_terrain_boundary_to_continuum(
+            let _ = step_single_rate_coupled(
                 continuum_world,
-                terrain_world,
-                0.01,
-                0.05,
+                grid_hierarchy,
+                Some(terrain_world),
+                Some(terrain_boundary_sampler),
+                &mpm_params,
+                &terrain_boundary_params,
             );
         }
+        terrain_boundary_sampler.end_step();
         if !sync_continuum_to_particle_world(particle_world, continuum_world) {
             let _ = rebuild_continuum_from_particle_world(
                 particle_world,

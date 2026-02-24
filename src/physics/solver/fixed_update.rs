@@ -5,6 +5,7 @@ use bevy::prelude::*;
 
 use super::params_types::SolverParams;
 use super::step::step_simulation_once;
+use super::terrain_boundary::TerrainBoundarySampler;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::state::{
@@ -26,6 +27,7 @@ pub(crate) fn initialize_default_world(
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
     mut grid_hierarchy: ResMut<GridHierarchy>,
+    mut terrain_boundary_sampler: ResMut<TerrainBoundarySampler>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
     mut sim_state: ResMut<SimulationState>,
@@ -40,6 +42,7 @@ pub(crate) fn initialize_default_world(
     *particle_world = ParticleWorld::default();
     continuum_world.clear();
     reset_mpm_grid_hierarchy(&mut grid_hierarchy, solver_params.fixed_dt);
+    terrain_boundary_sampler.clear();
     object_world.clear();
     object_field.clear();
     sim_state.running = false;
@@ -58,12 +61,13 @@ pub(crate) fn step_physics(
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
     mut grid_hierarchy: ResMut<GridHierarchy>,
-    mut object_world: ResMut<ObjectWorld>,
-    mut object_field: ResMut<ObjectPhysicsField>,
+    object_resources: (ResMut<ObjectWorld>, ResMut<ObjectPhysicsField>),
+    mut terrain_boundary_sampler: ResMut<TerrainBoundarySampler>,
     mut perf_metrics: ResMut<SimulationPerfMetrics>,
     mut step_profiler: ResMut<PhysicsStepProfiler>,
     camera_transforms: Query<&Transform, With<Camera2d>>,
 ) {
+    let (mut object_world, mut object_field) = object_resources;
     particle_world.set_solver_params(*solver_params);
     particle_world.set_material_params(*material_params);
     let terrain_boundary_radius_m = terrain_boundary_radius_m(*material_params);
@@ -183,6 +187,7 @@ pub(crate) fn step_physics(
             &mut grid_hierarchy,
             &mut object_world,
             &mut object_field,
+            &mut terrain_boundary_sampler,
             parallel_settings.enabled,
             terrain_boundary_radius_m,
         );

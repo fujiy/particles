@@ -23,6 +23,7 @@ use self::state::{
     ResetSimulationRequest, SaveMapRequest, SimFixedSet, SimUpdateSet, SimulationParallelSettings,
     SimulationPerfMetrics, SimulationState, TerrainStreamingSettings,
 };
+use self::solver::terrain_boundary::TerrainBoundarySampler;
 use self::world::object::{ObjectPhysicsField, ObjectWorld};
 use self::world::particle::ParticleWorld;
 use self::world::terrain::TerrainWorld;
@@ -62,6 +63,7 @@ impl Plugin for PhysicsPlugin {
             .init_resource::<PhysicsStepProfiler>()
             .init_resource::<SolverParams>()
             .init_resource::<MaterialParams>()
+            .init_resource::<TerrainBoundarySampler>()
             .add_message::<ResetSimulationRequest>()
             .add_message::<LoadDefaultWorldRequest>()
             .add_message::<SaveMapRequest>()
