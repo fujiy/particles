@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::{GridBlock, GridHierarchy};
 use crate::physics::world::kernel::evaluate_quadratic_bspline_stencil_2d;
+use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
 
 const GRID_MASS_EPSILON: f32 = 1e-8;
 const DET_EPSILON: f32 = 1e-6;
@@ -57,6 +58,54 @@ pub fn cfl_ratio(params: &MpmWaterParams, h_b: f32, max_particle_speed_mps: f32)
 
 pub fn cfl_violated(params: &MpmWaterParams, h_b: f32, max_particle_speed_mps: f32) -> bool {
     cfl_ratio(params, h_b, max_particle_speed_mps) > params.cfl_limit
+}
+
+pub fn rebuild_continuum_from_particle_world(
+    particles: &ParticleWorld,
+    continuum: &mut ContinuumParticleWorld,
+    params: &MpmWaterParams,
+) -> usize {
+    continuum.clear();
+    let inv_rho0 = 1.0 / params.rho0.max(DET_EPSILON);
+    for ((&position, &velocity), (&mass, &material)) in particles
+        .positions()
+        .iter()
+        .zip(particles.vel.iter())
+        .zip(particles.masses().iter().zip(particles.materials().iter()))
+    {
+        if !matches!(material, ParticleMaterial::WaterLiquid) {
+            continue;
+        }
+        continuum.spawn_water_particle(position, velocity, mass, mass.max(0.0) * inv_rho0);
+    }
+    continuum.len()
+}
+
+pub fn sync_continuum_to_particle_world(
+    particles: &mut ParticleWorld,
+    continuum: &ContinuumParticleWorld,
+) -> bool {
+    let water_indices: Vec<usize> = particles
+        .materials()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &material)| {
+            if matches!(material, ParticleMaterial::WaterLiquid) {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .collect();
+    if water_indices.len() != continuum.len() {
+        return false;
+    }
+    for (continuum_index, &particle_index) in water_indices.iter().enumerate() {
+        particles.prev_pos[particle_index] = particles.pos[particle_index];
+        particles.pos[particle_index] = continuum.x[continuum_index];
+        particles.vel[particle_index] = continuum.v[continuum_index];
+    }
+    true
 }
 
 pub fn step_single_rate(
@@ -200,6 +249,7 @@ mod tests {
     use super::*;
     use crate::physics::world::continuum::ContinuumMaterial;
     use crate::physics::world::grid::GridBlock;
+    use crate::physics::world::particle::ParticleWorld;
 
     fn make_world_with_single_block() -> (ContinuumParticleWorld, GridHierarchy) {
         let mut particles = ContinuumParticleWorld::default();
@@ -297,5 +347,66 @@ mod tests {
         let ratio = cfl_ratio(&params, 0.25, 10.0);
         assert!(ratio > 1.0);
         assert!(cfl_violated(&params, 0.25, 10.0));
+    }
+
+    #[test]
+    fn rebuild_continuum_filters_water_particles_only() {
+        let mut particles = ParticleWorld::default();
+        particles
+            .restore_from_snapshot(
+                vec![
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(1.0, 0.0),
+                    Vec2::new(2.0, 0.0),
+                ],
+                vec![Vec2::ZERO; 3],
+                vec![
+                    ParticleMaterial::WaterLiquid,
+                    ParticleMaterial::StoneSolid,
+                    ParticleMaterial::WaterLiquid,
+                ],
+            )
+            .unwrap();
+        let mut continuum = ContinuumParticleWorld::default();
+        let count = rebuild_continuum_from_particle_world(
+            &particles,
+            &mut continuum,
+            &MpmWaterParams::default(),
+        );
+        assert_eq!(count, 2);
+        assert_eq!(continuum.len(), 2);
+        assert_eq!(continuum.x[0], Vec2::new(0.0, 0.0));
+        assert_eq!(continuum.x[1], Vec2::new(2.0, 0.0));
+    }
+
+    #[test]
+    fn sync_continuum_updates_only_water_particles() {
+        let mut particles = ParticleWorld::default();
+        particles
+            .restore_from_snapshot(
+                vec![
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(1.0, 0.0),
+                    Vec2::new(2.0, 0.0),
+                ],
+                vec![Vec2::ZERO; 3],
+                vec![
+                    ParticleMaterial::WaterLiquid,
+                    ParticleMaterial::StoneSolid,
+                    ParticleMaterial::WaterLiquid,
+                ],
+            )
+            .unwrap();
+
+        let mut continuum = ContinuumParticleWorld::default();
+        continuum.spawn_water_particle(Vec2::new(5.0, 6.0), Vec2::new(1.0, 2.0), 1.0, 0.001);
+        continuum.spawn_water_particle(Vec2::new(7.0, 8.0), Vec2::new(3.0, 4.0), 1.0, 0.001);
+
+        assert!(sync_continuum_to_particle_world(&mut particles, &continuum));
+        assert_eq!(particles.pos[0], Vec2::new(5.0, 6.0));
+        assert_eq!(particles.vel[0], Vec2::new(1.0, 2.0));
+        assert_eq!(particles.pos[1], Vec2::new(1.0, 0.0));
+        assert_eq!(particles.pos[2], Vec2::new(7.0, 8.0));
+        assert_eq!(particles.vel[2], Vec2::new(3.0, 4.0));
     }
 }

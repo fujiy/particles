@@ -2,6 +2,7 @@ use bevy::log::tracing;
 use bevy::prelude::*;
 
 use super::fixed_update::reset_mpm_grid_hierarchy;
+use super::mpm_water::{MpmWaterParams, rebuild_continuum_from_particle_world};
 use super::step::step_simulation_once;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::save_load;
@@ -112,13 +113,30 @@ pub(crate) fn handle_replay_requests(
             &mut object_field,
         ) {
             Ok(()) => {
+                if spec.name == "water_drop" {
+                    let _ = rebuild_continuum_from_particle_world(
+                        &particle_world,
+                        &mut continuum_world,
+                        &MpmWaterParams {
+                            dt: particle_world.solver_params.fixed_dt,
+                            gravity: particle_world.solver_params.gravity_mps2,
+                            ..Default::default()
+                        },
+                    );
+                } else {
+                    continuum_world.clear();
+                }
                 replay_state.enabled = true;
                 replay_state.scenario_name = Some(spec.name.clone());
                 replay_state.scenario_total_steps = spec.step_count;
                 replay_state.current_step = 0;
                 replay_state.baseline_particle_count = particle_world.particle_count();
                 replay_state.baseline_solid_cell_count = count_solid_cells(&terrain_world);
-                replay_state.status_message = format!("Loaded replay scenario: {}", spec.name);
+                replay_state.status_message = if spec.name == "water_drop" {
+                    format!("Loaded replay scenario: {} (MPM water enabled)", spec.name)
+                } else {
+                    format!("Loaded replay scenario: {}", spec.name)
+                };
                 sim_state.running = false;
                 sim_state.step_once = false;
             }
@@ -214,12 +232,31 @@ pub(crate) fn apply_sim_reset(
                 replay_state.baseline_solid_cell_count = count_solid_cells(&terrain_world);
                 sim_state.running = false;
                 sim_state.step_once = false;
-                continuum_world.clear();
+                if spec.name == "water_drop" {
+                    let _ = rebuild_continuum_from_particle_world(
+                        &particle_world,
+                        &mut continuum_world,
+                        &MpmWaterParams {
+                            dt: particle_world.solver_params.fixed_dt,
+                            gravity: particle_world.solver_params.gravity_mps2,
+                            ..Default::default()
+                        },
+                    );
+                } else {
+                    continuum_world.clear();
+                }
                 reset_mpm_grid_hierarchy(
                     &mut grid_hierarchy,
                     particle_world.solver_params.fixed_dt,
                 );
-                replay_state.status_message = format!("Reloaded replay scenario: {}", spec.name);
+                replay_state.status_message = if spec.name == "water_drop" {
+                    format!(
+                        "Reloaded replay scenario: {} (MPM water enabled)",
+                        spec.name
+                    )
+                } else {
+                    format!("Reloaded replay scenario: {}", spec.name)
+                };
                 return;
             }
         }

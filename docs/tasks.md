@@ -26,7 +26,8 @@
   - [x] G2P で `v,x,C,F` を更新する。
   - [x] `J=det(F)` の数値安定化クランプを実装する。
   - [x] 単体テストを追加する（質量保存、静水安定、CFL判定）。
-  - [ ] `ContinuumParticleWorld` への粒子供給経路（初期化/編集）を接続し、実行時挙動を確認する。
+  - [x] `test world` の `water_drop` 読込時に `ContinuumParticleWorld` を初期化し、MPM更新結果を `ParticleWorld` 表示へ同期する。
+  - [ ] 一般編集モード（ブラシ生成水）から `ContinuumParticleWorld` への粒子供給経路を接続する。
 - 完了条件:
   - 単一レート条件で水塊が崩壊/流動し、質量保存誤差が許容範囲内に収まる。
 
