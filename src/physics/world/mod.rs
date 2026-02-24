@@ -1,4 +1,7 @@
 pub mod constants;
+pub mod continuum;
+pub mod grid;
+pub mod kernel;
 pub mod neighbor_grid;
 pub mod object;
 pub mod particle;

@@ -26,6 +26,7 @@ use self::state::{
 use self::world::object::{ObjectPhysicsField, ObjectWorld};
 use self::world::particle::ParticleWorld;
 use self::world::terrain::TerrainWorld;
+use self::world::{continuum::ContinuumParticleWorld, grid::GridHierarchy};
 use crate::physics::material::MaterialParams;
 
 pub struct PhysicsPlugin;
@@ -47,6 +48,8 @@ impl Plugin for PhysicsPlugin {
             )
             .init_resource::<TerrainWorld>()
             .init_resource::<ParticleWorld>()
+            .init_resource::<ContinuumParticleWorld>()
+            .init_resource::<GridHierarchy>()
             .init_resource::<ObjectWorld>()
             .init_resource::<ObjectPhysicsField>()
             .init_resource::<SimulationState>()
