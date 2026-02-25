@@ -180,10 +180,9 @@ pub(crate) fn solve_contacts(
                         delta_pos[i] += corr_i_n;
                         delta_pos[j] += corr_j_n;
 
-                        if let Some(scale) = granular_contact_friction_pair_scale(
-                            material_i,
-                            material_j,
-                        ) {
+                        if let Some(scale) =
+                            granular_contact_friction_pair_scale(material_i, material_j)
+                        {
                             let mu_k =
                                 0.5 * (props_i.friction_dynamic + props_j.friction_dynamic) * scale;
                             let rel_vel = particles.vel[i] - particles.vel[j];
@@ -483,13 +482,11 @@ pub(crate) fn apply_restitution(particles: &mut ParticleWorld, _dt_sub: f32) {
             .gather(particles.pos[i], &mut neighbors);
         for &j in &neighbors {
             let material_j = particles.material[j];
-            if j <= i
-                || !particles.is_active_particle(j)
-                || is_water_particle(material_j)
-            {
+            if j <= i || !particles.is_active_particle(j) || is_water_particle(material_j) {
                 continue;
             }
-            if is_granular_particle(material_j) && !particles.is_particle_scheduled_in_sub_block(j) {
+            if is_granular_particle(material_j) && !particles.is_particle_scheduled_in_sub_block(j)
+            {
                 continue;
             }
             let r = particles.pos[i] - particles.pos[j];

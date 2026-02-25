@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -18,6 +20,12 @@ pub struct GridBlock {
     pub node_dims: UVec2,
     nodes: Vec<GridNode>,
     active_nodes: Vec<IVec2>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridNodeLocation {
+    pub block_index: usize,
+    pub local_index: usize,
 }
 
 impl GridBlock {
@@ -125,11 +133,21 @@ impl GridBlock {
 #[derive(Resource, Debug, Default)]
 pub struct GridHierarchy {
     blocks: Vec<GridBlock>,
+    node_lookup: HashMap<IVec2, GridNodeLocation>,
+}
+
+#[derive(Resource, Clone, Debug, Default)]
+pub struct MpmBlockIndexTable {
+    owner_indices: Vec<Vec<usize>>,
+    ghost_indices: Vec<Vec<usize>>,
+    moved_particle_count: usize,
+    rebinned_this_step: bool,
 }
 
 impl GridHierarchy {
     pub fn clear(&mut self) {
         self.blocks.clear();
+        self.node_lookup.clear();
     }
 
     pub fn block_count(&self) -> usize {
@@ -144,10 +162,160 @@ impl GridHierarchy {
         &mut self.blocks
     }
 
+    pub fn node_location(&self, world_node: IVec2) -> Option<GridNodeLocation> {
+        self.node_lookup.get(&world_node).copied()
+    }
+
+    pub fn node_by_world(&self, world_node: IVec2) -> Option<&GridNode> {
+        let location = self.node_location(world_node)?;
+        self.blocks
+            .get(location.block_index)?
+            .nodes()
+            .get(location.local_index)
+    }
+
+    pub fn node_mut_by_world(&mut self, world_node: IVec2) -> Option<&mut GridNode> {
+        let location = self.node_location(world_node)?;
+        self.blocks
+            .get_mut(location.block_index)?
+            .nodes_mut()
+            .get_mut(location.local_index)
+    }
+
+    pub fn block_index_for_position(&self, world_pos: Vec2) -> Option<usize> {
+        let h = self.blocks.first()?.h_b.max(1e-6);
+        let world_node = IVec2::new(
+            (world_pos.x / h).floor() as i32,
+            (world_pos.y / h).floor() as i32,
+        );
+        if let Some(location) = self.node_location(world_node) {
+            return Some(location.block_index);
+        }
+        let (min_node, max_node) = self.global_node_bounds()?;
+        let clamped = IVec2::new(
+            world_node.x.clamp(min_node.x, max_node.x),
+            world_node.y.clamp(min_node.y, max_node.y),
+        );
+        self.node_location(clamped)
+            .map(|location| location.block_index)
+    }
+
     pub fn add_block(&mut self, block: GridBlock) {
         self.blocks.push(block);
         self.blocks
             .sort_by_key(|b| (b.level, b.origin_node.y, b.origin_node.x));
+        self.rebuild_node_lookup();
+    }
+
+    fn rebuild_node_lookup(&mut self) {
+        self.node_lookup.clear();
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            let width = block.node_dims.x as usize;
+            for y in 0..block.node_dims.y as i32 {
+                for x in 0..block.node_dims.x as i32 {
+                    let local_index = y as usize * width + x as usize;
+                    let world_node = block.origin_node + IVec2::new(x, y);
+                    let previous = self.node_lookup.insert(
+                        world_node,
+                        GridNodeLocation {
+                            block_index,
+                            local_index,
+                        },
+                    );
+                    debug_assert!(
+                        previous.is_none(),
+                        "grid node overlap detected at {:?}: {:?} and block {}",
+                        world_node,
+                        previous,
+                        block_index
+                    );
+                }
+            }
+        }
+    }
+
+    fn global_node_bounds(&self) -> Option<(IVec2, IVec2)> {
+        let mut min_node = IVec2::new(i32::MAX, i32::MAX);
+        let mut max_node = IVec2::new(i32::MIN, i32::MIN);
+        for block in &self.blocks {
+            let block_min = block.origin_node;
+            let block_max = block.origin_node
+                + IVec2::new(
+                    block.node_dims.x.saturating_sub(1) as i32,
+                    block.node_dims.y.saturating_sub(1) as i32,
+                );
+            min_node.x = min_node.x.min(block_min.x);
+            min_node.y = min_node.y.min(block_min.y);
+            max_node.x = max_node.x.max(block_max.x);
+            max_node.y = max_node.y.max(block_max.y);
+        }
+        if min_node.x > max_node.x || min_node.y > max_node.y {
+            None
+        } else {
+            Some((min_node, max_node))
+        }
+    }
+}
+
+impl MpmBlockIndexTable {
+    pub fn clear(&mut self) {
+        self.owner_indices.clear();
+        self.ghost_indices.clear();
+        self.moved_particle_count = 0;
+        self.rebinned_this_step = false;
+    }
+
+    pub fn ensure_block_count(&mut self, block_count: usize) {
+        self.owner_indices.resize_with(block_count, Vec::new);
+        self.ghost_indices.resize_with(block_count, Vec::new);
+        if self.owner_indices.len() > block_count {
+            self.owner_indices.truncate(block_count);
+        }
+        if self.ghost_indices.len() > block_count {
+            self.ghost_indices.truncate(block_count);
+        }
+    }
+
+    pub fn owner_indices(&self, block_index: usize) -> &[usize] {
+        self.owner_indices
+            .get(block_index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn ghost_indices(&self, block_index: usize) -> &[usize] {
+        self.ghost_indices
+            .get(block_index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn owner_indices_mut(&mut self, block_index: usize) -> Option<&mut Vec<usize>> {
+        self.owner_indices.get_mut(block_index)
+    }
+
+    pub fn ghost_indices_mut(&mut self, block_index: usize) -> Option<&mut Vec<usize>> {
+        self.ghost_indices.get_mut(block_index)
+    }
+
+    pub fn moved_particle_count(&self) -> usize {
+        self.moved_particle_count
+    }
+
+    pub fn block_count(&self) -> usize {
+        self.owner_indices.len().min(self.ghost_indices.len())
+    }
+
+    pub fn set_moved_particle_count(&mut self, moved_particle_count: usize) {
+        self.moved_particle_count = moved_particle_count;
+    }
+
+    pub fn rebinned_this_step(&self) -> bool {
+        self.rebinned_this_step
+    }
+
+    pub fn set_rebinned_this_step(&mut self, rebinned_this_step: bool) {
+        self.rebinned_this_step = rebinned_this_step;
     }
 }
 
@@ -187,6 +355,40 @@ mod tests {
                 IVec2::new(0, 0),
                 IVec2::new(1, 1),
             ]
+        );
+    }
+
+    #[test]
+    fn hierarchy_node_lookup_resolves_to_expected_block() {
+        let mut hierarchy = GridHierarchy::default();
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(0, 0),
+            UVec2::new(4, 4),
+        ));
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(4, 0),
+            UVec2::new(4, 4),
+        ));
+        let left = hierarchy
+            .node_location(IVec2::new(1, 1))
+            .expect("left node must be indexed");
+        let right = hierarchy
+            .node_location(IVec2::new(5, 1))
+            .expect("right node must be indexed");
+        assert_ne!(left.block_index, right.block_index);
+        assert_eq!(
+            hierarchy.block_index_for_position(Vec2::new(0.30, 0.30)),
+            Some(left.block_index)
+        );
+        assert_eq!(
+            hierarchy.block_index_for_position(Vec2::new(1.30, 0.30)),
+            Some(right.block_index)
         );
     }
 }

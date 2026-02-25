@@ -7,8 +7,7 @@ use std::time::Instant;
 use crate::physics::connectivity::{FOUR_NEIGHBOR_OFFSETS, flood_fill_4_limited};
 use crate::physics::material::{
     DEFAULT_MATERIAL_PARAMS, MaterialParams, particle_properties, particle_spacing_m,
-    particles_per_cell,
-    solid_break_properties, terrain_fracture_particle, terrain_solid_particle,
+    particles_per_cell, solid_break_properties, terrain_fracture_particle, terrain_solid_particle,
     water_kernel_radius_m,
 };
 use crate::physics::profiler::process_cpu_time_seconds;
@@ -261,10 +260,10 @@ pub enum ParticleActivityState {
 }
 
 pub(crate) mod helpers;
-#[path = "../../solver/particle_step.rs"]
-mod particle_step_solver;
 #[path = "../../solver/object.rs"]
 mod object_solver;
+#[path = "../../solver/particle_step.rs"]
+mod particle_step_solver;
 
 use crate::physics::solver::granular::ComputeDeltaThreadScratch;
 use helpers::*;
@@ -1158,8 +1157,8 @@ impl ParticleWorld {
             if let Some((signed_distance, _normal)) =
                 terrain.sample_signed_distance_and_normal(self.pos[i])
             {
-                let penetration = particle_properties(self.material[i]).terrain_push_radius_m
-                    - signed_distance;
+                let penetration =
+                    particle_properties(self.material[i]).terrain_push_radius_m - signed_distance;
                 if penetration > 0.0 {
                     metric.max_penetration_m = metric.max_penetration_m.max(penetration);
                     metric.had_contact = true;
@@ -1212,7 +1211,8 @@ impl ParticleWorld {
             let prev_rate = state.rate_divisor;
             if force_promote {
                 state.rate_divisor = RATE_DIVISOR_MIN;
-                state.counters.active_hold_frames = state.counters.active_hold_frames.max(min_active_frames);
+                state.counters.active_hold_frames =
+                    state.counters.active_hold_frames.max(min_active_frames);
                 state.counters.promote_counter = 0;
                 state.counters.demote_counter = 0;
                 promote_seeds.push(coord);
@@ -1362,7 +1362,8 @@ impl ParticleWorld {
             state.boundary_debt_impulse = Vec2::ZERO;
             state.boundary_debt_peak = 0.0;
             state.rate_divisor = RATE_DIVISOR_MIN;
-            state.counters.active_hold_frames = state.counters.active_hold_frames.max(min_active_frames);
+            state.counters.active_hold_frames =
+                state.counters.active_hold_frames.max(min_active_frames);
             promote_seeds.push(coord);
             self.sub_block_dirty_set.insert(coord);
         }
@@ -3215,10 +3216,8 @@ impl ParticleWorld {
                         state.rate_divisor = RATE_DIVISOR_MIN;
                         self.sub_block_dirty_set.insert(coord);
                     }
-                    state.counters.active_hold_frames = state
-                        .counters
-                        .active_hold_frames
-                        .max(min_active_frames);
+                    state.counters.active_hold_frames =
+                        state.counters.active_hold_frames.max(min_active_frames);
                 }
             }
         }
@@ -3346,7 +3345,10 @@ impl ParticleWorld {
             .get(target_index)
             .copied()
             .unwrap_or_else(|| {
-                world_pos_to_sub_block(self.pos[target_index], self.solver_params.sub_block_size_cells)
+                world_pos_to_sub_block(
+                    self.pos[target_index],
+                    self.solver_params.sub_block_size_cells,
+                )
             });
         let impulse = reaction_delta * self.mass[target_index] * inv_dt;
         let debt_promote_threshold = self
@@ -3361,7 +3363,8 @@ impl ParticleWorld {
             .max(state.boundary_debt_impulse.length());
         if state.boundary_debt_impulse.length() >= debt_promote_threshold {
             state.rate_divisor = RATE_DIVISOR_MIN;
-            state.counters.active_hold_frames = state.counters.active_hold_frames.max(min_active_frames);
+            state.counters.active_hold_frames =
+                state.counters.active_hold_frames.max(min_active_frames);
         }
         self.sub_block_dirty_set.insert(coord);
     }

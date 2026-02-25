@@ -17,7 +17,7 @@ use crate::physics::world::constants::{
     WORLD_MIN_CHUNK_Y,
 };
 use crate::physics::world::continuum::ContinuumParticleWorld;
-use crate::physics::world::grid::{GridBlock, GridHierarchy};
+use crate::physics::world::grid::{GridBlock, GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::{ParticleActivityState, ParticleWorld};
 use crate::physics::world::terrain::{TerrainWorld, world_to_cell};
@@ -27,6 +27,7 @@ pub(crate) fn initialize_default_world(
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
     mut grid_hierarchy: ResMut<GridHierarchy>,
+    mut mpm_block_index_table: ResMut<MpmBlockIndexTable>,
     mut terrain_boundary_sampler: ResMut<TerrainBoundarySampler>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
@@ -41,7 +42,12 @@ pub(crate) fn initialize_default_world(
     terrain_world.rebuild_static_particles_if_dirty(terrain_boundary_radius_m);
     *particle_world = ParticleWorld::default();
     continuum_world.clear();
-    reset_mpm_grid_hierarchy(&mut grid_hierarchy, solver_params.fixed_dt);
+    reset_mpm_grid_hierarchy(
+        &mut grid_hierarchy,
+        solver_params.fixed_dt,
+        solver_params.sub_block_size_cells,
+    );
+    mpm_block_index_table.clear();
     terrain_boundary_sampler.clear();
     object_world.clear();
     object_field.clear();
@@ -60,13 +66,14 @@ pub(crate) fn step_physics(
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
-    mut grid_hierarchy: ResMut<GridHierarchy>,
+    mpm_resources: (ResMut<GridHierarchy>, ResMut<MpmBlockIndexTable>),
     object_resources: (ResMut<ObjectWorld>, ResMut<ObjectPhysicsField>),
     mut terrain_boundary_sampler: ResMut<TerrainBoundarySampler>,
     mut perf_metrics: ResMut<SimulationPerfMetrics>,
     mut step_profiler: ResMut<PhysicsStepProfiler>,
     camera_transforms: Query<&Transform, With<Camera2d>>,
 ) {
+    let (mut grid_hierarchy, mut mpm_block_index_table) = mpm_resources;
     let (mut object_world, mut object_field) = object_resources;
     particle_world.set_solver_params(*solver_params);
     particle_world.set_material_params(*material_params);
@@ -185,6 +192,7 @@ pub(crate) fn step_physics(
             &mut particle_world,
             &mut continuum_world,
             &mut grid_hierarchy,
+            &mut mpm_block_index_table,
             &mut object_world,
             &mut object_field,
             &mut terrain_boundary_sampler,
@@ -285,9 +293,89 @@ fn ensure_chunks_loaded_in_rect(
     }
 }
 
-pub(crate) fn reset_mpm_grid_hierarchy(grid_hierarchy: &mut GridHierarchy, dt: f32) {
+pub(crate) fn reset_mpm_grid_hierarchy(
+    grid_hierarchy: &mut GridHierarchy,
+    dt: f32,
+    block_node_span: i32,
+) {
     grid_hierarchy.clear();
+    let span = block_node_span.max(4);
+    reset_mpm_grid_hierarchy_with_span(grid_hierarchy, dt, span);
+}
 
+pub(crate) fn reset_mpm_grid_hierarchy_for_mode(
+    grid_hierarchy: &mut GridHierarchy,
+    dt: f32,
+    block_node_span: i32,
+    force_single_block: bool,
+    block_divisions: Option<UVec2>,
+) {
+    let (min_cell, node_dims) = mpm_grid_bounds_with_padding();
+    if force_single_block {
+        grid_hierarchy.clear();
+        grid_hierarchy.add_block(GridBlock::new(
+            0,
+            CELL_SIZE_M,
+            dt.max(1e-6),
+            min_cell,
+            UVec2::new(node_dims.x as u32, node_dims.y as u32),
+        ));
+        return;
+    }
+    if let Some(divisions) = block_divisions {
+        let div_x = divisions.x.max(1) as i32;
+        let div_y = divisions.y.max(1) as i32;
+        grid_hierarchy.clear();
+        for by in 0..div_y {
+            let y0 = by * node_dims.y / div_y;
+            let y1 = (by + 1) * node_dims.y / div_y;
+            let block_h = y1 - y0;
+            if block_h <= 0 {
+                continue;
+            }
+            for bx in 0..div_x {
+                let x0 = bx * node_dims.x / div_x;
+                let x1 = (bx + 1) * node_dims.x / div_x;
+                let block_w = x1 - x0;
+                if block_w <= 0 {
+                    continue;
+                }
+                grid_hierarchy.add_block(GridBlock::new(
+                    0,
+                    CELL_SIZE_M,
+                    dt.max(1e-6),
+                    min_cell + IVec2::new(x0, y0),
+                    UVec2::new(block_w as u32, block_h as u32),
+                ));
+            }
+        }
+        return;
+    }
+    reset_mpm_grid_hierarchy(grid_hierarchy, dt, block_node_span);
+}
+
+fn reset_mpm_grid_hierarchy_with_span(grid_hierarchy: &mut GridHierarchy, dt: f32, span: i32) {
+    let (min_cell, node_dims) = mpm_grid_bounds_with_padding();
+    let mut by = 0;
+    while by < node_dims.y {
+        let block_h = (node_dims.y - by).min(span);
+        let mut bx = 0;
+        while bx < node_dims.x {
+            let block_w = (node_dims.x - bx).min(span);
+            grid_hierarchy.add_block(GridBlock::new(
+                0,
+                CELL_SIZE_M,
+                dt.max(1e-6),
+                min_cell + IVec2::new(bx, by),
+                UVec2::new(block_w as u32, block_h as u32),
+            ));
+            bx += span;
+        }
+        by += span;
+    }
+}
+
+fn mpm_grid_bounds_with_padding() -> (IVec2, IVec2) {
     let padding_cells = 8;
     let min_cell = IVec2::new(
         WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32 - padding_cells,
@@ -298,11 +386,5 @@ pub(crate) fn reset_mpm_grid_hierarchy(grid_hierarchy: &mut GridHierarchy, dt: f
         (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 + padding_cells,
     );
     let node_dims = (max_cell_exclusive - min_cell + IVec2::ONE).max(IVec2::ONE);
-    grid_hierarchy.add_block(GridBlock::new(
-        0,
-        CELL_SIZE_M,
-        dt.max(1e-6),
-        min_cell,
-        UVec2::new(node_dims.x as u32, node_dims.y as u32),
-    ));
+    (min_cell, node_dims)
 }

@@ -5,9 +5,7 @@ use bevy::log::tracing;
 use bevy::prelude::*;
 
 use crate::physics::world::grid::GridBlock;
-use crate::physics::world::terrain::{
-    CELL_SIZE_M, TerrainCell, TerrainWorld, world_to_cell,
-};
+use crate::physics::world::terrain::{CELL_SIZE_M, TerrainCell, TerrainWorld, world_to_cell};
 
 const CACHE_LOD_MAX: u8 = 3;
 const CACHE_LOD_HYSTERESIS_FRAMES: u8 = 6;
@@ -186,7 +184,10 @@ fn terrain_solid_at_world(terrain: &TerrainWorld, world_pos: Vec2) -> bool {
 
 fn sample_terrain_sdf(terrain: &TerrainWorld, world_pos: Vec2) -> f32 {
     let center_cell = world_to_cell(world_pos);
-    let inside = matches!(terrain.get_cell_or_generated(center_cell), TerrainCell::Solid { .. });
+    let inside = matches!(
+        terrain.get_cell_or_generated(center_cell),
+        TerrainCell::Solid { .. }
+    );
     let mut best = SDF_INF;
     for dy in -SDF_QUERY_RADIUS_CELLS..=SDF_QUERY_RADIUS_CELLS {
         for dx in -SDF_QUERY_RADIUS_CELLS..=SDF_QUERY_RADIUS_CELLS {
@@ -233,19 +234,18 @@ fn build_block_samples(
             let i = y * width + x;
             let world_node = block.origin_node + IVec2::new(x as i32, y as i32);
             let world_pos = world_node.as_vec2() * block.h_b;
-            let (mut sdf_m, mut normal) =
-                if let Some((signed_distance, sample_normal)) =
-                    terrain.sample_signed_distance_and_normal(world_pos)
-                {
-                    (signed_distance, sample_normal)
-                } else {
-                    let signed_distance = sample_terrain_sdf(terrain, world_pos);
-                    let dx = sample_terrain_sdf(terrain, world_pos + Vec2::new(eps, 0.0))
-                        - sample_terrain_sdf(terrain, world_pos - Vec2::new(eps, 0.0));
-                    let dy = sample_terrain_sdf(terrain, world_pos + Vec2::new(0.0, eps))
-                        - sample_terrain_sdf(terrain, world_pos - Vec2::new(0.0, eps));
-                    (signed_distance, Vec2::new(dx, dy).normalize_or_zero())
-                };
+            let (mut sdf_m, mut normal) = if let Some((signed_distance, sample_normal)) =
+                terrain.sample_signed_distance_and_normal(world_pos)
+            {
+                (signed_distance, sample_normal)
+            } else {
+                let signed_distance = sample_terrain_sdf(terrain, world_pos);
+                let dx = sample_terrain_sdf(terrain, world_pos + Vec2::new(eps, 0.0))
+                    - sample_terrain_sdf(terrain, world_pos - Vec2::new(eps, 0.0));
+                let dy = sample_terrain_sdf(terrain, world_pos + Vec2::new(0.0, eps))
+                    - sample_terrain_sdf(terrain, world_pos - Vec2::new(0.0, eps));
+                (signed_distance, Vec2::new(dx, dy).normalize_or_zero())
+            };
 
             let mut solid = sdf_m < 0.0;
             if !solid && dilation_cells > 0 {

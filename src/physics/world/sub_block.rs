@@ -179,6 +179,9 @@ mod tests {
         assert_eq!(sub_block_to_chunk(IVec2::new(0, 0), size), IVec2::ZERO);
         assert_eq!(sub_block_to_chunk(IVec2::new(1, 1), size), IVec2::new(1, 1));
         assert_eq!(sub_block_to_chunk(IVec2::new(2, 0), size), IVec2::new(2, 0));
-        assert_eq!(sub_block_to_chunk(IVec2::new(-1, -1), size), IVec2::new(-1, -1));
+        assert_eq!(
+            sub_block_to_chunk(IVec2::new(-1, -1), size),
+            IVec2::new(-1, -1)
+        );
     }
 }

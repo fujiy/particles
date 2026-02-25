@@ -12,6 +12,7 @@ pub use world::terrain::cell_to_world_center;
 
 use bevy::prelude::*;
 
+use self::solver::terrain_boundary::TerrainBoundarySampler;
 use self::solver::{
     apply_save_load_requests, apply_sim_reset, finalize_frame_metrics, handle_replay_requests,
     handle_sim_controls, initialize_default_world, params_types::SolverParams, step_physics,
@@ -23,11 +24,13 @@ use self::state::{
     ResetSimulationRequest, SaveMapRequest, SimFixedSet, SimUpdateSet, SimulationParallelSettings,
     SimulationPerfMetrics, SimulationState, TerrainStreamingSettings,
 };
-use self::solver::terrain_boundary::TerrainBoundarySampler;
 use self::world::object::{ObjectPhysicsField, ObjectWorld};
 use self::world::particle::ParticleWorld;
 use self::world::terrain::TerrainWorld;
-use self::world::{continuum::ContinuumParticleWorld, grid::GridHierarchy};
+use self::world::{
+    continuum::ContinuumParticleWorld,
+    grid::{GridHierarchy, MpmBlockIndexTable},
+};
 use crate::physics::material::MaterialParams;
 
 pub struct PhysicsPlugin;
@@ -51,6 +54,7 @@ impl Plugin for PhysicsPlugin {
             .init_resource::<ParticleWorld>()
             .init_resource::<ContinuumParticleWorld>()
             .init_resource::<GridHierarchy>()
+            .init_resource::<MpmBlockIndexTable>()
             .init_resource::<ObjectWorld>()
             .init_resource::<ObjectPhysicsField>()
             .init_resource::<SimulationState>()

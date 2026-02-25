@@ -4,6 +4,8 @@ use bevy::prelude::{Resource, Vec2};
 pub struct SolverParams {
     pub gravity_mps2: Vec2,
     pub fixed_dt: f32,
+    // Runtime clamps to max representable level for current frame dt/min dt.
+    pub mpm_block_rate_level_min: u8,
     // Runtime clamps to at least 1 to avoid zero substep execution.
     pub substeps: usize,
     pub solver_iters: usize,

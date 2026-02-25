@@ -1037,9 +1037,14 @@ fn sub_block_neighbor_level_difference_is_limited_to_one() {
         .sub_block_states
         .get(&right_block)
         .expect("right sub-block state should exist");
-    let left_level = rate_level_from_divisor(left.rate_divisor, particles.solver_params.sub_block_max_level);
-    let right_level =
-        rate_level_from_divisor(right.rate_divisor, particles.solver_params.sub_block_max_level);
+    let left_level = rate_level_from_divisor(
+        left.rate_divisor,
+        particles.solver_params.sub_block_max_level,
+    );
+    let right_level = rate_level_from_divisor(
+        right.rate_divisor,
+        particles.solver_params.sub_block_max_level,
+    );
     assert!((left_level as i16 - right_level as i16).abs() <= 1);
 }
 

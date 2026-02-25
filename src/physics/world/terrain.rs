@@ -215,11 +215,7 @@ impl TerrainWorld {
                 } else {
                     chunk.is_empty()
                 };
-                if is_pristine {
-                    Some(chunk_coord)
-                } else {
-                    None
-                }
+                if is_pristine { Some(chunk_coord) } else { None }
             })
             .collect();
 
@@ -920,7 +916,10 @@ mod tests {
         let mut terrain = TerrainWorld::default();
         terrain.set_generation_enabled(false);
         let cell = IVec2::new(0, -32);
-        assert!(matches!(generated_cell_for_world(cell), TerrainCell::Solid { .. }));
+        assert!(matches!(
+            generated_cell_for_world(cell),
+            TerrainCell::Solid { .. }
+        ));
         assert_eq!(terrain.get_cell_or_generated(cell), TerrainCell::Empty);
     }
 }

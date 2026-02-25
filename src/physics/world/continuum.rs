@@ -24,6 +24,7 @@ pub struct ContinuumParticleWorld {
     pub f: Vec<Mat2>,
     pub c: Vec<Mat2>,
     pub material_id: Vec<u8>,
+    pub owner_block_id: Vec<usize>,
 }
 
 impl ContinuumParticleWorld {
@@ -43,6 +44,7 @@ impl ContinuumParticleWorld {
         self.f.clear();
         self.c.clear();
         self.material_id.clear();
+        self.owner_block_id.clear();
     }
 
     pub fn spawn_particle(
@@ -61,6 +63,7 @@ impl ContinuumParticleWorld {
         self.f.push(Mat2::IDENTITY);
         self.c.push(Mat2::ZERO);
         self.material_id.push(material.id());
+        self.owner_block_id.push(0);
         index
     }
 

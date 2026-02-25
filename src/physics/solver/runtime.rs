@@ -1,10 +1,10 @@
 use bevy::log::tracing;
 use bevy::prelude::*;
 
-use super::fixed_update::reset_mpm_grid_hierarchy;
+use super::fixed_update::{reset_mpm_grid_hierarchy, reset_mpm_grid_hierarchy_for_mode};
 use super::mpm_water::{MpmWaterParams, rebuild_continuum_from_particle_world};
-use super::terrain_boundary::TerrainBoundarySampler;
 use super::step::step_simulation_once;
+use super::terrain_boundary::TerrainBoundarySampler;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::save_load;
 use crate::physics::scenario::{
@@ -17,7 +17,7 @@ use crate::physics::state::{
     SimulationState, TerrainStreamingSettings,
 };
 use crate::physics::world::continuum::ContinuumParticleWorld;
-use crate::physics::world::grid::GridHierarchy;
+use crate::physics::world::grid::{GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{CHUNK_SIZE_I32, TerrainWorld, world_to_cell};
@@ -89,6 +89,7 @@ pub(crate) fn handle_replay_requests(
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
     mut grid_hierarchy: ResMut<GridHierarchy>,
+    mut mpm_block_index_table: ResMut<MpmBlockIndexTable>,
     mut terrain_boundary_sampler: ResMut<TerrainBoundarySampler>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
@@ -102,7 +103,14 @@ pub(crate) fn handle_replay_requests(
         };
         *particle_world = ParticleWorld::default();
         continuum_world.clear();
-        reset_mpm_grid_hierarchy(&mut grid_hierarchy, particle_world.solver_params.fixed_dt);
+        reset_mpm_grid_hierarchy_for_mode(
+            &mut grid_hierarchy,
+            particle_world.solver_params.fixed_dt,
+            particle_world.solver_params.sub_block_size_cells,
+            spec.mpm_force_single_block,
+            spec.mpm_block_divisions,
+        );
+        mpm_block_index_table.clear();
         terrain_boundary_sampler.clear();
         object_world.clear();
         object_field.clear();
@@ -169,6 +177,7 @@ pub(crate) fn handle_replay_requests(
                     &mut particle_world,
                     &mut continuum_world,
                     &mut grid_hierarchy,
+                    &mut mpm_block_index_table,
                     &mut object_world,
                     &mut object_field,
                     &mut terrain_boundary_sampler,
@@ -206,6 +215,7 @@ pub(crate) fn apply_sim_reset(
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
     mut grid_hierarchy: ResMut<GridHierarchy>,
+    mut mpm_block_index_table: ResMut<MpmBlockIndexTable>,
     mut terrain_boundary_sampler: ResMut<TerrainBoundarySampler>,
     mut object_world: ResMut<ObjectWorld>,
     mut object_field: ResMut<ObjectPhysicsField>,
@@ -250,10 +260,14 @@ pub(crate) fn apply_sim_reset(
                 } else {
                     continuum_world.clear();
                 }
-                reset_mpm_grid_hierarchy(
+                reset_mpm_grid_hierarchy_for_mode(
                     &mut grid_hierarchy,
                     particle_world.solver_params.fixed_dt,
+                    particle_world.solver_params.sub_block_size_cells,
+                    spec.mpm_force_single_block,
+                    spec.mpm_block_divisions,
                 );
+                mpm_block_index_table.clear();
                 terrain_boundary_sampler.clear();
                 replay_state.status_message = if spec.name == "water_drop" {
                     format!(
@@ -272,7 +286,12 @@ pub(crate) fn apply_sim_reset(
     terrain_world.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(*material_params));
     *particle_world = ParticleWorld::default();
     continuum_world.clear();
-    reset_mpm_grid_hierarchy(&mut grid_hierarchy, particle_world.solver_params.fixed_dt);
+    reset_mpm_grid_hierarchy(
+        &mut grid_hierarchy,
+        particle_world.solver_params.fixed_dt,
+        particle_world.solver_params.sub_block_size_cells,
+    );
+    mpm_block_index_table.clear();
     terrain_boundary_sampler.clear();
     object_world.clear();
     object_field.clear();

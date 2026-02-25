@@ -41,7 +41,9 @@
   - `F_p`（変形勾配）
   - `C_p`（APIC affine 行列）
   - `material_id`
+  - `owner_block_id`（現在の所有 block）
 - 水優先フェーズでは `material_id=Water` のみを有効化する。
+- 粒子SoA本体は単一 `Resource` とし、blockごとの粒子配列複製は行わない。
 
 ### 4.3 GridHierarchy
 
@@ -73,6 +75,15 @@
   - `dt_b`（ローカル時間刻み）
   - `activity`（速度・発散・境界接触の統計）
   - `promotion/demotion` ヒステリシス状態
+  - `owner_indices`（更新責務を持つ粒子index集合）
+  - `ghost_indices`（近傍参照のみ行う粒子index集合）
+- `owner_indices` は block 間で互いに素であることを不変条件とする。
+
+### 4.6 Block Index Table
+
+- blockごとの index table（`owner_indices` / `ghost_indices`）は `Resource` で管理する。
+- index table は毎substepで全再構築せず、粒子の block 跨ぎ移動または領域更新時のみ再binningする。
+- `ghost_indices` は read-only 参照用途に限定し、G2Pで直接更新しない。
 
 ## 5. マテリアル
 
@@ -143,6 +154,20 @@
 - 運動量交換（境界・連成・LoD境界）は必ず対称更新する。
 - エネルギーは厳密保存を要求しないが、散逸量の可視化メトリクスを保持する。
 
+### 6.8 block単位並列実行（CPU先行）
+
+- `P2G -> Grid Update -> G2P` はフェーズ単位で実行し、各フェーズ内で block 並列化する。
+- `P2G` は owner/ghost 参照を許可するが、書き込み先は当該 block のノード配列に限定する。
+- `G2P` は `owner_indices` のみ更新し、`ghost_indices` は更新しない。
+- 粒子可変アクセスは「ownerの非重複」を前提とし、デバッグビルドで owner 一致と重複なしを検証する。
+- 高速経路で `unsafe` を使う場合でも、上記不変条件を満たす検証段を必須とする。
+
+### 6.9 段階導入（空間幅均一 -> 空間LoD）
+
+- 第1段階は空間幅均一（全blockで同一 `h_b`）で block 並列 + 時間LoD を導入する。
+- 第2段階で空間LoD（blockごとに `h_b` 可変）を導入し、粗密境界のフラックス交換を追加する。
+- 第1段階では粒子の merge/split（再サンプル）は導入しない。
+
 ## 7. 連成ポリシー
 
 ### 7.1 地形連成（有効）
@@ -185,6 +210,8 @@
   - `interface`
   - `overlay`
 - 連続体粒子は `Resource` 一括管理を基本とし、粒子Entity化は行わない。
+- blockの計算本体データ（grid配列、index table）は `Resource` 管理を基本とする。
+- blockをEntity化する場合は可視化/統計などの軽量メタデータに限定し、数値カーネルは `Resource` 経由で実行する。
 
 ## 10. セーブ/ロードと世界生成
 

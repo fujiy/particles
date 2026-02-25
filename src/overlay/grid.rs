@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use super::*;
+use crate::physics::solver::params_types::SolverParams;
 use crate::physics::world::grid::GridHierarchy;
 use crate::physics::world::sub_block::{rate_level_from_divisor, sub_block_world_bounds};
 
@@ -26,6 +27,7 @@ pub(super) fn draw_tile_overlay(
 pub(super) fn draw_physics_area_overlay(
     mut gizmos: Gizmos,
     overlay_state: Res<PhysicsAreaOverlayState>,
+    solver_params: Res<SolverParams>,
     active_region: Res<PhysicsActiveRegion>,
     region_settings: Res<PhysicsRegionSettings>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
@@ -159,6 +161,7 @@ pub(super) fn draw_physics_area_overlay(
     draw_mpm_grid_overlay(
         &mut gizmos,
         &grid_hierarchy,
+        solver_params.fixed_dt,
         active_world_bounds.map(|(_, _, min, max)| (min, max)),
     );
 }
@@ -194,6 +197,7 @@ fn draw_rect_outline(gizmos: &mut Gizmos, min: Vec2, max: Vec2, color: Color) {
 fn draw_mpm_grid_overlay(
     gizmos: &mut Gizmos,
     grid_hierarchy: &GridHierarchy,
+    frame_dt: f32,
     clip_rect: Option<(Vec2, Vec2)>,
 ) {
     for block in grid_hierarchy.blocks() {
@@ -207,6 +211,7 @@ fn draw_mpm_grid_overlay(
         };
 
         draw_rect_outline(gizmos, block_min, block_max, GRID_MPM_BLOCK_COLOR);
+        draw_mpm_block_rate_level(gizmos, block, frame_dt, draw_min, draw_max);
 
         let step = block.h_b.max(1e-6);
         let max_x_index = block.node_dims.x as i32 - 1;
@@ -251,6 +256,31 @@ fn draw_mpm_grid_overlay(
             );
         }
     }
+}
+
+fn draw_mpm_block_rate_level(
+    gizmos: &mut Gizmos,
+    block: &crate::physics::world::grid::GridBlock,
+    frame_dt: f32,
+    draw_min: Vec2,
+    draw_max: Vec2,
+) {
+    if frame_dt <= 1e-8 || block.dt_b <= 1e-8 {
+        return;
+    }
+    let ratio = (frame_dt / block.dt_b).max(1.0);
+    let k = ratio.log2().round().max(0.0) as u8;
+    let center = (block.world_node_min() + block.world_node_max()) * 0.5;
+    if center.x < draw_min.x
+        || center.x > draw_max.x
+        || center.y < draw_min.y
+        || center.y > draw_max.y
+    {
+        return;
+    }
+    let extent = block.world_node_max() - block.world_node_min();
+    let size = (extent.x.min(extent.y) * 0.18).clamp(0.05, 0.30);
+    draw_number_stroke(gizmos, k, center, size, GRID_SUB_BLOCK_LABEL_BASE_COLOR);
 }
 
 fn clipped_rect(min: Vec2, max: Vec2, clip_rect: Option<(Vec2, Vec2)>) -> Option<(Vec2, Vec2)> {

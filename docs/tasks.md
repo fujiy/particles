@@ -74,22 +74,60 @@
 - 完了条件:
   - 水が地形へ継続侵入せず、境界近傍で発散しない。
 
-### [MPM-WATER-04] 水向けsubcycling（時間LoD）導入
+### [MPM-WATER-04A] block分割 + CPU並列基盤（空間幅均一）
+
+- Status: `In Progress`
+- 背景:
+  - block単位並列を導入するには、まず全block同一 `h_b` の構成で ownership とデータ参照規約を確立する必要がある。
+  - 粒子SoAは単一Resourceを維持し、block側はindex tableで参照する方式を採用する。
+- スコープ:
+  - 粒子の `owner_block_id` と blockごとの `owner_indices/ghost_indices` を導入する。
+  - `P2G/Grid Update/G2P` を block単位ジョブ並列で実行できる基盤を実装する。
+- Subtasks:
+  - [x] `owner_block_id` 更新と再binning（block跨ぎ時のみ）を実装する。
+  - [x] block index table（`owner_indices/ghost_indices`）をResourceとして実装する。
+  - [x] `P2G` を block並列化し、書き込み先ノードを自blockに限定する。
+  - [x] `G2P` を block並列化し、`owner_indices` のみ更新する。
+  - [x] `unsafe` 高速経路を導入する場合の debug assertion（owner一致・重複なし）を実装する。
+  - [x] 回帰テストを追加する（決定論性、owner重複検知、並列/逐次一致）。
+- 完了条件:
+  - 空間幅均一条件で block単位CPU並列が安定稼働し、粒子書き込み競合が発生しない。
+
+### [MPM-WATER-04B] 水向けsubcycling（時間LoD, 空間幅均一）
+
+- Status: `In Progress`
+- 背景:
+  - 時間LoDは ADR の必須要件であり、まず空間幅均一の block構成上で導入する。
+- スコープ:
+  - block ごとの `dt_b` を CFL 条件で計算し、フレーム内 subcycling を実行する。
+  - 対象blockスケジューリングと更新順序の決定論性を確保する。
+- Subtasks:
+  - [x] `dt_b = min(Cu*h/u, Cc*h/(c+u), Ca*sqrt(h/a))` を実装する。
+  - [x] subcycle スケジューラ（frame内の更新タイムライン）を実装する。
+  - [x] 対象blockセットを再利用し、非対象blockを毎回全走査しない経路を実装する。
+  - [x] block 更新順序を決定論的に固定する。
+  - [x] CFL違反検知と自動縮退（安全側 `dt`）を実装する。
+  - [x] 回帰テストを追加する（同一入力で再現性確認）。
+- 完了条件:
+  - 空間幅均一条件で時間LoDが有効化され、CFL違反なしで安定動作する。
+
+### [MPM-WATER-07] 空間LoD block拡張（可変 `h_b`）
 
 - Status: `Planned`
 - 背景:
-  - ADR方針では空間LoD+時間LoDが前提であり、時間LoDの入口として block subcycling が必要。
+  - 広域最適化には時間LoDだけでなく、blockごとに空間幅を変える空間LoDが必要。
+  - 粗密境界で保存量を壊さないため、均一幅フェーズとは別Work Unitで段階導入する。
 - スコープ:
-  - block ごとの `dt_b` を CFL 条件で計算し、フレーム内 subcycling を実行する。
-  - まず同一空間解像度で時間LoDのみ導入する。
+  - blockごとに異なる `h_b` を許可し、粗密境界のフラックス交換と同期点処理を実装する。
+  - 粒子再サンプル（merge/split）は導入せず、まず固定粒子で成立させる。
 - Subtasks:
-  - [ ] `dt_b = min(Cu*h/u, Cc*h/(c+u), Ca*sqrt(h/a))` を実装する。
-  - [ ] subcycle スケジューラ（frame内の更新タイムライン）を実装する。
-  - [ ] block 更新順序を決定論的に固定する。
-  - [ ] CFL違反検知と自動縮退（安全側 `dt`）を実装する。
-  - [ ] 回帰テストを追加する（同一入力で再現性確認）。
+  - [ ] level別 block 管理（`h_b`, `dt_b`）を実装する。
+  - [ ] coarse-fine 境界の質量/運動量フラックス交換を実装する。
+  - [ ] 粗密境界での ghost参照半径と補間規約を実装する。
+  - [ ] 境界補間での保存誤差メトリクスを追加する。
+  - [ ] 空間LoD回帰テストを追加する（境界通過、保存量、安定性）。
 - 完了条件:
-  - 水シミュレーションで時間LoDが有効化され、CFL違反なしで安定動作する。
+  - 可変 `h_b` の空間LoDで、粗密境界を跨ぐ流れでも保存量誤差が許容範囲に収まる。
 
 ### [MPM-WATER-05] 水シミュレーション受け入れテスト整備
 
@@ -245,6 +283,7 @@
   - 水の圧力モデル（`J` ベースと EOS ベース）の採用条件とパラメータ範囲を確定する。
   - 地形SDF境界補正の順序（Grid段 vs G2P段）と侵入率評価規約を確定する。
   - 地形境界SDFの供給方式を「未改変=生成関数、改変=差分LoDキャッシュ」のハイブリッドで確定する。
+  - block並列時の粒子所有権規約（owner/ghost、unsafe経路のassertion条件）を確定する。
 - 既存XPBD系フィードバックの扱い:
   - XPBD外力統合・境界インパルス負債の改善事項は、旧ソルバ保守タスクとして保持し、MLS-MPM水優先フェーズ完了後に再評価する。
 

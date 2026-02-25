@@ -117,6 +117,8 @@ pub struct WaterSurfaceAssertionSpec {
 pub struct ScenarioSpec {
     pub name: String,
     pub reset_fixed_world: bool,
+    pub mpm_force_single_block: bool,
+    pub mpm_block_divisions: Option<UVec2>,
     pub loaded_chunk_min: Option<IVec2>,
     pub loaded_chunk_max: Option<IVec2>,
     pub terrain_fills: Vec<TerrainFillSpec>,
@@ -234,6 +236,8 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
         ScenarioSpec {
             name: "objects_drop".to_string(),
             reset_fixed_world: false,
+            mpm_force_single_block: false,
+            mpm_block_divisions: None,
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -303,6 +307,8 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
         ScenarioSpec {
             name: "water_drop".to_string(),
             reset_fixed_world: false,
+            mpm_force_single_block: false,
+            mpm_block_divisions: Some(UVec2::new(2, 2)),
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -350,6 +356,8 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
         ScenarioSpec {
             name: "terrain_contact_stability".to_string(),
             reset_fixed_world: false,
+            mpm_force_single_block: false,
+            mpm_block_divisions: None,
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -1173,7 +1181,7 @@ mod tests {
     use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
     use crate::physics::world::particle::ParticleWorld;
     use crate::physics::world::terrain::{TerrainCell, TerrainWorld};
-    use bevy::prelude::IVec2;
+    use bevy::prelude::{IVec2, UVec2};
 
     #[test]
     fn parse_toggle_value_true_variants() {
@@ -1217,5 +1225,12 @@ mod tests {
             terrain.get_cell_or_generated(IVec2::new(0, -128)),
             TerrainCell::Empty
         );
+    }
+
+    #[test]
+    fn water_drop_scenario_uses_2x2_mpm_blocks() {
+        let spec = default_scenario_spec_by_name("water_drop").expect("water_drop must exist");
+        assert!(!spec.mpm_force_single_block);
+        assert_eq!(spec.mpm_block_divisions, Some(UVec2::new(2, 2)));
     }
 }

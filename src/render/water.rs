@@ -4,7 +4,7 @@ use bevy::prelude::*;
 
 use super::*;
 use crate::physics::material::particle_properties;
-use crate::physics::world::grid::{GridBlock, GridHierarchy};
+use crate::physics::world::grid::GridHierarchy;
 use crate::physics::world::particle::ParticleMaterial;
 
 pub fn sync_water_dots_to_render(
@@ -88,13 +88,13 @@ pub fn sync_water_dots_to_render(
     water_state.had_any_water = true;
     let rendered_chunks_prev = water_state.rendered_chunks_last_frame.clone();
 
-    let Some(block) = grid_hierarchy.blocks().first() else {
+    let Some(first_block) = grid_hierarchy.blocks().first() else {
         return;
     };
     let dot_threshold = REST_DENSITY * WATER_GRID_DENSITY_THRESHOLD_REST_DENSITY_RATIO;
     let chunk_width = CHUNK_PIXEL_SIZE;
     let chunk_height = CHUNK_PIXEL_SIZE;
-    let splash_points_by_chunk = collect_splash_points_by_chunk(block);
+    let splash_points_by_chunk = collect_splash_points_by_chunk(&grid_hierarchy);
 
     water_state
         .density
@@ -122,7 +122,11 @@ pub fn sync_water_dots_to_render(
                         continue;
                     }
                     let idx = chunk_density_index(px, py, chunk_width, chunk_height);
-                    water_state.density[idx] = sample_grid_density_at_world(block, sample_world);
+                    water_state.density[idx] = sample_grid_density_at_world(
+                        &grid_hierarchy,
+                        first_block.h_b,
+                        sample_world,
+                    );
                 }
             }
 
@@ -291,27 +295,30 @@ fn water_palette_color(x: i32, y: i32, density: f32, dot_threshold: f32) -> [u8;
     palette[(base + boost).min(3)]
 }
 
-fn sample_grid_density_at_world(block: &GridBlock, world_pos: Vec2) -> f32 {
-    let inv_h = 1.0 / block.h_b.max(1e-6);
+fn sample_grid_density_at_world(grid_hierarchy: &GridHierarchy, h: f32, world_pos: Vec2) -> f32 {
+    let inv_h = 1.0 / h.max(1e-6);
     let node_f = world_pos * inv_h;
     let x0 = node_f.x.floor() as i32;
     let y0 = node_f.y.floor() as i32;
     let tx = node_f.x - x0 as f32;
     let ty = node_f.y - y0 as f32;
 
-    let m00 = sample_grid_node_mass(block, IVec2::new(x0, y0));
-    let m10 = sample_grid_node_mass(block, IVec2::new(x0 + 1, y0));
-    let m01 = sample_grid_node_mass(block, IVec2::new(x0, y0 + 1));
-    let m11 = sample_grid_node_mass(block, IVec2::new(x0 + 1, y0 + 1));
+    let m00 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0, y0));
+    let m10 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0 + 1, y0));
+    let m01 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0, y0 + 1));
+    let m11 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0 + 1, y0 + 1));
 
     let mx0 = m00 + (m10 - m00) * tx;
     let mx1 = m01 + (m11 - m01) * tx;
     let m = mx0 + (mx1 - mx0) * ty;
-    m.max(0.0) / (block.h_b * block.h_b).max(1e-6)
+    m.max(0.0) / (h * h).max(1e-6)
 }
 
-fn sample_grid_node_mass(block: &GridBlock, world_node: IVec2) -> f32 {
-    block.node_by_world(world_node).map(|node| node.m).unwrap_or(0.0)
+fn sample_grid_node_mass(grid_hierarchy: &GridHierarchy, world_node: IVec2) -> f32 {
+    grid_hierarchy
+        .node_by_world(world_node)
+        .map(|node| node.m)
+        .unwrap_or(0.0)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -320,41 +327,48 @@ struct RenderSplashPoint {
     equivalent_particle_count: f32,
 }
 
-fn collect_splash_points_by_chunk(block: &GridBlock) -> HashMap<IVec2, Vec<RenderSplashPoint>> {
+fn collect_splash_points_by_chunk(
+    grid_hierarchy: &GridHierarchy,
+) -> HashMap<IVec2, Vec<RenderSplashPoint>> {
     let mut points_by_chunk = HashMap::<IVec2, Vec<RenderSplashPoint>>::new();
     let water_particle_mass = particle_properties(ParticleMaterial::WaterLiquid)
         .mass
         .max(1e-6);
-    let width = block.node_dims.x as usize;
-    let height = block.node_dims.y as usize;
-    for y in 0..height {
-        for x in 0..width {
-            let idx = y * width + x;
-            let node = block.nodes()[idx];
-            let render_mass = node.render_mass_sum;
-            if render_mass <= 1e-6 {
-                continue;
-            }
-            let equivalent_particle_count = render_mass / water_particle_mass;
-            if equivalent_particle_count > WATER_SPLASH_MAX_EQUIV_PARTICLE_COUNT {
-                continue;
-            }
+    for block in grid_hierarchy.blocks() {
+        let width = block.node_dims.x as usize;
+        let height = block.node_dims.y as usize;
+        for y in 0..height {
+            for x in 0..width {
+                let idx = y * width + x;
+                let node = block.nodes()[idx];
+                let render_mass = node.render_mass_sum;
+                if render_mass <= 1e-6 {
+                    continue;
+                }
+                let equivalent_particle_count = render_mass / water_particle_mass;
+                if equivalent_particle_count > WATER_SPLASH_MAX_EQUIV_PARTICLE_COUNT {
+                    continue;
+                }
 
-            let world_node = block.origin_node + IVec2::new(x as i32, y as i32);
-            let default_pos = world_node.as_vec2() * block.h_b;
-            let world_pos = if node.render_mass_pos_sum.is_finite() && render_mass > 1e-6 {
-                node.render_mass_pos_sum / render_mass
-            } else {
-                default_pos
-            };
-            if !world_pos.is_finite() {
-                continue;
+                let world_node = block.origin_node + IVec2::new(x as i32, y as i32);
+                let default_pos = world_node.as_vec2() * block.h_b;
+                let world_pos = if node.render_mass_pos_sum.is_finite() && render_mass > 1e-6 {
+                    node.render_mass_pos_sum / render_mass
+                } else {
+                    default_pos
+                };
+                if !world_pos.is_finite() {
+                    continue;
+                }
+                let chunk = chunk_coord_from_world(world_pos);
+                points_by_chunk
+                    .entry(chunk)
+                    .or_default()
+                    .push(RenderSplashPoint {
+                        world_pos,
+                        equivalent_particle_count,
+                    });
             }
-            let chunk = chunk_coord_from_world(world_pos);
-            points_by_chunk.entry(chunk).or_default().push(RenderSplashPoint {
-                world_pos,
-                equivalent_particle_count,
-            });
         }
     }
     points_by_chunk
