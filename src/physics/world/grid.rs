@@ -136,10 +136,25 @@ pub struct GridHierarchy {
     node_lookup: HashMap<IVec2, GridNodeLocation>,
 }
 
+/// 8方向の隣接オフセット (x, y)。インデックスは `NEIGHBOR_DIR_*` 定数で参照可能。
+pub const NEIGHBOR_OFFSETS: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
 #[derive(Resource, Clone, Debug, Default)]
 pub struct MpmBlockIndexTable {
     owner_indices: Vec<Vec<usize>>,
     ghost_indices: Vec<Vec<usize>>,
+    /// 各blockの8方向隣接block index。`NEIGHBOR_OFFSETS` と同順。
+    /// blockレイアウト変化時に `rebuild_neighbor_map` で再計算。
+    block_neighbors: Vec<[Option<usize>; 8]>,
     moved_particle_count: usize,
     rebinned_this_step: bool,
 }
@@ -261,6 +276,7 @@ impl MpmBlockIndexTable {
     pub fn clear(&mut self) {
         self.owner_indices.clear();
         self.ghost_indices.clear();
+        self.block_neighbors.clear();
         self.moved_particle_count = 0;
         self.rebinned_this_step = false;
     }
@@ -274,6 +290,55 @@ impl MpmBlockIndexTable {
         if self.ghost_indices.len() > block_count {
             self.ghost_indices.truncate(block_count);
         }
+        // block_neighbors は rebuild_neighbor_map で明示的に更新する
+        if self.block_neighbors.len() != block_count {
+            self.block_neighbors.clear();
+        }
+    }
+
+    /// blockレイアウトから8方向隣接マップを構築する。
+    ///
+    /// 2ブロックが「隣接」とみなされる条件: それぞれのノード範囲のgapが両軸ともに0
+    /// (= 直接接触しており、quadratic B-splineカーネルが境界ノードに届く)。
+    /// blockが追加・削除されたタイミングで呼び出すこと。
+    pub fn rebuild_neighbor_map(&mut self, blocks: &[GridBlock]) {
+        let block_count = blocks.len();
+        self.block_neighbors.clear();
+        self.block_neighbors
+            .resize_with(block_count, || [None; 8]);
+        for (i, bi) in blocks.iter().enumerate() {
+            let i_origin = bi.origin_node;
+            let i_end = i_origin + bi.node_dims.as_ivec2(); // exclusive
+            let mut slot = 0usize;
+            'outer: for (j, bj) in blocks.iter().enumerate() {
+                if j == i {
+                    continue;
+                }
+                let j_origin = bj.origin_node;
+                let j_end = j_origin + bj.node_dims.as_ivec2();
+                let gap_x = (i_origin.x - j_end.x).max(j_origin.x - i_end.x).max(0);
+                let gap_y = (i_origin.y - j_end.y).max(j_origin.y - i_end.y).max(0);
+                if gap_x == 0 && gap_y == 0 {
+                    if slot < 8 {
+                        self.block_neighbors[i][slot] = Some(j);
+                        slot += 1;
+                    } else {
+                        // 8超の隣接は理論上ない（2Dグリッドでは最大8）
+                        debug_assert!(false, "block {} has more than 8 neighbors", i);
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+
+    /// block_index の8連結隣接blockのindexを返す。
+    /// `None` スロットは隣接blockが存在しない方向。
+    pub fn neighbor_block_indices(&self, block_index: usize) -> [Option<usize>; 8] {
+        self.block_neighbors
+            .get(block_index)
+            .copied()
+            .unwrap_or([None; 8])
     }
 
     pub fn owner_indices(&self, block_index: usize) -> &[usize] {

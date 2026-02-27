@@ -7,10 +7,11 @@ use bevy::log::tracing;
 use super::mpm_water::{
     MpmTerrainBoundaryParams, MpmWaterParams, active_blocks_from_index_table, cfl_violated,
     estimate_block_max_speed, rebuild_continuum_from_particle_world, refresh_block_index_table,
-    sound_speed_mps, step_block_set_coupled, sync_continuum_to_particle_world,
+    refresh_ghost_indices_for_block, sound_speed_mps, step_block_set_coupled,
+    sync_continuum_to_particle_world,
 };
 use super::terrain_boundary::TerrainBoundarySampler;
-use super::types::StepSimulationTiming;
+use super::types::{MpmPhase, StepSimulationTiming};
 use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::{GridHierarchy, MpmBlockIndexTable};
@@ -193,6 +194,14 @@ pub(crate) fn step_simulation_once(
             schedule.push(Reverse((0, block_index)));
             scheduled_tick_by_block[block_index] = Some(0);
         }
+        // Accumulated phase timings across all scheduler ticks for the profile bar.
+        let mut acc_refresh_block_table_secs = 0.0_f64;
+        let mut acc_ghost_refresh_secs = 0.0_f64;
+        let mut acc_p2g_mass_momentum_secs = 0.0_f64;
+        let mut acc_terrain_boundary_secs = 0.0_f64;
+        let mut acc_p2g_pressure_secs = 0.0_f64;
+        let mut acc_grid_update_secs = 0.0_f64;
+        let mut acc_g2p_secs = 0.0_f64;
         terrain_boundary_sampler.begin_step();
         while let Some(Reverse((tick, block_index))) = schedule.pop() {
             if tick >= frame_units {
@@ -216,13 +225,19 @@ pub(crate) fn step_simulation_once(
                 let drift_units = tick.saturating_sub(block_time_units[block]);
                 owner_block_drift_secs[block] = drift_units as f32 * base_dt_unit;
             }
-            refresh_block_index_table(
-                continuum_world,
-                grid_hierarchy,
-                mpm_block_index_table,
-                &owner_block_drift_secs,
-                mpm_params.gravity,
-            );
+            {
+                let _span =
+                    tracing::info_span!("physics::mpm::refresh_block_table").entered();
+                let t0 = std::time::Instant::now();
+                refresh_block_index_table(
+                    continuum_world,
+                    grid_hierarchy,
+                    mpm_block_index_table,
+                    &owner_block_drift_secs,
+                    mpm_params.gravity,
+                );
+                acc_refresh_block_table_secs += t0.elapsed().as_secs_f64();
+            }
             active_blocks = active_blocks_from_index_table(mpm_block_index_table);
             if active_blocks.is_empty() {
                 continue;
@@ -281,19 +296,54 @@ pub(crate) fn step_simulation_once(
                 }
             }
 
-            let _ = step_block_set_coupled(
-                continuum_world,
-                grid_hierarchy,
-                mpm_block_index_table,
-                &active_blocks,
-                &due_blocks,
-                &owner_block_drift_secs,
-                Some(terrain_world),
-                Some(terrain_boundary_sampler),
-                &mpm_params,
-                &terrain_boundary_params,
-                parallel_enabled,
-            );
+            // Per-boundary ghost refresh: rebuild ghost_indices for every
+            // active block from its neighbor blocks' owner particles.
+            //
+            // `refresh_block_index_table` above has an early-exit when no
+            // ownership change occurred, which leaves ghost_indices stale for
+            // particles that moved within their block toward a boundary without
+            // crossing it.  Rebuilding per-block here (O(neighbors' particles)
+            // per block) guarantees that P2G always sees the correct ghost
+            // contributions regardless of whether a rebin was triggered.
+            {
+                let _span =
+                    tracing::info_span!("physics::mpm::ghost_refresh").entered();
+                let t0 = std::time::Instant::now();
+                for &active_block in &active_blocks {
+                    refresh_ghost_indices_for_block(
+                        continuum_world,
+                        grid_hierarchy,
+                        mpm_block_index_table,
+                        active_block,
+                        &owner_block_drift_secs,
+                        mpm_params.gravity,
+                    );
+                }
+                acc_ghost_refresh_secs += t0.elapsed().as_secs_f64();
+            }
+
+            {
+                let _span =
+                    tracing::info_span!("physics::mpm::step_block_coupled").entered();
+                let step_metrics = step_block_set_coupled(
+                    continuum_world,
+                    grid_hierarchy,
+                    mpm_block_index_table,
+                    &active_blocks,
+                    &due_blocks,
+                    &owner_block_drift_secs,
+                    Some(terrain_world),
+                    Some(terrain_boundary_sampler),
+                    &mpm_params,
+                    &terrain_boundary_params,
+                    parallel_enabled,
+                );
+                acc_p2g_mass_momentum_secs += step_metrics.p2g_mass_momentum_wall_secs;
+                acc_terrain_boundary_secs += step_metrics.terrain_boundary_sample_wall_secs;
+                acc_p2g_pressure_secs += step_metrics.p2g_pressure_wall_secs;
+                acc_grid_update_secs += step_metrics.grid_update_wall_secs;
+                acc_g2p_secs += step_metrics.g2p_wall_secs;
+            }
 
             for (due_block, step_units) in applied_step_units {
                 block_time_units[due_block] = block_time_units[due_block]
@@ -327,26 +377,46 @@ pub(crate) fn step_simulation_once(
             }
         }
         terrain_boundary_sampler.end_step();
-        if !sync_continuum_to_particle_world(particle_world, continuum_world) {
-            let _ =
-                rebuild_continuum_from_particle_world(particle_world, continuum_world, &mpm_params);
-            refresh_block_index_table(
-                continuum_world,
-                grid_hierarchy,
-                mpm_block_index_table,
-                &zero_owner_block_drift_secs,
-                mpm_params.gravity,
-            );
-            let _ = sync_continuum_to_particle_world(particle_world, continuum_world);
+        let mut acc_sync_continuum_secs = 0.0_f64;
+        {
+            let _span = tracing::info_span!("physics::mpm::sync_continuum").entered();
+            let t0 = std::time::Instant::now();
+            if !sync_continuum_to_particle_world(particle_world, continuum_world) {
+                let _ = rebuild_continuum_from_particle_world(
+                    particle_world,
+                    continuum_world,
+                    &mpm_params,
+                );
+                refresh_block_index_table(
+                    continuum_world,
+                    grid_hierarchy,
+                    mpm_block_index_table,
+                    &zero_owner_block_drift_secs,
+                    mpm_params.gravity,
+                );
+                let _ = sync_continuum_to_particle_world(particle_world, continuum_world);
+            }
+            acc_sync_continuum_secs = t0.elapsed().as_secs_f64();
         }
         let particle_step_secs = particle_step_start.elapsed().as_secs_f64();
         let particle_step_cpu_secs = (process_cpu_time_seconds()
             .unwrap_or(particle_step_cpu_start)
             - particle_step_cpu_start)
             .max(0.0);
+        let mpm_phases = vec![
+            MpmPhase { name: "mpm::refresh_block_table", wall_secs: acc_refresh_block_table_secs },
+            MpmPhase { name: "mpm::ghost_refresh", wall_secs: acc_ghost_refresh_secs },
+            MpmPhase { name: "mpm::p2g_mass_momentum", wall_secs: acc_p2g_mass_momentum_secs },
+            MpmPhase { name: "mpm::terrain_boundary", wall_secs: acc_terrain_boundary_secs },
+            MpmPhase { name: "mpm::p2g_pressure", wall_secs: acc_p2g_pressure_secs },
+            MpmPhase { name: "mpm::grid_update", wall_secs: acc_grid_update_secs },
+            MpmPhase { name: "mpm::g2p", wall_secs: acc_g2p_secs },
+            MpmPhase { name: "mpm::sync_continuum", wall_secs: acc_sync_continuum_secs },
+        ];
         return StepSimulationTiming {
             particle_step_secs,
             particle_step_cpu_secs,
+            mpm_phases,
             ..StepSimulationTiming::default()
         };
     }
@@ -378,6 +448,7 @@ pub(crate) fn step_simulation_once(
             .unwrap_or(terrain_fracture_cpu_start)
             - terrain_fracture_cpu_start)
             .max(0.0),
+        mpm_phases: vec![],
     }
 }
 
