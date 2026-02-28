@@ -271,9 +271,10 @@ pub(super) fn update_physics_area_overlay_button_label(
             .iter()
             .map(|block| block.active_node_count())
             .sum();
+        let mpm_color_count = grid_hierarchy.block_color_count();
         label.0 = if overlay_state.enabled {
             format!(
-                "Physics Area Overlay: ON (A:{} T:{} P:{} SB:{} D:{:.2} MPM:{} AN:{})",
+                "Physics Area Overlay: ON (A:{} T:{} P:{} SB:{} D:{:.2} MPM:{} AN:{} C:{})",
                 active_region.active_chunks.len(),
                 render_diagnostics
                     .terrain_updated_chunk_highlight_frames
@@ -285,6 +286,7 @@ pub(super) fn update_physics_area_overlay_button_label(
                 max_debt,
                 mpm_block_count,
                 mpm_active_nodes,
+                mpm_color_count,
             )
         } else {
             "Physics Area Overlay: OFF".to_string()
@@ -352,9 +354,10 @@ pub(super) fn update_overlay_info_text(
                 .iter()
                 .map(|block| block.active_node_count())
                 .sum();
+            let mpm_color_count = grid_hierarchy.block_color_count();
             lines.push(format!(
-                "MPM Grid: blocks {} active nodes {}",
-                mpm_block_count, mpm_active_nodes
+                "MPM Grid: blocks {} active nodes {} colors {}",
+                mpm_block_count, mpm_active_nodes, mpm_color_count
             ));
         }
         if tile_overlay_state.enabled {

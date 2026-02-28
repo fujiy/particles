@@ -23,11 +23,20 @@ const GRID_HALO_CHUNK_COLOR: Color = Color::srgba(0.16, 0.88, 0.60, 0.72);
 const GRID_PHYSICS_REGION_COLOR: Color = Color::srgba(0.96, 0.72, 0.12, 0.98);
 const GRID_TERRAIN_UPDATED_COLOR: Color = Color::srgba(0.13, 0.85, 0.92, 1.00);
 const GRID_PARTICLE_UPDATED_COLOR: Color = Color::srgba(0.76, 0.56, 0.98, 1.00);
-const GRID_MPM_BLOCK_COLOR: Color = Color::srgba(1.00, 0.62, 0.18, 0.92);
-const GRID_MPM_BLOCK_COARSE_COLOR: Color = Color::srgba(0.20, 0.80, 0.96, 0.88);
-const GRID_MPM_NODE_COLOR: Color = Color::srgba(1.00, 0.80, 0.36, 0.30);
-const GRID_MPM_NODE_COARSE_COLOR: Color = Color::srgba(0.20, 0.80, 0.96, 0.22);
-const GRID_MPM_ACTIVE_NODE_COLOR: Color = Color::srgba(0.98, 0.94, 0.20, 0.95);
+const GRID_MPM_BLOCK_COLOR_PALETTE: [Color; 12] = [
+    Color::srgba(0.94, 0.41, 0.16, 0.90),
+    Color::srgba(0.17, 0.74, 0.93, 0.90),
+    Color::srgba(0.33, 0.80, 0.42, 0.90),
+    Color::srgba(0.95, 0.66, 0.21, 0.90),
+    Color::srgba(0.75, 0.42, 0.94, 0.90),
+    Color::srgba(0.98, 0.33, 0.58, 0.90),
+    Color::srgba(0.12, 0.82, 0.72, 0.90),
+    Color::srgba(0.96, 0.51, 0.29, 0.90),
+    Color::srgba(0.42, 0.62, 0.97, 0.90),
+    Color::srgba(0.62, 0.79, 0.18, 0.90),
+    Color::srgba(0.90, 0.46, 0.74, 0.90),
+    Color::srgba(0.28, 0.88, 0.54, 0.90),
+];
 const GRID_SUB_BLOCK_DEBT_HOT_COLOR: Color = Color::srgba(0.96, 0.12, 0.12, 0.96);
 const GRID_SUB_BLOCK_LABEL_BASE_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.98);
 const GRID_OBJECT_COLOR: Color = Color::srgba(0.92, 0.36, 0.12, 0.70);

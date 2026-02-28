@@ -162,6 +162,32 @@
 - 完了条件:
   - 可変 `h_b` の空間LoDで、粗密境界を跨ぐ流れでも保存量誤差が許容範囲に収まる。
 
+### [MPM-WATER-07A] block彩色実験（辺/頂点共有の排他彩色）
+
+- Status: `In Progress`
+- 背景:
+  - block単位並列（特に色分け方式）を検討するため、与えられた空間LoD block配置に対し、
+    「辺または頂点を共有するblock同士が同色にならない」彩色アルゴリズムの挙動確認が必要。
+- スコープ:
+  - block配置を入力として、未彩色状態からの貪欲彩色を実装する。
+  - block配置変更時（split/merge）に彩色をリセットして再計算する。
+  - 専用 test world で1秒ごとのランダム split/merge と再彩色を繰り返し、overlayで色を可視化する。
+- Subtasks:
+  - [x] `GridHierarchy` に「辺/頂点共有を競合とする」貪欲彩色を実装する。
+  - [x] blockごとの `color class` を保持し、レイアウト再構築時に再彩色する。
+  - [x] `block_coloring_experiment` scenario を追加する（level 3 blockを8x8敷き詰め、地形なし）。
+  - [x] scenario実行中に1秒ごとランダム split/merge を行う実験ランタイムを追加する。
+  - [x] Physics Area Overlay の MPM grid を level色分けから color class 色分けへ切り替える。
+  - [ ] 彩色結果の色数推移とレイアウト変化コスト（再構築時間）を計測し、並列戦略検討材料として記録する。
+- Progress:
+  - 2026-02-28: 貪欲彩色（辺/頂点共有の排他制約）を `GridHierarchy` に実装し、layout変更時の再彩色を有効化。
+  - 2026-02-28: 専用scenario `block_coloring_experiment` を追加し、初期 level 3 block 16x16 配置を導入。
+  - 2026-02-28: 実験反復の高速化のため、初期配置を level 3 block 8x8 へ縮小。
+  - 2026-02-28: 1秒ごとのランダム split/merge（数個操作）+ 再彩色の実験ランタイムを実装。
+  - 2026-02-28: Physics Area Overlay を color class ベースに変更し、MPM color count表示を追加。
+- 完了条件:
+  - 専用scenarioで split/merge 後も辺/頂点共有blockの同色衝突が発生せず、overlayで色分け状態を連続確認できる。
+
 ### [MPM-WATER-05] 水シミュレーション受け入れテスト整備
 
 - Status: `Planned`

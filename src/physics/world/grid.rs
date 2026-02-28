@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::HashMap;
 
 use bevy::prelude::*;
@@ -18,6 +19,7 @@ pub struct GridBlock {
     pub dt_b: f32,
     pub origin_node: IVec2,
     pub node_dims: UVec2,
+    color_class: u16,
     owned_nodes: Vec<bool>,
     nodes: Vec<GridNode>,
     active_nodes: Vec<IVec2>,
@@ -40,6 +42,7 @@ impl GridBlock {
             dt_b,
             origin_node,
             node_dims,
+            color_class: 0,
             owned_nodes: vec![true; node_count],
             nodes: vec![GridNode::default(); node_count],
             active_nodes: Vec::new(),
@@ -56,6 +59,25 @@ impl GridBlock {
 
     pub fn active_node_count(&self) -> usize {
         self.active_nodes.len()
+    }
+
+    pub fn color_class(&self) -> u16 {
+        self.color_class
+    }
+
+    fn set_color_class(&mut self, color_class: u16) {
+        self.color_class = color_class;
+    }
+
+    pub fn cell_dims(&self) -> UVec2 {
+        self.node_dims.saturating_sub(UVec2::ONE)
+    }
+
+    pub fn world_cell_bounds(&self) -> (IVec2, IVec2) {
+        let scale = self.node_scale();
+        let min = self.origin_node * scale;
+        let max = (self.origin_node + self.cell_dims().as_ivec2()) * scale;
+        (min, max)
     }
 
     pub fn nodes(&self) -> &[GridNode] {
@@ -249,13 +271,25 @@ impl GridHierarchy {
         &mut self.blocks
     }
 
+    pub fn block_color_count(&self) -> usize {
+        self.blocks
+            .iter()
+            .map(|block| block.color_class() as usize)
+            .max()
+            .map(|max_color| max_color + 1)
+            .unwrap_or(0)
+    }
+
     pub fn node_location(&self, world_node: IVec2) -> Option<GridNodeLocation> {
         self.node_lookup.get(&world_node).copied()
     }
 
     pub fn node_by_world(&self, world_node: IVec2) -> Option<&GridNode> {
         let location = self.node_location(world_node)?;
-        self.blocks.get(location.block_index)?.nodes().get(location.local_index)
+        self.blocks
+            .get(location.block_index)?
+            .nodes()
+            .get(location.local_index)
     }
 
     pub fn node_mut_by_world(&mut self, world_node: IVec2) -> Option<&mut GridNode> {
@@ -317,6 +351,12 @@ impl GridHierarchy {
         self.rebuild_node_lookup();
     }
 
+    pub fn replace_blocks(&mut self, mut blocks: Vec<GridBlock>) {
+        blocks.sort_by_key(|b| (b.level, b.origin_node.y, b.origin_node.x));
+        self.blocks = blocks;
+        self.rebuild_node_lookup();
+    }
+
     fn prefer_block_owner(&self, lhs_block_index: usize, rhs_block_index: usize) -> bool {
         let lhs = &self.blocks[lhs_block_index];
         let rhs = &self.blocks[rhs_block_index];
@@ -373,8 +413,78 @@ impl GridHierarchy {
                 }
             }
         }
+        self.recompute_block_colors();
     }
 
+    fn recompute_block_colors(&mut self) {
+        let block_count = self.blocks.len();
+        if block_count == 0 {
+            return;
+        }
+
+        let mut conflict_neighbors = vec![Vec::<usize>::new(); block_count];
+        for i in 0..block_count {
+            for j in (i + 1)..block_count {
+                if !blocks_touch_by_edge_or_vertex(&self.blocks[i], &self.blocks[j]) {
+                    continue;
+                }
+                conflict_neighbors[i].push(j);
+                conflict_neighbors[j].push(i);
+            }
+        }
+
+        let mut order: Vec<usize> = (0..block_count).collect();
+        order.sort_by_key(|&block_index| {
+            let block = &self.blocks[block_index];
+            (
+                Reverse(conflict_neighbors[block_index].len()),
+                block.level,
+                block.origin_node.y,
+                block.origin_node.x,
+            )
+        });
+
+        let mut colors = vec![u16::MAX; block_count];
+        let mut used = vec![false; block_count.saturating_add(1)];
+        for block_index in order {
+            used.fill(false);
+            for &neighbor_index in &conflict_neighbors[block_index] {
+                let neighbor_color = colors[neighbor_index];
+                if neighbor_color == u16::MAX {
+                    continue;
+                }
+                let color_index = neighbor_color as usize;
+                if color_index >= used.len() {
+                    used.resize(color_index + 1, false);
+                }
+                used[color_index] = true;
+            }
+            let mut color = 0usize;
+            while color < used.len() && used[color] {
+                color += 1;
+            }
+            debug_assert!(color <= u16::MAX as usize);
+            colors[block_index] = color.min(u16::MAX as usize) as u16;
+        }
+
+        for (block_index, &color) in colors.iter().enumerate() {
+            if let Some(block) = self.blocks.get_mut(block_index) {
+                block.set_color_class(color);
+            }
+        }
+    }
+}
+
+fn intervals_touch_or_overlap(min_a: i32, max_a: i32, min_b: i32, max_b: i32) -> bool {
+    let gap = (min_a - max_b).max(min_b - max_a).max(0);
+    gap == 0
+}
+
+fn blocks_touch_by_edge_or_vertex(lhs: &GridBlock, rhs: &GridBlock) -> bool {
+    let (lhs_min, lhs_max) = lhs.world_cell_bounds();
+    let (rhs_min, rhs_max) = rhs.world_cell_bounds();
+    intervals_touch_or_overlap(lhs_min.x, lhs_max.x, rhs_min.x, rhs_max.x)
+        && intervals_touch_or_overlap(lhs_min.y, lhs_max.y, rhs_min.y, rhs_max.y)
 }
 
 impl MpmBlockIndexTable {
@@ -606,6 +716,78 @@ mod tests {
         let owner = hierarchy
             .node_location(shared)
             .expect("shared node must have an owner");
-        assert_eq!(hierarchy.blocks()[owner.block_index].origin_node, IVec2::new(0, 0));
+        assert_eq!(
+            hierarchy.blocks()[owner.block_index].origin_node,
+            IVec2::new(0, 0)
+        );
+    }
+
+    #[test]
+    fn greedy_coloring_assigns_distinct_colors_to_2x2_blocks() {
+        let mut hierarchy = GridHierarchy::default();
+        for y in 0..2 {
+            for x in 0..2 {
+                hierarchy.add_block(GridBlock::new(
+                    0,
+                    0.25,
+                    1.0 / 60.0,
+                    IVec2::new(x * 16, y * 16),
+                    UVec2::new(17, 17),
+                ));
+            }
+        }
+
+        assert_eq!(hierarchy.block_color_count(), 4);
+        let blocks = hierarchy.blocks();
+        for i in 0..blocks.len() {
+            for j in (i + 1)..blocks.len() {
+                if blocks_touch_by_edge_or_vertex(&blocks[i], &blocks[j]) {
+                    assert_ne!(
+                        blocks[i].color_class(),
+                        blocks[j].color_class(),
+                        "touching blocks must have different colors"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn greedy_coloring_distinguishes_vertex_touching_blocks() {
+        let mut hierarchy = GridHierarchy::default();
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(0, 0),
+            UVec2::new(17, 17),
+        ));
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(16, 0),
+            UVec2::new(17, 17),
+        ));
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(16, 16),
+            UVec2::new(17, 17),
+        ));
+
+        let blocks = hierarchy.blocks();
+        let color_origin_00 = blocks
+            .iter()
+            .find(|block| block.origin_node == IVec2::new(0, 0))
+            .map(GridBlock::color_class)
+            .expect("origin (0,0) block must exist");
+        let color_origin_16_16 = blocks
+            .iter()
+            .find(|block| block.origin_node == IVec2::new(16, 16))
+            .map(GridBlock::color_class)
+            .expect("origin (16,16) block must exist");
+        assert_ne!(color_origin_00, color_origin_16_16);
     }
 }

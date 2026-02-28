@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::time::Instant;
 
 use bevy::log::tracing;
@@ -9,8 +10,9 @@ use super::terrain_boundary::TerrainBoundarySampler;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::state::{
-    PhysicsActiveRegion, PhysicsRegionSettings, PhysicsStepProfileSegment, PhysicsStepProfiler,
-    ReplayState, SimulationParallelSettings, SimulationPerfMetrics, SimulationState,
+    BlockColoringExperimentState, BlockColoringLayoutBlock, PhysicsActiveRegion,
+    PhysicsRegionSettings, PhysicsStepProfileSegment, PhysicsStepProfiler, ReplayState,
+    SimulationParallelSettings, SimulationPerfMetrics, SimulationState,
 };
 use crate::physics::world::constants::{
     CELL_SIZE_M, CHUNK_SIZE_I32, DEFAULT_MPM_BLOCK_NODE_SPAN, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
@@ -21,6 +23,11 @@ use crate::physics::world::grid::{GridBlock, GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::{ParticleActivityState, ParticleWorld};
 use crate::physics::world::terrain::{TerrainWorld, world_to_cell};
+
+const BLOCK_COLORING_EXPERIMENT_SCENARIO: &str = "block_coloring_experiment";
+const BLOCK_COLORING_EXPERIMENT_INTERVAL_SECS: f32 = 1.0;
+const BLOCK_COLORING_EXPERIMENT_OPS_MIN: usize = 2;
+const BLOCK_COLORING_EXPERIMENT_OPS_MAX: usize = 5;
 
 pub(crate) fn initialize_default_world(
     mut terrain_world: ResMut<TerrainWorld>,
@@ -69,17 +76,29 @@ pub(crate) fn step_physics(
     mpm_resources: (ResMut<GridHierarchy>, ResMut<MpmBlockIndexTable>),
     object_resources: (ResMut<ObjectWorld>, ResMut<ObjectPhysicsField>),
     mut terrain_boundary_sampler: ResMut<TerrainBoundarySampler>,
-    mut perf_metrics: ResMut<SimulationPerfMetrics>,
-    mut step_profiler: ResMut<PhysicsStepProfiler>,
+    profiling_resources: (
+        ResMut<SimulationPerfMetrics>,
+        ResMut<PhysicsStepProfiler>,
+        ResMut<BlockColoringExperimentState>,
+    ),
     camera_transforms: Query<&Transform, With<Camera2d>>,
 ) {
     let (mut grid_hierarchy, mut mpm_block_index_table) = mpm_resources;
     let (mut object_world, mut object_field) = object_resources;
+    let (mut perf_metrics, mut step_profiler, mut block_coloring_experiment) = profiling_resources;
     particle_world.set_solver_params(*solver_params);
     particle_world.set_material_params(*material_params);
     let terrain_boundary_radius_m = terrain_boundary_radius_m(*material_params);
     let _step_span = tracing::info_span!("physics::fixed_step").entered();
     let should_step = sim_state.running || sim_state.step_once;
+    update_block_coloring_experiment(
+        &replay_state,
+        should_step,
+        solver_params.fixed_dt,
+        &mut grid_hierarchy,
+        &mut mpm_block_index_table,
+        &mut block_coloring_experiment,
+    );
     if replay_state.enabled || !region_settings.enabled {
         particle_world.set_active_chunk_region_bounds(None, None);
         particle_world.set_active_halo_chunks(0);
@@ -324,6 +343,307 @@ fn ensure_chunks_loaded_in_rect(
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+struct MergeCandidate {
+    child_level: u8,
+    parent_origin: IVec2,
+}
+
+fn update_block_coloring_experiment(
+    replay_state: &ReplayState,
+    should_step: bool,
+    fixed_dt: f32,
+    grid_hierarchy: &mut GridHierarchy,
+    mpm_block_index_table: &mut MpmBlockIndexTable,
+    experiment_state: &mut BlockColoringExperimentState,
+) {
+    let is_active = replay_state.enabled
+        && replay_state.scenario_name.as_deref() == Some(BLOCK_COLORING_EXPERIMENT_SCENARIO);
+    if !is_active {
+        reset_block_coloring_experiment_state(experiment_state);
+        return;
+    }
+
+    if !experiment_state.initialized {
+        initialize_block_coloring_experiment_state(experiment_state, grid_hierarchy);
+    } else if !block_coloring_layout_matches_grid(experiment_state, grid_hierarchy) {
+        initialize_block_coloring_experiment_state(experiment_state, grid_hierarchy);
+    }
+    if !should_step || !experiment_state.enabled {
+        return;
+    }
+
+    experiment_state.elapsed_secs += fixed_dt.max(0.0);
+    let mut layout_changed = false;
+    while experiment_state.elapsed_secs >= BLOCK_COLORING_EXPERIMENT_INTERVAL_SECS {
+        experiment_state.elapsed_secs -= BLOCK_COLORING_EXPERIMENT_INTERVAL_SECS;
+        layout_changed |= mutate_block_coloring_layout(experiment_state);
+    }
+    if !layout_changed {
+        return;
+    }
+
+    rebuild_grid_from_block_coloring_layout(
+        grid_hierarchy,
+        mpm_block_index_table,
+        experiment_state,
+        fixed_dt,
+    );
+}
+
+fn reset_block_coloring_experiment_state(experiment_state: &mut BlockColoringExperimentState) {
+    experiment_state.enabled = false;
+    experiment_state.initialized = false;
+    experiment_state.elapsed_secs = 0.0;
+    experiment_state.blocks.clear();
+}
+
+fn initialize_block_coloring_experiment_state(
+    experiment_state: &mut BlockColoringExperimentState,
+    grid_hierarchy: &GridHierarchy,
+) {
+    let mut blocks = Vec::with_capacity(grid_hierarchy.block_count());
+    let mut max_level = 0_u8;
+    for block in grid_hierarchy.blocks() {
+        blocks.push(BlockColoringLayoutBlock {
+            origin_node: block.origin_node,
+            level: block.level,
+        });
+        max_level = max_level.max(block.level);
+    }
+    blocks.sort_by_key(|block| (block.level, block.origin_node.y, block.origin_node.x));
+    blocks.dedup();
+    experiment_state.block_cell_dims = grid_hierarchy
+        .blocks()
+        .first()
+        .map(GridBlock::cell_dims)
+        .unwrap_or(UVec2::new(16, 16));
+    experiment_state.min_level = 0;
+    experiment_state.max_level = max_level;
+    experiment_state.blocks = blocks;
+    experiment_state.elapsed_secs = 0.0;
+    experiment_state.enabled = true;
+    experiment_state.initialized = true;
+}
+
+fn block_coloring_layout_matches_grid(
+    experiment_state: &BlockColoringExperimentState,
+    grid_hierarchy: &GridHierarchy,
+) -> bool {
+    if experiment_state.blocks.len() != grid_hierarchy.block_count() {
+        return false;
+    }
+    experiment_state
+        .blocks
+        .iter()
+        .zip(grid_hierarchy.blocks().iter())
+        .all(|(layout_block, grid_block)| {
+            layout_block.level == grid_block.level
+                && layout_block.origin_node == grid_block.origin_node
+        })
+}
+
+fn mutate_block_coloring_layout(experiment_state: &mut BlockColoringExperimentState) -> bool {
+    if experiment_state.blocks.is_empty() {
+        return false;
+    }
+    let op_span = BLOCK_COLORING_EXPERIMENT_OPS_MAX
+        .saturating_sub(BLOCK_COLORING_EXPERIMENT_OPS_MIN)
+        .saturating_add(1);
+    let op_count = BLOCK_COLORING_EXPERIMENT_OPS_MIN
+        + (next_random_u64(&mut experiment_state.rng_state) as usize % op_span.max(1));
+    let mut changed = false;
+    for _ in 0..op_count {
+        let split_candidates = collect_split_candidates(experiment_state);
+        let merge_candidates = collect_merge_candidates(experiment_state);
+        let can_split = !split_candidates.is_empty();
+        let can_merge = !merge_candidates.is_empty();
+        if !can_split && !can_merge {
+            break;
+        }
+
+        let pick_split = if can_split && can_merge {
+            (next_random_u64(&mut experiment_state.rng_state) & 1) == 0
+        } else {
+            can_split
+        };
+        if pick_split {
+            changed |= apply_random_split(experiment_state, &split_candidates);
+        } else {
+            changed |= apply_random_merge(experiment_state, &merge_candidates);
+        }
+    }
+    if changed {
+        experiment_state
+            .blocks
+            .sort_by_key(|block| (block.level, block.origin_node.y, block.origin_node.x));
+        experiment_state.blocks.dedup();
+    }
+    changed
+}
+
+fn collect_split_candidates(experiment_state: &BlockColoringExperimentState) -> Vec<usize> {
+    experiment_state
+        .blocks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, block)| {
+            if block.level > experiment_state.min_level {
+                Some(index)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn collect_merge_candidates(
+    experiment_state: &BlockColoringExperimentState,
+) -> Vec<MergeCandidate> {
+    let span_x = experiment_state.block_cell_dims.x.max(1) as i32;
+    let span_y = experiment_state.block_cell_dims.y.max(1) as i32;
+    let block_set: HashSet<(u8, IVec2)> = experiment_state
+        .blocks
+        .iter()
+        .map(|block| (block.level, block.origin_node))
+        .collect();
+    let mut visited = HashSet::<(u8, IVec2)>::new();
+    let mut candidates = Vec::new();
+    for block in &experiment_state.blocks {
+        if block.level.saturating_add(1) > experiment_state.max_level {
+            continue;
+        }
+        let parent_origin = IVec2::new(
+            block.origin_node.x.div_euclid(2),
+            block.origin_node.y.div_euclid(2),
+        );
+        if !visited.insert((block.level, parent_origin)) {
+            continue;
+        }
+        let child_base = parent_origin * 2;
+        let child_origins = [
+            child_base,
+            child_base + IVec2::new(span_x, 0),
+            child_base + IVec2::new(0, span_y),
+            child_base + IVec2::new(span_x, span_y),
+        ];
+        if child_origins
+            .iter()
+            .all(|origin| block_set.contains(&(block.level, *origin)))
+        {
+            candidates.push(MergeCandidate {
+                child_level: block.level,
+                parent_origin,
+            });
+        }
+    }
+    candidates
+}
+
+fn apply_random_split(
+    experiment_state: &mut BlockColoringExperimentState,
+    split_candidates: &[usize],
+) -> bool {
+    if split_candidates.is_empty() {
+        return false;
+    }
+    let pick = split_candidates
+        [next_random_u64(&mut experiment_state.rng_state) as usize % split_candidates.len()];
+    if pick >= experiment_state.blocks.len() {
+        return false;
+    }
+    let block = experiment_state.blocks.swap_remove(pick);
+    if block.level <= experiment_state.min_level {
+        experiment_state.blocks.push(block);
+        return false;
+    }
+
+    let span_x = experiment_state.block_cell_dims.x.max(1) as i32;
+    let span_y = experiment_state.block_cell_dims.y.max(1) as i32;
+    let child_level = block.level.saturating_sub(1);
+    let child_base = block.origin_node * 2;
+    let child_origins = [
+        child_base,
+        child_base + IVec2::new(span_x, 0),
+        child_base + IVec2::new(0, span_y),
+        child_base + IVec2::new(span_x, span_y),
+    ];
+    for origin in child_origins {
+        experiment_state.blocks.push(BlockColoringLayoutBlock {
+            origin_node: origin,
+            level: child_level,
+        });
+    }
+    true
+}
+
+fn apply_random_merge(
+    experiment_state: &mut BlockColoringExperimentState,
+    merge_candidates: &[MergeCandidate],
+) -> bool {
+    if merge_candidates.is_empty() {
+        return false;
+    }
+    let candidate = merge_candidates
+        [next_random_u64(&mut experiment_state.rng_state) as usize % merge_candidates.len()];
+    if candidate.child_level.saturating_add(1) > experiment_state.max_level {
+        return false;
+    }
+
+    let span_x = experiment_state.block_cell_dims.x.max(1) as i32;
+    let span_y = experiment_state.block_cell_dims.y.max(1) as i32;
+    let child_base = candidate.parent_origin * 2;
+    let child_origins = [
+        child_base,
+        child_base + IVec2::new(span_x, 0),
+        child_base + IVec2::new(0, span_y),
+        child_base + IVec2::new(span_x, span_y),
+    ];
+    experiment_state.blocks.retain(|block| {
+        !(block.level == candidate.child_level && child_origins.contains(&block.origin_node))
+    });
+    experiment_state.blocks.push(BlockColoringLayoutBlock {
+        origin_node: candidate.parent_origin,
+        level: candidate.child_level.saturating_add(1),
+    });
+    true
+}
+
+fn rebuild_grid_from_block_coloring_layout(
+    grid_hierarchy: &mut GridHierarchy,
+    mpm_block_index_table: &mut MpmBlockIndexTable,
+    experiment_state: &BlockColoringExperimentState,
+    fixed_dt: f32,
+) {
+    let cell_dims = experiment_state.block_cell_dims.max(UVec2::ONE);
+    let node_dims = cell_dims + UVec2::ONE;
+    let mut blocks = Vec::with_capacity(experiment_state.blocks.len());
+    for block in &experiment_state.blocks {
+        let h_b = CELL_SIZE_M * (1_u32 << block.level.min(30)) as f32;
+        blocks.push(GridBlock::new(
+            block.level,
+            h_b,
+            fixed_dt.max(1e-6),
+            block.origin_node,
+            node_dims,
+        ));
+    }
+    grid_hierarchy.replace_blocks(blocks);
+    mpm_block_index_table.clear();
+}
+
+fn next_random_u64(state: &mut u64) -> u64 {
+    let mut x = *state;
+    if x == 0 {
+        x = 0x9E_37_79_B9_7F_4A_7C_15;
+    }
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
 pub(crate) fn reset_mpm_grid_hierarchy(
     grid_hierarchy: &mut GridHierarchy,
     dt: f32,
@@ -344,31 +664,25 @@ pub(crate) fn reset_mpm_grid_hierarchy_for_mode(
 ) {
     // level_map が指定されている場合は最優先で適用する（空間LoDシナリオ用）
     if !level_map.is_empty() {
-        reset_mpm_grid_hierarchy_with_level_map(
-            grid_hierarchy,
-            dt,
-            block_node_span,
-            level_map,
-        );
+        reset_mpm_grid_hierarchy_with_level_map(grid_hierarchy, dt, block_node_span, level_map);
         return;
     }
     let (min_cell, total_node_dims) = mpm_grid_bounds_with_padding();
     let total_cell_dims = (total_node_dims - IVec2::ONE).max(IVec2::ONE);
     if force_single_block {
-        grid_hierarchy.clear();
-        grid_hierarchy.add_block(GridBlock::new(
+        grid_hierarchy.replace_blocks(vec![GridBlock::new(
             0,
             CELL_SIZE_M,
             dt.max(1e-6),
             min_cell,
             UVec2::new(total_node_dims.x as u32, total_node_dims.y as u32),
-        ));
+        )]);
         return;
     }
     if let Some(divisions) = block_divisions {
         let div_x = divisions.x.max(1) as i32;
         let div_y = divisions.y.max(1) as i32;
-        grid_hierarchy.clear();
+        let mut blocks = Vec::with_capacity((div_x * div_y) as usize);
         for by in 0..div_y {
             let y0 = by * total_cell_dims.y / div_y;
             let y1 = (by + 1) * total_cell_dims.y / div_y;
@@ -383,7 +697,7 @@ pub(crate) fn reset_mpm_grid_hierarchy_for_mode(
                 if block_cell_w <= 0 {
                     continue;
                 }
-                grid_hierarchy.add_block(GridBlock::new(
+                blocks.push(GridBlock::new(
                     0,
                     CELL_SIZE_M,
                     dt.max(1e-6),
@@ -392,6 +706,7 @@ pub(crate) fn reset_mpm_grid_hierarchy_for_mode(
                 ));
             }
         }
+        grid_hierarchy.replace_blocks(blocks);
         return;
     }
     reset_mpm_grid_hierarchy(grid_hierarchy, dt, block_node_span);
@@ -400,13 +715,14 @@ pub(crate) fn reset_mpm_grid_hierarchy_for_mode(
 fn reset_mpm_grid_hierarchy_with_span(grid_hierarchy: &mut GridHierarchy, dt: f32, span: i32) {
     let (min_cell, total_node_dims) = mpm_grid_bounds_with_padding();
     let total_cell_dims = (total_node_dims - IVec2::ONE).max(IVec2::ONE);
+    let mut blocks = Vec::new();
     let mut by = 0;
     while by < total_cell_dims.y {
         let block_cell_h = (total_cell_dims.y - by).min(span);
         let mut bx = 0;
         while bx < total_cell_dims.x {
             let block_cell_w = (total_cell_dims.x - bx).min(span);
-            grid_hierarchy.add_block(GridBlock::new(
+            blocks.push(GridBlock::new(
                 0,
                 CELL_SIZE_M,
                 dt.max(1e-6),
@@ -417,6 +733,7 @@ fn reset_mpm_grid_hierarchy_with_span(grid_hierarchy: &mut GridHierarchy, dt: f3
         }
         by += span;
     }
+    grid_hierarchy.replace_blocks(blocks);
 }
 
 /// 指定されたlevel mapからMPM gridを構築する（空間LoD対応）。
@@ -431,8 +748,8 @@ pub(crate) fn reset_mpm_grid_hierarchy_with_level_map(
     block_node_span: i32,
     level_entries: &[(IVec2, u8, UVec2)],
 ) {
-    grid_hierarchy.clear();
     let default_span = block_node_span.max(1) as u32;
+    let mut blocks = Vec::with_capacity(level_entries.len());
     for &(origin, level, block_cell_dims) in level_entries {
         let h_b = CELL_SIZE_M * (1u32 << level) as f32;
         let cell_dims = if block_cell_dims == UVec2::ZERO {
@@ -441,8 +758,9 @@ pub(crate) fn reset_mpm_grid_hierarchy_with_level_map(
             UVec2::new(block_cell_dims.x.max(1), block_cell_dims.y.max(1))
         };
         let node_dims = cell_dims + UVec2::ONE;
-        grid_hierarchy.add_block(GridBlock::new(level, h_b, dt.max(1e-6), origin, node_dims));
+        blocks.push(GridBlock::new(level, h_b, dt.max(1e-6), origin, node_dims));
     }
+    grid_hierarchy.replace_blocks(blocks);
 }
 
 fn mpm_grid_bounds_with_padding() -> (IVec2, IVec2) {

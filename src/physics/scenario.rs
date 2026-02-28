@@ -228,6 +228,7 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
     let world_min_cell: i32 = -32;
     let world_max_cell: i32 = 31;
     let lod_block_dims = UVec2::new(16, 16);
+    let block_coloring_block_dims = UVec2::new(16, 16);
     let loaded_chunk_min = IVec2::new(
         world_min_cell.div_euclid(CHUNK_SIZE_I32),
         world_min_cell.div_euclid(CHUNK_SIZE_I32),
@@ -478,7 +479,54 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
             },
             water_surface_assertion: None,
         },
+        // block_coloring_experiment:
+        // - 空間LoDのblock彩色実験専用
+        // - 地形/粒子なし
+        // - level 3 blockを8x8敷き詰めて開始
+        ScenarioSpec {
+            name: "block_coloring_experiment".to_string(),
+            reset_fixed_world: false,
+            mpm_force_single_block: false,
+            mpm_block_divisions: None,
+            mpm_level_map: build_block_coloring_experiment_level_map(
+                3,
+                8,
+                block_coloring_block_dims,
+            ),
+            loaded_chunk_min: Some(IVec2::new(-1, -1)),
+            loaded_chunk_max: Some(IVec2::new(0, 0)),
+            terrain_fills: Vec::new(),
+            free_particles: Vec::new(),
+            objects: Vec::new(),
+            step_count: 600,
+            thresholds: ScenarioThresholds {
+                max_penetration_rate: None,
+                max_max_speed_mps: None,
+                min_sleep_ratio: None,
+            },
+            water_surface_assertion: None,
+        },
     ]
+}
+
+fn build_block_coloring_experiment_level_map(
+    level: u8,
+    side_block_count: i32,
+    block_cell_dims: UVec2,
+) -> Vec<(IVec2, u8, UVec2)> {
+    let side_block_count = side_block_count.max(1);
+    let span_x = block_cell_dims.x.max(1) as i32;
+    let span_y = block_cell_dims.y.max(1) as i32;
+    let start_x = -(side_block_count / 2) * span_x;
+    let start_y = -(side_block_count / 2) * span_y;
+    let mut level_map = Vec::with_capacity((side_block_count * side_block_count) as usize);
+    for by in 0..side_block_count {
+        for bx in 0..side_block_count {
+            let origin = IVec2::new(start_x + bx * span_x, start_y + by * span_y);
+            level_map.push((origin, level, block_cell_dims));
+        }
+    }
+    level_map
 }
 
 pub fn default_scenario_names() -> Vec<String> {
@@ -1380,5 +1428,20 @@ mod tests {
                 "max y boundary must align to chunk"
             );
         }
+    }
+
+    #[test]
+    fn block_coloring_experiment_has_expected_initial_level_map() {
+        let spec = default_scenario_spec_by_name("block_coloring_experiment")
+            .expect("block_coloring_experiment must exist");
+        assert_eq!(spec.terrain_fills.len(), 0);
+        assert_eq!(spec.free_particles.len(), 0);
+        assert_eq!(spec.objects.len(), 0);
+        assert_eq!(spec.mpm_level_map.len(), 8 * 8);
+        assert!(
+            spec.mpm_level_map
+                .iter()
+                .all(|(_, level, dims)| { *level == 3 && *dims == UVec2::new(16, 16) })
+        );
     }
 }

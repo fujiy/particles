@@ -120,6 +120,39 @@ pub struct ReplayState {
     pub baseline_solid_cell_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockColoringLayoutBlock {
+    pub origin_node: IVec2,
+    pub level: u8,
+}
+
+#[derive(Resource, Debug)]
+pub struct BlockColoringExperimentState {
+    pub enabled: bool,
+    pub initialized: bool,
+    pub elapsed_secs: f32,
+    pub rng_state: u64,
+    pub max_level: u8,
+    pub min_level: u8,
+    pub block_cell_dims: UVec2,
+    pub blocks: Vec<BlockColoringLayoutBlock>,
+}
+
+impl Default for BlockColoringExperimentState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            initialized: false,
+            elapsed_secs: 0.0,
+            rng_state: 0x6D_2B_79_F5_A1_C3_E9_57,
+            max_level: 0,
+            min_level: 0,
+            block_cell_dims: UVec2::new(16, 16),
+            blocks: Vec::new(),
+        }
+    }
+}
+
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
 pub enum SimFixedSet {
     Physics,

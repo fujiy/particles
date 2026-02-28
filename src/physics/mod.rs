@@ -19,10 +19,11 @@ use self::solver::{
     stream_terrain_around_camera,
 };
 use self::state::{
-    LoadDefaultWorldRequest, LoadMapRequest, PhysicsActiveRegion, PhysicsRegionSettings,
-    PhysicsStepProfiler, ReplayLoadScenarioRequest, ReplaySaveArtifactRequest, ReplayState,
-    ResetSimulationRequest, SaveMapRequest, SimFixedSet, SimUpdateSet, SimulationParallelSettings,
-    SimulationPerfMetrics, SimulationState, TerrainStreamingSettings,
+    BlockColoringExperimentState, LoadDefaultWorldRequest, LoadMapRequest, PhysicsActiveRegion,
+    PhysicsRegionSettings, PhysicsStepProfiler, ReplayLoadScenarioRequest,
+    ReplaySaveArtifactRequest, ReplayState, ResetSimulationRequest, SaveMapRequest, SimFixedSet,
+    SimUpdateSet, SimulationParallelSettings, SimulationPerfMetrics, SimulationState,
+    TerrainStreamingSettings,
 };
 use self::world::object::{ObjectPhysicsField, ObjectWorld};
 use self::world::particle::ParticleWorld;
@@ -63,6 +64,7 @@ impl Plugin for PhysicsPlugin {
             .init_resource::<PhysicsActiveRegion>()
             .init_resource::<TerrainStreamingSettings>()
             .init_resource::<ReplayState>()
+            .init_resource::<BlockColoringExperimentState>()
             .init_resource::<SimulationPerfMetrics>()
             .init_resource::<PhysicsStepProfiler>()
             .init_resource::<SolverParams>()
