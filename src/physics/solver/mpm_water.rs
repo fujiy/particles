@@ -199,8 +199,10 @@ pub fn refresh_block_index_table(
     let prev_block_count = index_table.block_count();
     index_table.ensure_block_count(block_count);
     // blockレイアウトが変化した場合のみ隣接マップを再構築する
-    if prev_block_count != block_count || index_table.neighbor_block_indices(0) == [None; 8] {
-        index_table.rebuild_neighbor_map(grid.blocks());
+    if prev_block_count != block_count
+        || (block_count > 0 && index_table.neighbor_block_indices(0).is_empty())
+    {
+        index_table.rebuild_neighbor_map(grid);
     }
     index_table.set_rebinned_this_step(false);
     index_table.set_moved_particle_count(0);
@@ -246,10 +248,8 @@ pub fn refresh_block_index_table(
         if best_missing > 0 {
             let mut candidates = Vec::with_capacity(9);
             candidates.push(next_owner);
-            for maybe_neighbor in index_table.neighbor_block_indices(next_owner) {
-                if let Some(neighbor) = maybe_neighbor {
-                    candidates.push(neighbor);
-                }
+            for &neighbor in index_table.neighbor_block_indices(next_owner) {
+                candidates.push(neighbor);
             }
             candidates.sort_unstable();
             candidates.dedup();
@@ -2118,8 +2118,7 @@ mod tests {
         assert!(
             crossed,
             "particle did not cross the coarse/fine boundary in expected time; x={:.6}, vx={:.6}",
-            particles.x[0].x,
-            particles.v[0].x
+            particles.x[0].x, particles.v[0].x
         );
         assert!(
             min_vx > 0.15,

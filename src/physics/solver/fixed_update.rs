@@ -349,6 +349,15 @@ struct MergeCandidate {
     parent_origin: IVec2,
 }
 
+fn parent_origin_from_child_origin(child_origin: IVec2, block_span: IVec2) -> IVec2 {
+    let span_x = block_span.x.max(1);
+    let span_y = block_span.y.max(1);
+    IVec2::new(
+        child_origin.x.div_euclid(span_x * 2) * span_x,
+        child_origin.y.div_euclid(span_y * 2) * span_y,
+    )
+}
+
 fn update_block_coloring_experiment(
     replay_state: &ReplayState,
     should_step: bool,
@@ -502,6 +511,7 @@ fn collect_merge_candidates(
 ) -> Vec<MergeCandidate> {
     let span_x = experiment_state.block_cell_dims.x.max(1) as i32;
     let span_y = experiment_state.block_cell_dims.y.max(1) as i32;
+    let block_span = IVec2::new(span_x, span_y);
     let block_set: HashSet<(u8, IVec2)> = experiment_state
         .blocks
         .iter()
@@ -513,10 +523,7 @@ fn collect_merge_candidates(
         if block.level.saturating_add(1) > experiment_state.max_level {
             continue;
         }
-        let parent_origin = IVec2::new(
-            block.origin_node.x.div_euclid(2),
-            block.origin_node.y.div_euclid(2),
-        );
+        let parent_origin = parent_origin_from_child_origin(block.origin_node, block_span);
         if !visited.insert((block.level, parent_origin)) {
             continue;
         }
@@ -775,4 +782,27 @@ fn mpm_grid_bounds_with_padding() -> (IVec2, IVec2) {
     );
     let node_dims = (max_cell_exclusive - min_cell + IVec2::ONE).max(IVec2::ONE);
     (min_cell, node_dims)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parent_origin_from_child_origin;
+    use bevy::prelude::IVec2;
+
+    #[test]
+    fn parent_origin_from_child_origin_snaps_to_block_span_grid() {
+        let span = IVec2::new(16, 16);
+        assert_eq!(
+            parent_origin_from_child_origin(IVec2::new(-128, -96), span),
+            IVec2::new(-64, -48)
+        );
+        assert_eq!(
+            parent_origin_from_child_origin(IVec2::new(-112, -80), span),
+            IVec2::new(-64, -48)
+        );
+        assert_eq!(
+            parent_origin_from_child_origin(IVec2::new(16, 16), span),
+            IVec2::new(0, 0)
+        );
+    }
 }

@@ -178,6 +178,7 @@
   - [x] `block_coloring_experiment` scenario を追加する（level 3 blockを8x8敷き詰め、地形なし）。
   - [x] scenario実行中に1秒ごとランダム split/merge を行う実験ランタイムを追加する。
   - [x] Physics Area Overlay の MPM grid を level色分けから color class 色分けへ切り替える。
+  - [x] `GridHierarchy` の block管理を quadtree index（linear quadtree）化し、位置クエリ/近傍構築を最適化する。
   - [ ] 彩色結果の色数推移とレイアウト変化コスト（再構築時間）を計測し、並列戦略検討材料として記録する。
 - Progress:
   - 2026-02-28: 貪欲彩色（辺/頂点共有の排他制約）を `GridHierarchy` に実装し、layout変更時の再彩色を有効化。
@@ -185,6 +186,7 @@
   - 2026-02-28: 実験反復の高速化のため、初期配置を level 3 block 8x8 へ縮小。
   - 2026-02-28: 1秒ごとのランダム split/merge（数個操作）+ 再彩色の実験ランタイムを実装。
   - 2026-02-28: Physics Area Overlay を color class ベースに変更し、MPM color count表示を追加。
+  - 2026-02-28: `GridHierarchy` に quadtree index を導入し、`block_index_for_position` と block近傍構築を quadtree ベースに切替。
 - 完了条件:
   - 専用scenarioで split/merge 後も辺/頂点共有blockの同色衝突が発生せず、overlayで色分け状態を連続確認できる。
 

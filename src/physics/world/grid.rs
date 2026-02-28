@@ -3,6 +3,8 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
+use crate::physics::world::constants::CELL_SIZE_M;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GridNode {
     pub m: f32,
@@ -228,27 +230,31 @@ impl GridBlock {
 pub struct GridHierarchy {
     blocks: Vec<GridBlock>,
     node_lookup: HashMap<IVec2, GridNodeLocation>,
+    quadtree_index: Option<GridQuadtreeIndex>,
 }
 
-/// 8方向の隣接オフセット (x, y)。インデックスは `NEIGHBOR_DIR_*` 定数で参照可能。
-pub const NEIGHBOR_OFFSETS: [(i32, i32); 8] = [
-    (-1, -1),
-    (0, -1),
-    (1, -1),
-    (-1, 0),
-    (1, 0),
-    (-1, 1),
-    (0, 1),
-    (1, 1),
-];
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct QuadtreeBlockKey {
+    level: u8,
+    qx: i32,
+    qy: i32,
+}
+
+#[derive(Clone, Debug)]
+struct GridQuadtreeIndex {
+    block_span_cells: IVec2,
+    min_level: u8,
+    max_level: u8,
+    block_index_by_key: HashMap<QuadtreeBlockKey, usize>,
+}
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct MpmBlockIndexTable {
     owner_indices: Vec<Vec<usize>>,
     ghost_indices: Vec<Vec<usize>>,
-    /// 各blockの8方向隣接block index。`NEIGHBOR_OFFSETS` と同順。
+    /// 各blockに接触（辺/頂点共有）する近傍block index。
     /// blockレイアウト変化時に `rebuild_neighbor_map` で再計算。
-    block_neighbors: Vec<[Option<usize>; 8]>,
+    block_neighbors: Vec<Vec<usize>>,
     moved_particle_count: usize,
     rebinned_this_step: bool,
 }
@@ -257,6 +263,7 @@ impl GridHierarchy {
     pub fn clear(&mut self) {
         self.blocks.clear();
         self.node_lookup.clear();
+        self.quadtree_index = None;
     }
 
     pub fn block_count(&self) -> usize {
@@ -280,6 +287,10 @@ impl GridHierarchy {
             .unwrap_or(0)
     }
 
+    pub fn uses_quadtree_index(&self) -> bool {
+        self.quadtree_index.is_some()
+    }
+
     pub fn node_location(&self, world_node: IVec2) -> Option<GridNodeLocation> {
         self.node_lookup.get(&world_node).copied()
     }
@@ -301,6 +312,9 @@ impl GridHierarchy {
     }
 
     pub fn block_index_for_position(&self, world_pos: Vec2) -> Option<usize> {
+        if let Some(block_index) = self.quadtree_block_index_for_position(world_pos) {
+            return Some(block_index);
+        }
         // 可変h_b対応: floor(x/h_b)でノード座標を計算し、まず直接lookupを試みる。
         // 見つかればそのblockを返す。見つからない場合は各blockのAABBで判定する。
         // AABBは [origin * h, (origin + dims) * h) = floor(x/h) が [origin, origin+dims-1] に収まる範囲。
@@ -342,6 +356,55 @@ impl GridHierarchy {
             }
         }
         best_index
+    }
+
+    pub fn touching_block_indices(&self, block_index: usize) -> Vec<usize> {
+        let Some(block) = self.blocks.get(block_index) else {
+            return Vec::new();
+        };
+        if let Some(index) = &self.quadtree_index {
+            let (min, max) = block.world_cell_bounds();
+            let mut neighbors = Vec::<usize>::new();
+            for level in index.min_level..=index.max_level {
+                let scale = 1_i32 << level.min(30);
+                let step_x = (index.block_span_cells.x * scale).max(1);
+                let step_y = (index.block_span_cells.y * scale).max(1);
+                let qx_start = min.x.div_euclid(step_x) - 1;
+                let qx_end = max.x.div_euclid(step_x);
+                let qy_start = min.y.div_euclid(step_y) - 1;
+                let qy_end = max.y.div_euclid(step_y);
+                for qy in qy_start..=qy_end {
+                    for qx in qx_start..=qx_end {
+                        let key = QuadtreeBlockKey { level, qx, qy };
+                        let Some(&candidate) = index.block_index_by_key.get(&key) else {
+                            continue;
+                        };
+                        if candidate != block_index {
+                            neighbors.push(candidate);
+                        }
+                    }
+                }
+            }
+            neighbors.sort_unstable();
+            neighbors.dedup();
+            neighbors.retain(|&candidate| {
+                self.blocks
+                    .get(candidate)
+                    .map(|other| blocks_touch_by_edge_or_vertex(block, other))
+                    .unwrap_or(false)
+            });
+            return neighbors;
+        }
+        let mut neighbors = Vec::new();
+        for (candidate, other) in self.blocks.iter().enumerate() {
+            if candidate == block_index {
+                continue;
+            }
+            if blocks_touch_by_edge_or_vertex(block, other) {
+                neighbors.push(candidate);
+            }
+        }
+        neighbors
     }
 
     pub fn add_block(&mut self, block: GridBlock) {
@@ -413,7 +476,74 @@ impl GridHierarchy {
                 }
             }
         }
+        self.rebuild_quadtree_index();
         self.recompute_block_colors();
+    }
+
+    fn rebuild_quadtree_index(&mut self) {
+        let Some(first) = self.blocks.first() else {
+            self.quadtree_index = None;
+            return;
+        };
+        let span = first.cell_dims().as_ivec2();
+        if span.x <= 0 || span.y <= 0 {
+            self.quadtree_index = None;
+            return;
+        }
+        let mut min_level = u8::MAX;
+        let mut max_level = 0_u8;
+        let mut block_index_by_key = HashMap::<QuadtreeBlockKey, usize>::new();
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            if block.cell_dims().as_ivec2() != span {
+                self.quadtree_index = None;
+                return;
+            }
+            if block.origin_node.x.rem_euclid(span.x) != 0
+                || block.origin_node.y.rem_euclid(span.y) != 0
+            {
+                self.quadtree_index = None;
+                return;
+            }
+            let key = QuadtreeBlockKey {
+                level: block.level,
+                qx: block.origin_node.x.div_euclid(span.x),
+                qy: block.origin_node.y.div_euclid(span.y),
+            };
+            if block_index_by_key.insert(key, block_index).is_some() {
+                self.quadtree_index = None;
+                return;
+            }
+            min_level = min_level.min(block.level);
+            max_level = max_level.max(block.level);
+        }
+        self.quadtree_index = Some(GridQuadtreeIndex {
+            block_span_cells: span,
+            min_level: if min_level == u8::MAX { 0 } else { min_level },
+            max_level,
+            block_index_by_key,
+        });
+    }
+
+    fn quadtree_block_index_for_position(&self, world_pos: Vec2) -> Option<usize> {
+        let index = self.quadtree_index.as_ref()?;
+        let base_cell = IVec2::new(
+            (world_pos.x / CELL_SIZE_M).floor() as i32,
+            (world_pos.y / CELL_SIZE_M).floor() as i32,
+        );
+        for level in index.min_level..=index.max_level {
+            let scale = 1_i32 << level.min(30);
+            let step_x = (index.block_span_cells.x * scale).max(1);
+            let step_y = (index.block_span_cells.y * scale).max(1);
+            let key = QuadtreeBlockKey {
+                level,
+                qx: base_cell.x.div_euclid(step_x),
+                qy: base_cell.y.div_euclid(step_y),
+            };
+            if let Some(&block_index) = index.block_index_by_key.get(&key) {
+                return Some(block_index);
+            }
+        }
+        None
     }
 
     fn recompute_block_colors(&mut self) {
@@ -423,13 +553,26 @@ impl GridHierarchy {
         }
 
         let mut conflict_neighbors = vec![Vec::<usize>::new(); block_count];
-        for i in 0..block_count {
-            for j in (i + 1)..block_count {
-                if !blocks_touch_by_edge_or_vertex(&self.blocks[i], &self.blocks[j]) {
-                    continue;
+        if self.quadtree_index.is_some() {
+            for i in 0..block_count {
+                for neighbor in self.touching_block_indices(i) {
+                    if neighbor == i {
+                        continue;
+                    }
+                    if !conflict_neighbors[i].contains(&neighbor) {
+                        conflict_neighbors[i].push(neighbor);
+                    }
                 }
-                conflict_neighbors[i].push(j);
-                conflict_neighbors[j].push(i);
+            }
+        } else {
+            for i in 0..block_count {
+                for j in (i + 1)..block_count {
+                    if !blocks_touch_by_edge_or_vertex(&self.blocks[i], &self.blocks[j]) {
+                        continue;
+                    }
+                    conflict_neighbors[i].push(j);
+                    conflict_neighbors[j].push(i);
+                }
             }
         }
 
@@ -499,60 +642,39 @@ impl MpmBlockIndexTable {
     pub fn ensure_block_count(&mut self, block_count: usize) {
         self.owner_indices.resize_with(block_count, Vec::new);
         self.ghost_indices.resize_with(block_count, Vec::new);
+        self.block_neighbors.resize_with(block_count, Vec::new);
         if self.owner_indices.len() > block_count {
             self.owner_indices.truncate(block_count);
         }
         if self.ghost_indices.len() > block_count {
             self.ghost_indices.truncate(block_count);
         }
-        // block_neighbors は rebuild_neighbor_map で明示的に更新する
-        if self.block_neighbors.len() != block_count {
-            self.block_neighbors.clear();
+        if self.block_neighbors.len() > block_count {
+            self.block_neighbors.truncate(block_count);
         }
     }
 
-    /// blockレイアウトから8方向隣接マップを構築する。
+    /// blockレイアウトから近傍マップを構築する。
     ///
-    /// 2ブロックが「隣接」とみなされる条件: それぞれのノード範囲のgapが両軸ともに0
-    /// (= 直接接触しており、quadratic B-splineカーネルが境界ノードに届く)。
+    /// 2ブロックが「近傍」とみなされる条件: 辺または頂点を共有して接触していること。
     /// blockが追加・削除されたタイミングで呼び出すこと。
-    pub fn rebuild_neighbor_map(&mut self, blocks: &[GridBlock]) {
-        let block_count = blocks.len();
+    pub fn rebuild_neighbor_map(&mut self, grid: &GridHierarchy) {
+        let block_count = grid.block_count();
         self.block_neighbors.clear();
-        self.block_neighbors.resize_with(block_count, || [None; 8]);
-        for (i, bi) in blocks.iter().enumerate() {
-            let i_origin = bi.origin_node;
-            let i_end = i_origin + bi.node_dims.as_ivec2(); // exclusive
-            let mut slot = 0usize;
-            'outer: for (j, bj) in blocks.iter().enumerate() {
-                if j == i {
-                    continue;
-                }
-                let j_origin = bj.origin_node;
-                let j_end = j_origin + bj.node_dims.as_ivec2();
-                let gap_x = (i_origin.x - j_end.x).max(j_origin.x - i_end.x).max(0);
-                let gap_y = (i_origin.y - j_end.y).max(j_origin.y - i_end.y).max(0);
-                if gap_x == 0 && gap_y == 0 {
-                    if slot < 8 {
-                        self.block_neighbors[i][slot] = Some(j);
-                        slot += 1;
-                    } else {
-                        // 8超の隣接は理論上ない（2Dグリッドでは最大8）
-                        debug_assert!(false, "block {} has more than 8 neighbors", i);
-                        break 'outer;
-                    }
-                }
+        self.block_neighbors.resize_with(block_count, Vec::new);
+        for i in 0..block_count {
+            if let Some(slot) = self.block_neighbors.get_mut(i) {
+                *slot = grid.touching_block_indices(i);
             }
         }
     }
 
-    /// block_index の8連結隣接blockのindexを返す。
-    /// `None` スロットは隣接blockが存在しない方向。
-    pub fn neighbor_block_indices(&self, block_index: usize) -> [Option<usize>; 8] {
+    /// block_index に接触する近傍blockのindex一覧を返す。
+    pub fn neighbor_block_indices(&self, block_index: usize) -> &[usize] {
         self.block_neighbors
             .get(block_index)
-            .copied()
-            .unwrap_or([None; 8])
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     pub fn owner_indices(&self, block_index: usize) -> &[usize] {
@@ -789,5 +911,97 @@ mod tests {
             .map(GridBlock::color_class)
             .expect("origin (16,16) block must exist");
         assert_ne!(color_origin_00, color_origin_16_16);
+    }
+
+    fn find_block_index(hierarchy: &GridHierarchy, level: u8, origin: IVec2) -> usize {
+        hierarchy
+            .blocks()
+            .iter()
+            .enumerate()
+            .find_map(|(index, block)| {
+                if block.level == level && block.origin_node == origin {
+                    Some(index)
+                } else {
+                    None
+                }
+            })
+            .expect("target block must exist")
+    }
+
+    #[test]
+    fn quadtree_index_enabled_for_aligned_layout_and_position_query() {
+        let mut hierarchy = GridHierarchy::default();
+        hierarchy.add_block(GridBlock::new(
+            1,
+            0.5,
+            1.0 / 60.0,
+            IVec2::new(-16, 0),
+            UVec2::new(17, 17),
+        ));
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(0, 0),
+            UVec2::new(17, 17),
+        ));
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(16, 0),
+            UVec2::new(17, 17),
+        ));
+        assert!(hierarchy.uses_quadtree_index());
+
+        let coarse_index = find_block_index(&hierarchy, 1, IVec2::new(-16, 0));
+        let fine_index = find_block_index(&hierarchy, 0, IVec2::new(0, 0));
+        assert_eq!(
+            hierarchy.block_index_for_position(Vec2::new(-7.5, 1.0)),
+            Some(coarse_index)
+        );
+        assert_eq!(
+            hierarchy.block_index_for_position(Vec2::new(1.0, 1.0)),
+            Some(fine_index)
+        );
+    }
+
+    #[test]
+    fn touching_block_indices_use_quadtree_candidates() {
+        let mut hierarchy = GridHierarchy::default();
+        hierarchy.add_block(GridBlock::new(
+            1,
+            0.5,
+            1.0 / 60.0,
+            IVec2::new(-16, 0),
+            UVec2::new(17, 17),
+        ));
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(0, 0),
+            UVec2::new(17, 17),
+        ));
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(0, 16),
+            UVec2::new(17, 17),
+        ));
+        assert!(hierarchy.uses_quadtree_index());
+
+        let coarse_index = find_block_index(&hierarchy, 1, IVec2::new(-16, 0));
+        let mut neighbors = hierarchy.touching_block_indices(coarse_index);
+        neighbors.sort_unstable();
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(
+            neighbors,
+            vec![
+                find_block_index(&hierarchy, 0, IVec2::new(0, 0)),
+                find_block_index(&hierarchy, 0, IVec2::new(0, 16)),
+            ]
+        );
     }
 }
