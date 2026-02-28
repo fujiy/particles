@@ -318,7 +318,7 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
             name: "water_drop".to_string(),
             reset_fixed_world: false,
             mpm_force_single_block: false,
-            mpm_block_divisions: Some(UVec2::new(2, 2)),
+            mpm_block_divisions: None,
             mpm_level_map: Vec::new(),
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
@@ -1385,10 +1385,11 @@ mod tests {
     }
 
     #[test]
-    fn water_drop_scenario_uses_2x2_mpm_blocks() {
+    fn water_drop_scenario_uses_default_level0_mpm_blocks() {
         let spec = default_scenario_spec_by_name("water_drop").expect("water_drop must exist");
         assert!(!spec.mpm_force_single_block);
-        assert_eq!(spec.mpm_block_divisions, Some(UVec2::new(2, 2)));
+        assert_eq!(spec.mpm_block_divisions, None);
+        assert!(spec.mpm_level_map.is_empty());
     }
 
     #[test]

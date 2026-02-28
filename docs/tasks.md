@@ -144,6 +144,7 @@
   - [ ] level別 block 管理（`h_b`, `dt_b`）を実装する。
   - [ ] coarse-fine 境界の質量/運動量フラックス交換を実装する。
   - [x] 粗密境界での ghost参照半径と補間規約を実装する。
+  - [x] `water_drop` シナリオを規定block size（default span）+ level 0 構成へ戻す。
   - [ ] 境界補間での保存誤差メトリクスを追加する。
   - [ ] 空間LoD回帰テストを追加する（境界通過、保存量、安定性）。
 - Progress:
@@ -159,6 +160,7 @@
   - 2026-02-28: owner再bin時に「stencil欠損ノード数が最小となる隣接block」を選ぶ補正を追加し、粗密境界手前での速度失速を緩和。
   - 2026-02-28: ghost運動量転送の異解像度パスでAPIC affine項を有効化し、`p2g_pressure` もowner block `h_b` 基準で評価するよう整合。
   - 2026-02-28: 粗密境界通過時の極端な速度低下を検出する回帰テスト `coarse_fine_boundary_crossing_does_not_stall_without_forces` を追加。
+  - 2026-02-28: `water_drop` の MPM block 構成を `mpm_block_divisions=None` に戻し、規定spanの level 0 blockのみを使う設定へ更新。
 - 完了条件:
   - 可変 `h_b` の空間LoDで、粗密境界を跨ぐ流れでも保存量誤差が許容範囲に収まる。
 
@@ -178,6 +180,7 @@
   - [x] `block_coloring_experiment` scenario を追加する（level 3 blockを8x8敷き詰め、地形なし）。
   - [x] scenario実行中に1秒ごとランダム split/merge を行う実験ランタイムを追加する。
   - [x] Physics Area Overlay の MPM grid を level色分けから color class 色分けへ切り替える。
+  - [x] Physics Area Overlay の MPM block 中央に、各blockの時間level（rate level）表示を追加する。
   - [x] `GridHierarchy` の block管理を quadtree index（linear quadtree）化し、位置クエリ/近傍構築を最適化する。
   - [ ] 彩色結果の色数推移とレイアウト変化コスト（再構築時間）を計測し、並列戦略検討材料として記録する。
 - Progress:
@@ -186,9 +189,39 @@
   - 2026-02-28: 実験反復の高速化のため、初期配置を level 3 block 8x8 へ縮小。
   - 2026-02-28: 1秒ごとのランダム split/merge（数個操作）+ 再彩色の実験ランタイムを実装。
   - 2026-02-28: Physics Area Overlay を color class ベースに変更し、MPM color count表示を追加。
+  - 2026-02-28: Physics Area Overlay で MPM block ごとの時間level表示を追加。
   - 2026-02-28: `GridHierarchy` に quadtree index を導入し、`block_index_for_position` と block近傍構築を quadtree ベースに切替。
 - 完了条件:
   - 専用scenarioで split/merge 後も辺/頂点共有blockの同色衝突が発生せず、overlayで色分け状態を連続確認できる。
+
+### [MPM-WATER-07B] ghost廃止（resident/support + outgoing queue）
+
+- Status: `In Progress`
+- 背景:
+  - `owner_indices/ghost_indices` の再構築コストが粒子移動時に支配的になりやすく、特に異なる空間levelを跨ぐ流れでFPS低下が顕著。
+  - block彩色の前提が整ったため、まずは彩色並列を有効化せず、データ経路のみを `ghost` 非依存へ置換する。
+- スコープ:
+  - 粒子集合を `resident`（単一所属, G2P対象）と `support`（複数所属可, P2G寄与）へ分離する。
+  - P2Gは `support` を使って active grid へ直接加算し、ghost参照経路を廃止する。
+  - G2Pは `resident` のみ更新し、block境界跨ぎは outgoing queue で移管する。
+- Subtasks:
+  - [x] 用語/データ構造を `owner/ghost` から `resident/support` へ置換する（互換期間はalias可）。
+  - [x] `resident` の所属規約を「粒子中心が block AABB 内の block に単一所属」として実装する。
+  - [ ] `resident` は位置更新直後に即時移管する（block境界を出た時点で移管、`block-halo` 遅延は使わない）。
+  - [x] `support` 規約を「block AABB + halo 内の粒子を保持」とし、AABB+halo から外れた粒子を除去する。
+  - [ ] `support` 流入トリガを「粒子が block の `AABB-halo` 外へ出たら隣接block候補へ追加」にする（境界帯の先行登録）。
+  - [x] blockごとに `outgoing_particles` キュー1本を持ち、隣接受け入れ側で自block流入分を選別して `resident/support` を更新する。
+  - [x] `P2G -> Grid Update -> G2P -> 移管反映` の順序で1 tickを構成し、時間LoDで非更新blockが混在しても寄与欠落しないことを確認する。
+  - [x] 回帰テストを追加する（境界通過、粗密境界通過、resident重複なし、support重複除去、質量保存）。
+- Progress:
+  - 2026-02-28: `MpmBlockIndexTable` を `resident_indices/support_indices/outgoing_particles` 構成へ拡張し、旧 `owner/ghost` アクセスは互換alias化。
+  - 2026-02-28: `refresh_block_index_table` を resident 再配置 + support 再構築へ置換し、ghost再構築経路を廃止。
+  - 2026-02-28: `step_block_set_coupled` を supportベースP2G / residentベースG2Pへ変更し、G2P後の outgoing キュー移管を追加。
+  - 2026-02-28: scheduler から `ghost_refresh` フェーズを削除し、`refresh_block_table` 単体で active block 判定を完結。
+  - 2026-02-28: mpm水ユニットテストを resident/support 前提へ更新し、`cargo test --lib` 全通過を確認。
+- 完了条件:
+  - ghost経路を使わずに既存の空間LoDシナリオが成立し、境界停止/極端減速の再発がない。
+  - `refresh_block_table` / ghost更新系コストが削減され、性能比較が可能な計測結果を取得できる。
 
 ### [MPM-WATER-05] 水シミュレーション受け入れテスト整備
 

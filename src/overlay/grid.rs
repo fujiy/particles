@@ -237,6 +237,7 @@ pub(super) fn draw_physics_area_overlay(
     draw_mpm_grid_overlay(
         &mut gizmos,
         &grid_hierarchy,
+        particle_world.solver_params.fixed_dt,
         active_world_bounds.map(|(_, _, min, max)| (min, max)),
     );
 }
@@ -272,6 +273,7 @@ fn draw_rect_outline(gizmos: &mut Gizmos, min: Vec2, max: Vec2, color: Color) {
 fn draw_mpm_grid_overlay(
     gizmos: &mut Gizmos,
     grid_hierarchy: &GridHierarchy,
+    frame_dt: f32,
     clip_rect: Option<(Vec2, Vec2)>,
 ) {
     for block in grid_hierarchy.blocks() {
@@ -313,7 +315,20 @@ fn draw_mpm_grid_overlay(
                 node_line_color,
             );
         }
+
+        let time_level = block_time_level_from_dt(frame_dt, block.dt_b);
+        let center = (block_min + block_max) * 0.5;
+        let label_size =
+            ((block_max.x - block_min.x).min(block_max.y - block_min.y) * 0.18).max(0.06);
+        draw_number_stroke(gizmos, time_level, center, label_size, block_outline_color);
     }
+}
+
+fn block_time_level_from_dt(frame_dt: f32, block_dt: f32) -> u8 {
+    let frame_dt = frame_dt.max(1e-8);
+    let block_dt = block_dt.max(1e-8).min(frame_dt);
+    let ratio = (frame_dt / block_dt).max(1.0);
+    ratio.log2().round().clamp(0.0, u8::MAX as f32) as u8
 }
 
 fn clipped_rect(min: Vec2, max: Vec2, clip_rect: Option<(Vec2, Vec2)>) -> Option<(Vec2, Vec2)> {
