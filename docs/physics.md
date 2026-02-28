@@ -209,33 +209,142 @@ $$
 
 実装では `dt_b <= dt_frame` を満たす整数 subcycling 回数に丸める。
 
-## 6. LoD と subcycling
+## 6. 現在の Block/LoD/Ghost 実装（MPM-WATER-07）
 
-### 6.1 空間LoD
+本章は、可変空間解像度（空間LoD）を持つ block 構成で、粒子と格子ノードの対応を
+どのように管理し、境界を跨ぐ寄与を ghost としてどう扱うかを、実装準拠で説明する。
 
-- 細格子 block: 境界や高せん断領域
-- 粗格子 block: 低活動・遠方領域
+### 6.1 目的
 
-### 6.2 時間LoD
+空間LoDを導入すると、同一 world 位置に対して block ごとに異なる `h_b` を使うため、
+次の2点が同時に課題になる。
 
-- 各 block は独自 `dt_b` で更新する。
-- フレーム内で更新回数が異なる block 同士は、境界フラックス交換を同期点で解決する。
+1. 同一物理位置を、粗密 block 間で一意に同定できること
+2. owner が異なる block に対しても、境界近傍の粒子寄与（P2G）を欠落させないこと
 
-### 6.3 境界交換ポリシー
+本実装の目的は、粒子の更新主体を owner block に固定しつつ、ghost 参照を用いて
+境界の連続性と決定論性を維持することである。
 
-- LoD 境界で交換する量:
-  - 質量フラックス
-  - 運動量フラックス
-- 対称更新を保証し、片側のみ更新を禁止する。
+### 6.2 用語定義
 
-## 7. 最小実装アルゴリズム（水優先）
+- `Block`: `GridBlock`。`(level, h_b, dt_b, origin_node, node_dims)` を持つ局所格子領域。
+- `Level`: 空間解像度指数。`h_b = CELL_SIZE_M * 2^level`。
+- `Cell dims` / `Node dims`: block は `N x N cells` を持ち、ノード数は `N+1 x N+1`。
+- `World key`: level に依存しないノード同定キー。`world_key = node_coord * 2^level`。
+- `Owner particle`: その粒子を G2P で更新する block を持つ粒子。
+- `Ghost particle`: ある block の P2G に寄与するが、その block の owner ではない粒子。
+- `Active block`: `owner_indices` または `ghost_indices` が非空の block。
+- `Due block`: 現在 tick で G2P まで進める owner block。
+- `Owner drift time`: subcycling の時刻ずれで生じる予測時間（`owner_block_drift_secs`）。
 
-1. `active blocks` を確定する。  
-2. 各 block で `dt_b` を算出する。  
-3. フレーム区間を subcycle タイムラインへ分割する。  
-4. サイクルごとに対象 block のみ `P2G -> Grid -> Boundary -> G2P` を実行する。  
-5. 同期点で LoD 境界フラックスを双方向に調停する。  
-6. フレーム末で保存量誤差（質量・運動量）と CFL 余裕を記録する。  
+### 6.3 大まかなデータ構造
+
+空間LoDと ghost 管理は主に次の3構造で成立する。
+
+1. `GridHierarchy`
+   - `blocks: Vec<GridBlock>`
+   - `node_lookup: HashMap<world_key, GridNodeLocation>`
+   - 共有境界ノードの owner 解決を担う。
+
+2. `GridBlock`
+   - ノード配列 `nodes` と owner フラグ `owned_nodes` を保持
+   - `is_world_key_owned` により「この block が書き込めるノードか」を判定
+
+3. `MpmBlockIndexTable`
+   - `owner_indices[b]`: block `b` が更新主体となる粒子
+   - `ghost_indices[b]`: block `b` の P2G に寄与する他owner粒子
+   - `block_neighbors[b]`: レイアウト変化時に再構築される近傍候補
+
+不変条件:
+- 全粒子は owner を1つだけ持つ。
+- P2G/pressure のノード書き込みは owner ノード（`owned_nodes=true`）のみに限定する。
+
+### 6.4 大まかなアルゴリズム
+
+フレーム内 subcycling の各 tick で、以下の順序を繰り返す。
+
+1. `refresh_block_index_table` で owner を更新し、必要時に owner/ghost を再構築
+2. active block 集合を更新
+3. tick 到達済みの due block を決定
+4. 全 block に対して `refresh_ghost_indices_for_block` を実行
+5. ghost 反映後の active 集合を `grid_blocks_for_step` として再取得
+6. `step_block_set_coupled(grid_blocks_for_step, due_blocks, ...)` を実行
+   - `grid_blocks_for_step`: P2G, pressure, boundary, grid update 対象
+   - `due_blocks`: G2P 対象（owner 粒子更新）
+
+この分離により、「境界に近いが owner 変更はまだ起きない粒子」の寄与欠落を防ぐ。
+
+### 6.5 詳細アルゴリズム
+
+#### 6.5.1 block 生成と共有境界の owner 決定
+
+- level map 指定時は `reset_mpm_grid_hierarchy_with_level_map` が適用される。
+- `node_dims = cell_dims + 1` として境界ノード共有を許可する。
+- `GridHierarchy::rebuild_node_lookup` で world key を構築し、共有ノード owner を決定する。
+
+owner 優先規則:
+1. より細かい level（小さい `level`）
+2. 同 level は `origin_node.x` が小さい方
+3. さらに同値なら `origin_node.y` が小さい方
+
+#### 6.5.2 `refresh_block_index_table`（owner 再bin）
+
+粒子ごとに予測位置
+$$
+\mathbf{x}_{pred}=\mathbf{x}+\mathbf{v}\Delta t_{drift}+\frac{1}{2}\mathbf{g}\Delta t_{drift}^{2}
+$$
+を計算し、`block_index_for_position` で owner 候補を得る。
+
+さらに、候補 block で stencil を張ったときの欠損ノード数
+（`missing_stencil_nodes_for_block`）を評価し、近傍候補から欠損最小の block を採用する。
+これにより、粗密境界直前での不必要な失速を緩和する。
+
+owner 変更が無い場合は early return し、owner/ghost 全再構築は行わない。
+この最適化は計算量を下げる一方、境界近傍 ghost が古くなるため、次節の局所更新を必須とする。
+
+#### 6.5.3 `refresh_ghost_indices_for_block`（局所 ghost 更新）
+
+target block `b` について:
+
+1. target block の world AABB を計算
+2. 他 block AABB と `margin = 2.5 * max(h_target, h_other)` で近傍候補を抽出
+3. 候補 block の owner 粒子のみを列挙
+4. 粒子ごとに owner 側 `h_owner` で stencil を評価
+5. stencil node の world AABB と target AABB が交差すれば ghost とみなす
+6. `sort+dedup` 後に `ghost_indices[b]` を置換
+
+この更新は tick ごとに全 block に対して行い、owner 不変時の取りこぼしを解消する。
+
+#### 6.5.4 P2G/pressure/G2P における owner と ghost の責務分離
+
+- P2G mass/momentum:
+  - owner + ghost を処理
+  - ghost も owner `h_b` で stencil を評価
+  - 書き込み先は target block の owner ノードに限定
+- P2G pressure:
+  - 粒子 owner の `h_b` で密度推定・圧力力転送を行う
+  - 読み取りは全 grid、書き込みはローカル owner ノードのみ
+- G2P:
+  - `owner_indices` のみ更新（ghost は更新しない）
+
+従って、ghost は「隣接 block の P2G 入力補完」のための参照集合であり、
+状態更新の主語は常に owner 粒子である。
+
+#### 6.5.5 時間LoD（rate）との関係
+
+- `dt_b` は frame を2冪分割した `base_dt_unit` の整数倍に量子化する。
+- 空間LoD検証モードでは rate 計算に `h_rate=CELL_SIZE_M` を使用し、
+  粗 block が過大な `dt_b` を取り続けることで生じる見かけ減速を抑制している。
+
+## 7. 現行アルゴリズム（水優先）
+
+1. `active_blocks_from_index_table` で active 候補を決める。  
+2. 各 block の rate level と `dt_b` を量子化する。  
+3. scheduler tick ごとに `refresh_block_index_table` を実行する。  
+4. 全 block に対して `refresh_ghost_indices_for_block` を実行する。  
+5. `grid_blocks_for_step` に対して `P2G -> Pressure -> Boundary -> Grid Update` を実行する。  
+6. `due_blocks` の owner 粒子のみ G2P を実行する。  
+7. block ごとの CFL比・境界侵入指標・質量集計を更新する。  
 
 ## 8. 検証指標
 
@@ -258,9 +367,12 @@ $$
 
 受け入れ基準は `docs/tasks.md` の Work Unit 完了条件で定義する。
 
-## 9. 実装上の注意
+## 9. 実装上の注意（block/LoD/ghost）
 
 - カーネル重みと勾配評価は P2G/G2P で同一実装を使う。
-- 無効ノード判定閾値を固定し、フレームごとに変えない（決定論性維持）。
-- 並列化時はノード加算をスレッドローカル集計 + reduce で実装する。
+- `world_key` を経由しない node 参照を混在させると level 間ズレの原因になる。
+- 共有境界ノードへの書き込みは owner block のみ許可する。
+- `refresh_block_index_table` の early return を使う場合、
+  `refresh_ghost_indices_for_block` の実行順序を必ず維持する。
+- 並列化時は block index 重複排除済みであることを前提に raw pointer path を使う。
 - 乱数や非決定順序和を避け、headlessテストの再現性を優先する。
