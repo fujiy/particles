@@ -5,6 +5,7 @@ use bevy::prelude::*;
 use rayon::prelude::*;
 
 use super::terrain_boundary::{TerrainBoundarySample, TerrainBoundarySampler};
+use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::{GridBlock, GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::kernel::evaluate_quadratic_bspline_stencil_2d;
@@ -62,26 +63,40 @@ pub struct MpmWaterStepMetrics {
     pub boundary_query_wall_secs: f64,
     /// Wall-clock time for P2G Phase 1 (mass/momentum transfer).
     pub p2g_mass_momentum_wall_secs: f64,
+    /// Process CPU time for P2G Phase 1 (mass/momentum transfer).
+    pub p2g_mass_momentum_cpu_secs: f64,
     /// Wall-clock time for P2G Phase 2 (density estimation + pressure/viscosity).
     pub p2g_pressure_wall_secs: f64,
+    /// Process CPU time for P2G Phase 2 (density estimation + pressure/viscosity).
+    pub p2g_pressure_cpu_secs: f64,
     /// Wall-clock time for terrain boundary node sampling.
     pub terrain_boundary_sample_wall_secs: f64,
+    /// Process CPU time for terrain boundary node sampling.
+    pub terrain_boundary_sample_cpu_secs: f64,
     /// Wall-clock time for grid node velocity update.
     pub grid_update_wall_secs: f64,
+    /// Process CPU time for grid node velocity update.
+    pub grid_update_cpu_secs: f64,
     /// Wall-clock time for G2P (particle state update from grid).
     pub g2p_wall_secs: f64,
+    /// Process CPU time for G2P (particle state update from grid).
+    pub g2p_cpu_secs: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct MpmTerrainBoundaryParams {
-    pub penetration_slop_m: f32,
+    pub sdf_velocity_threshold_m: f32,
+    pub deep_push_gain_per_s: f32,
+    pub deep_push_speed_cap_mps: f32,
     pub tangential_damping: f32,
 }
 
 impl Default for MpmTerrainBoundaryParams {
     fn default() -> Self {
         Self {
-            penetration_slop_m: 0.0,
+            sdf_velocity_threshold_m: 0.01,
+            deep_push_gain_per_s: 48.0,
+            deep_push_speed_cap_mps: 12.0,
             tangential_damping: 0.05,
         }
     }
@@ -418,56 +433,6 @@ fn clear_inactive_block_nodes(grid: &mut GridHierarchy, index_table: &MpmBlockIn
     }
 }
 
-pub fn apply_terrain_boundary_to_continuum(
-    particles: &mut ContinuumParticleWorld,
-    terrain: &TerrainWorld,
-    penetration_slop_m: f32,
-    tangential_damping: f32,
-) -> usize {
-    let mut corrected = 0usize;
-    let penetration_slop_m = penetration_slop_m.max(0.0);
-    let tangential_scale = (1.0 - tangential_damping).clamp(0.0, 1.0);
-    for i in 0..particles.len() {
-        let mut had_penetration = false;
-        let mut boundary_normal = Vec2::ZERO;
-        for _ in 0..4 {
-            let Some((signed_distance, normal)) =
-                terrain.sample_signed_distance_and_normal(particles.x[i])
-            else {
-                break;
-            };
-            if normal == Vec2::ZERO {
-                break;
-            }
-            let penetration = penetration_slop_m - signed_distance;
-            if penetration <= 0.0 {
-                break;
-            }
-            particles.x[i] += normal * penetration;
-            boundary_normal = normal;
-            had_penetration = true;
-        }
-        if !had_penetration {
-            continue;
-        }
-
-        let normal = if boundary_normal == Vec2::ZERO {
-            Vec2::Y
-        } else {
-            boundary_normal
-        };
-        let normal_speed = particles.v[i].dot(normal);
-        let mut corrected_v = particles.v[i];
-        if normal_speed < 0.0 {
-            corrected_v -= normal * normal_speed;
-        }
-        let tangent = corrected_v - normal * corrected_v.dot(normal);
-        particles.v[i] = corrected_v - tangent * (1.0 - tangential_scale);
-        corrected += 1;
-    }
-    corrected
-}
-
 pub fn step_single_rate(
     particles: &mut ContinuumParticleWorld,
     grid: &mut GridHierarchy,
@@ -537,6 +502,7 @@ pub fn step_block_set_coupled(
     {
         let _span = tracing::info_span!("physics::mpm::p2g_mass_momentum").entered();
         let t0 = Instant::now();
+        let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
         if parallel_enabled {
             grid_blocks.par_iter().for_each(|&block_index| {
                 if block_index >= blocks_len {
@@ -560,8 +526,7 @@ pub fn step_block_set_coupled(
                 if block_index >= blocks_len {
                     continue;
                 }
-                let block =
-                    unsafe { &mut *((blocks_ptr as *mut GridBlock).add(block_index)) };
+                let block = unsafe { &mut *((blocks_ptr as *mut GridBlock).add(block_index)) };
                 p2g_mass_momentum(
                     particles,
                     index_table.owner_indices(block_index),
@@ -573,6 +538,8 @@ pub fn step_block_set_coupled(
             }
         }
         metrics.p2g_mass_momentum_wall_secs += t0.elapsed().as_secs_f64();
+        metrics.p2g_mass_momentum_cpu_secs +=
+            (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
     }
 
     // P2G Phase 2: density estimation (reads from full GridHierarchy) + pressure/viscosity.
@@ -586,6 +553,7 @@ pub fn step_block_set_coupled(
     {
         let _span = tracing::info_span!("physics::mpm::p2g_pressure").entered();
         let t0 = Instant::now();
+        let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
         if parallel_enabled {
             grid_blocks.par_iter().for_each(|&block_index| {
                 if block_index >= blocks_len {
@@ -611,8 +579,7 @@ pub fn step_block_set_coupled(
                 if block_index >= blocks_len {
                     continue;
                 }
-                let block =
-                    unsafe { &mut *((blocks_ptr as *mut GridBlock).add(block_index)) };
+                let block = unsafe { &mut *((blocks_ptr as *mut GridBlock).add(block_index)) };
                 let grid_ref = unsafe { &*(grid_ptr as *const GridHierarchy) };
                 p2g_pressure(
                     particles,
@@ -627,6 +594,8 @@ pub fn step_block_set_coupled(
             }
         }
         metrics.p2g_pressure_wall_secs += t0.elapsed().as_secs_f64();
+        metrics.p2g_pressure_cpu_secs +=
+            (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
     }
 
     let mut boundary_samples_by_block = Vec::<Option<Vec<TerrainBoundarySample>>>::new();
@@ -634,6 +603,7 @@ pub fn step_block_set_coupled(
     {
         let _span = tracing::info_span!("physics::mpm::terrain_boundary").entered();
         let t0 = Instant::now();
+        let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
         if let (Some(terrain), Some(sampler)) = (terrain, terrain_sampler.as_deref_mut()) {
             for &block_index in &grid_blocks {
                 let Some(block) = grid.blocks().get(block_index) else {
@@ -650,12 +620,15 @@ pub fn step_block_set_coupled(
             }
         }
         metrics.terrain_boundary_sample_wall_secs += t0.elapsed().as_secs_f64();
+        metrics.terrain_boundary_sample_cpu_secs +=
+            (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
     }
 
     // Grid update phase.
     {
         let _span = tracing::info_span!("physics::mpm::grid_update").entered();
         let t0 = Instant::now();
+        let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
         let blocks = grid.blocks_mut();
         let blocks_ptr = blocks.as_mut_ptr() as usize;
         if parallel_enabled {
@@ -694,12 +667,15 @@ pub fn step_block_set_coupled(
             }
         }
         metrics.grid_update_wall_secs += t0.elapsed().as_secs_f64();
+        metrics.grid_update_cpu_secs +=
+            (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
     }
 
     let mut staged_updates = Vec::new();
     {
         let _span = tracing::info_span!("physics::mpm::g2p").entered();
         let t0 = Instant::now();
+        let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
         if parallel_enabled {
             staged_updates = g2p_blocks
                 .par_iter()
@@ -748,6 +724,7 @@ pub fn step_block_set_coupled(
             metrics.clamped_particle_count += update.clamped_count;
         }
         metrics.g2p_wall_secs += t0.elapsed().as_secs_f64();
+        metrics.g2p_cpu_secs += (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
     }
 
     for &block_index in &grid_blocks {
@@ -773,7 +750,7 @@ pub fn step_block_set_coupled(
             let penetrating_nodes = boundary_samples
                 .iter()
                 .filter(|sample| {
-                    sample.solid || sample.sdf_m < terrain_boundary_params.penetration_slop_m
+                    sample.solid || sample.sdf_m < terrain_boundary_params.sdf_velocity_threshold_m
                 })
                 .count();
             metrics.boundary_penetrating_node_ratio += penetrating_nodes as f32;
@@ -783,12 +760,12 @@ pub fn step_block_set_coupled(
                     index_table.owner_indices(block_index),
                     block,
                     boundary_samples,
-                    terrain_boundary_params.penetration_slop_m,
+                    terrain_boundary_params.sdf_velocity_threshold_m,
                 );
             }
         }
         for (node, sample) in block.nodes().iter().zip(boundary_samples.iter()) {
-            if !(sample.solid || sample.sdf_m < terrain_boundary_params.penetration_slop_m) {
+            if !(sample.solid || sample.sdf_m < terrain_boundary_params.sdf_velocity_threshold_m) {
                 continue;
             }
             let normal = if sample.normal == Vec2::ZERO {
@@ -854,7 +831,7 @@ fn estimate_penetrating_particle_ratio(
     particle_indices: &[usize],
     block: &GridBlock,
     boundary_samples: &[TerrainBoundarySample],
-    penetration_slop_m: f32,
+    sdf_velocity_threshold_m: f32,
 ) -> f32 {
     if particles.is_empty() || particle_indices.is_empty() || boundary_samples.is_empty() {
         return 0.0;
@@ -886,7 +863,7 @@ fn estimate_penetrating_particle_ratio(
             sdf_acc += sample.weight * boundary.sdf_m;
             w_acc += sample.weight;
         }
-        if w_acc > 1e-6 && (sdf_acc / w_acc) < penetration_slop_m {
+        if w_acc > 1e-6 && (sdf_acc / w_acc) < sdf_velocity_threshold_m {
             penetrating += 1;
         }
     }
@@ -1127,7 +1104,7 @@ fn grid_update(
         node.v += dt * params.gravity;
         if let Some(samples) = boundary_samples {
             if let Some(sample) = samples.get(node_index).copied() {
-                if sample.solid || sample.sdf_m < boundary_params.penetration_slop_m {
+                if sample.solid || sample.sdf_m < boundary_params.sdf_velocity_threshold_m {
                     let normal = if sample.normal == Vec2::ZERO {
                         Vec2::Y
                     } else {
@@ -1137,6 +1114,17 @@ fn grid_update(
                     let normal_speed = corrected_v.dot(normal);
                     if normal_speed < 0.0 {
                         corrected_v -= normal * normal_speed;
+                    }
+                    if sample.sdf_m < boundary_params.sdf_velocity_threshold_m {
+                        let depth = boundary_params.sdf_velocity_threshold_m - sample.sdf_m;
+                        let push_gain = boundary_params.deep_push_gain_per_s.max(0.0);
+                        let push_speed_cap = boundary_params.deep_push_speed_cap_mps.max(0.0);
+                        let mut push_velocity = normal * (depth * push_gain);
+                        let push_speed = push_velocity.length();
+                        if push_speed_cap > 0.0 && push_speed > push_speed_cap {
+                            push_velocity *= push_speed_cap / push_speed;
+                        }
+                        corrected_v += push_velocity;
                     }
                     let tangent = corrected_v - normal * corrected_v.dot(normal);
                     let next_v =
@@ -1297,8 +1285,11 @@ fn mix_mat2(a: Mat2, b: Mat2, t: f32) -> Mat2 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, terrain_boundary_radius_m};
+    use crate::physics::material::{
+        DEFAULT_MATERIAL_PARAMS, particle_radius_m, terrain_boundary_radius_m,
+    };
     use crate::physics::solver::terrain_boundary::TerrainBoundarySampler;
+    use crate::physics::world::constants::CELL_SIZE_M;
     use crate::physics::world::continuum::ContinuumMaterial;
     use crate::physics::world::grid::{GridBlock, MpmBlockIndexTable};
     use crate::physics::world::particle::ParticleWorld;
@@ -1370,6 +1361,78 @@ mod tests {
             ContinuumMaterial::Water,
         );
         (particles, grid)
+    }
+
+    fn make_basin_contact_setup() -> (TerrainWorld, ContinuumParticleWorld, GridHierarchy) {
+        let mut terrain = TerrainWorld::default();
+        terrain.clear();
+        terrain.ensure_chunk_loaded(IVec2::ZERO);
+        terrain.clear_loaded_cells();
+
+        let floor_y = 0;
+        let left_wall_x = 1;
+        let right_wall_x = 14;
+        let wall_top_y = 15;
+        for x in left_wall_x..=right_wall_x {
+            terrain.set_cell(IVec2::new(x, floor_y), TerrainCell::stone());
+        }
+        for y in floor_y..=wall_top_y {
+            terrain.set_cell(IVec2::new(left_wall_x, y), TerrainCell::stone());
+            terrain.set_cell(IVec2::new(right_wall_x, y), TerrainCell::stone());
+        }
+        terrain
+            .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
+
+        let mut particles = ContinuumParticleWorld::default();
+        let offset = 0.25 * CELL_SIZE_M;
+        let particle_mass = 1_000.0 * offset * offset;
+        let rest_volume = particle_mass / 1_000.0;
+        for y in 6..=11 {
+            for x in 3..=12 {
+                let center = cell_to_world_center(IVec2::new(x, y));
+                for oy in [-offset, offset] {
+                    for ox in [-offset, offset] {
+                        let vx = if x >= 9 { 1.0 } else { 0.0 };
+                        particles.spawn_particle(
+                            center + Vec2::new(ox, oy),
+                            Vec2::new(vx, 0.0),
+                            particle_mass,
+                            rest_volume,
+                            ContinuumMaterial::Water,
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut grid = GridHierarchy::default();
+        grid.add_block(GridBlock::new(
+            0,
+            CELL_SIZE_M,
+            1.0 / 120.0,
+            IVec2::new(-4, -4),
+            UVec2::new(32, 32),
+        ));
+        (terrain, particles, grid)
+    }
+
+    fn deep_penetration_ratio(
+        terrain: &TerrainWorld,
+        particles: &ContinuumParticleWorld,
+        deep_sdf_limit_m: f32,
+    ) -> f32 {
+        if particles.is_empty() {
+            return 0.0;
+        }
+        let mut deep_count = 0usize;
+        for &position in &particles.x {
+            if let Some((sdf_m, _)) = terrain.sample_signed_distance_and_normal(position) {
+                if sdf_m < deep_sdf_limit_m {
+                    deep_count += 1;
+                }
+            }
+        }
+        deep_count as f32 / particles.len() as f32
     }
 
     #[test]
@@ -1505,36 +1568,6 @@ mod tests {
     }
 
     #[test]
-    fn terrain_boundary_projection_pushes_particle_outside_solid() {
-        let mut terrain = TerrainWorld::default();
-        terrain.clear();
-        terrain.ensure_chunk_loaded(IVec2::ZERO);
-        terrain.clear_loaded_cells();
-        terrain.set_cell(IVec2::ZERO, TerrainCell::stone());
-        terrain
-            .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
-
-        let mut continuum = ContinuumParticleWorld::default();
-        continuum.spawn_water_particle(
-            cell_to_world_center(IVec2::ZERO),
-            Vec2::new(0.0, -1.0),
-            1.0,
-            0.001,
-        );
-
-        let corrected = apply_terrain_boundary_to_continuum(&mut continuum, &terrain, 0.0, 0.1);
-        assert_eq!(corrected, 1);
-        let (signed_distance, _) = terrain
-            .sample_signed_distance_and_normal(continuum.x[0])
-            .expect("signed distance should be available after projection");
-        assert!(signed_distance >= -1e-3);
-        let (_, normal) = terrain
-            .sample_signed_distance_and_normal(continuum.x[0])
-            .expect("normal should be available after projection");
-        assert!(continuum.v[0].dot(normal) >= -1e-4);
-    }
-
-    #[test]
     fn grid_boundary_coupling_applies_non_penetration_on_mpm_nodes() {
         let mut terrain = TerrainWorld::default();
         terrain.clear();
@@ -1548,6 +1581,7 @@ mod tests {
         particles.x[0] = cell_to_world_center(IVec2::ZERO);
         particles.v[0] = Vec2::new(0.0, -2.0);
 
+        let boundary_params = MpmTerrainBoundaryParams::default();
         let mut sampler = TerrainBoundarySampler::default();
         sampler.begin_step();
         let metrics = step_single_rate_coupled(
@@ -1559,11 +1593,78 @@ mod tests {
                 gravity: Vec2::ZERO,
                 ..Default::default()
             },
-            &MpmTerrainBoundaryParams::default(),
+            &boundary_params,
         );
         sampler.end_step();
         assert!(metrics.boundary_penetrating_node_ratio > 0.0);
-        assert!(metrics.boundary_momentum_exchange.length() > 0.0);
+        let block = &grid.blocks()[0];
+        let boundary_samples = sampler.sample_block_nodes(block, &terrain);
+        for (node, sample) in block.nodes().iter().zip(boundary_samples.iter()) {
+            if !(sample.solid || sample.sdf_m < boundary_params.sdf_velocity_threshold_m) {
+                continue;
+            }
+            let normal = if sample.normal == Vec2::ZERO {
+                Vec2::Y
+            } else {
+                sample.normal
+            };
+            assert!(
+                node.v.dot(normal) >= -1e-4,
+                "boundary node still has inward normal velocity: {:?}",
+                node.v
+            );
+        }
+    }
+
+    #[test]
+    fn grid_only_boundary_policy_prevents_deep_penetration_accumulation() {
+        let (terrain, mut particles, mut grid) = make_basin_contact_setup();
+        let mut sampler = TerrainBoundarySampler::default();
+        let params = MpmWaterParams {
+            dt: 1.0 / 120.0,
+            gravity: Vec2::new(0.0, -9.81),
+            ..Default::default()
+        };
+        let boundary_params = MpmTerrainBoundaryParams {
+            sdf_velocity_threshold_m: particle_radius_m(DEFAULT_MATERIAL_PARAMS) * 2.0,
+            ..Default::default()
+        };
+        let deep_limit_m = -0.5 * boundary_params.sdf_velocity_threshold_m;
+
+        let mut max_deep_ratio = 0.0f32;
+        let mut final_deep_ratio = 0.0f32;
+        for _ in 0..900 {
+            sampler.begin_step();
+            let _ = step_single_rate_coupled(
+                &mut particles,
+                &mut grid,
+                Some(&terrain),
+                Some(&mut sampler),
+                &params,
+                &boundary_params,
+            );
+            sampler.end_step();
+            final_deep_ratio = deep_penetration_ratio(&terrain, &particles, deep_limit_m);
+            max_deep_ratio = max_deep_ratio.max(final_deep_ratio);
+        }
+
+        assert!(
+            final_deep_ratio <= 0.03,
+            "final deep penetration ratio too high: {:.6}",
+            final_deep_ratio
+        );
+        assert!(
+            max_deep_ratio <= 0.10,
+            "deep penetration accumulated too much during run: {:.6}",
+            max_deep_ratio
+        );
+        for (i, &position) in particles.x.iter().enumerate() {
+            assert!(
+                position.is_finite(),
+                "particle {i} has non-finite position: {:?}",
+                position
+            );
+        }
     }
 
     #[test]
