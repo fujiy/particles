@@ -280,13 +280,18 @@ pub(super) fn update_test_assert_panel(
             TextColor(Color::srgba(0.90, 0.92, 0.95, 0.95)),
         ));
         for row in assertions {
+            let condition_suffix = if row.condition == "always" {
+                String::new()
+            } else {
+                format!(" (when: {})", row.condition)
+            };
             spawn_assertion_line(
                 parent,
                 row.ok,
                 row.active,
                 format!(
-                    "{} expected {} actual {}",
-                    row.label, row.expected, row.actual
+                    "{} expected {} actual {}{}",
+                    row.label, row.expected, row.actual, condition_suffix
                 ),
             );
         }

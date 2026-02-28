@@ -466,6 +466,8 @@
 - [x] `tests/physics_scenarios.rs` を追加し、headless統合テストランナーを実装（固定dt手動step）
 - [x] `ScenarioSpec` を導入し、初期状態・step数・判定閾値をデータ化
 - [x] 基本シナリオを追加（単一物体落下、水のみ挙動、地形接触安定）
+- [x] `physics_scenarios` の閾値判定を最終stepのみから常時判定（step 0..N）へ変更し、失敗ログに `step` と `condition` を出力
+- [x] 条件付き assertion（例: `water_surface_height_p95`）の条件をUI表示に明示（`when: step >= N`）
 - [x] シナリオ終了時artifact出力を実装（`final_state.json`, `metrics.json`）
 - [x] 失敗時artifact保持と出力先規約を整備（`artifacts/tests/<scenario>/<run_id>/`）
 - [x] 数値判定ユーティリティを実装（侵入率、最大速度、睡眠率など）
