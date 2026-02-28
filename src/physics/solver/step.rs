@@ -7,8 +7,7 @@ use bevy::log::tracing;
 use super::mpm_water::{
     MpmTerrainBoundaryParams, MpmWaterParams, active_blocks_from_index_table, cfl_violated,
     estimate_block_max_speed, rebuild_continuum_from_particle_world, refresh_block_index_table,
-    refresh_ghost_indices_for_block, sound_speed_mps, step_block_set_coupled,
-    sync_continuum_to_particle_world,
+    sound_speed_mps, step_block_set_coupled, sync_continuum_to_particle_world,
 };
 use super::terrain_boundary::TerrainBoundarySampler;
 use super::types::{MpmPhase, StepSimulationTiming};
@@ -200,8 +199,6 @@ pub(crate) fn step_simulation_once(
         // Accumulated phase timings across all scheduler ticks for the profile bar.
         let mut acc_refresh_block_table_secs = 0.0_f64;
         let mut acc_refresh_block_table_cpu_secs = 0.0_f64;
-        let mut acc_ghost_refresh_secs = 0.0_f64;
-        let mut acc_ghost_refresh_cpu_secs = 0.0_f64;
         let mut acc_p2g_mass_momentum_secs = 0.0_f64;
         let mut acc_p2g_mass_momentum_cpu_secs = 0.0_f64;
         let mut acc_terrain_boundary_secs = 0.0_f64;
@@ -303,38 +300,6 @@ pub(crate) fn step_simulation_once(
                 }
             }
 
-            // Per-boundary ghost refresh: rebuild ghost_indices for every
-            // block so currently inactive receiver blocks can become active
-            // when nearby owner particles approach a boundary.
-            //
-            // `refresh_block_index_table` above has an early-exit when no
-            // ownership change occurred, which leaves ghost_indices stale for
-            // particles that moved within their block toward a boundary without
-            // crossing it.  Rebuilding per-block here (O(neighbors' particles)
-            // per block) guarantees that P2G always sees the correct ghost
-            // contributions regardless of whether a rebin was triggered.
-            {
-                let _span = tracing::info_span!("physics::mpm::ghost_refresh").entered();
-                let t0 = std::time::Instant::now();
-                let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
-                for active_block in 0..block_count {
-                    refresh_ghost_indices_for_block(
-                        continuum_world,
-                        grid_hierarchy,
-                        mpm_block_index_table,
-                        active_block,
-                        &owner_block_drift_secs,
-                        mpm_params.gravity,
-                    );
-                }
-                acc_ghost_refresh_secs += t0.elapsed().as_secs_f64();
-                acc_ghost_refresh_cpu_secs +=
-                    (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
-            }
-
-            // Ghost refresh can activate additional grid blocks (ghost-only).
-            // Use the refreshed set for P2G/grid phases so cross-boundary
-            // transfer remains continuous even when ownership did not rebin.
             let grid_blocks_for_step = active_blocks_from_index_table(mpm_block_index_table);
             if grid_blocks_for_step.is_empty() {
                 continue;
@@ -432,11 +397,6 @@ pub(crate) fn step_simulation_once(
                 name: "mpm::refresh_block_table",
                 wall_secs: acc_refresh_block_table_secs,
                 cpu_secs: acc_refresh_block_table_cpu_secs,
-            },
-            MpmPhase {
-                name: "mpm::ghost_refresh",
-                wall_secs: acc_ghost_refresh_secs,
-                cpu_secs: acc_ghost_refresh_cpu_secs,
             },
             MpmPhase {
                 name: "mpm::p2g_mass_momentum",

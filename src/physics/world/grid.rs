@@ -250,8 +250,9 @@ struct GridQuadtreeIndex {
 
 #[derive(Resource, Clone, Debug, Default)]
 pub struct MpmBlockIndexTable {
-    owner_indices: Vec<Vec<usize>>,
-    ghost_indices: Vec<Vec<usize>>,
+    resident_indices: Vec<Vec<usize>>,
+    support_indices: Vec<Vec<usize>>,
+    outgoing_particles: Vec<Vec<usize>>,
     /// 各blockに接触（辺/頂点共有）する近傍block index。
     /// blockレイアウト変化時に `rebuild_neighbor_map` で再計算。
     block_neighbors: Vec<Vec<usize>>,
@@ -632,22 +633,27 @@ fn blocks_touch_by_edge_or_vertex(lhs: &GridBlock, rhs: &GridBlock) -> bool {
 
 impl MpmBlockIndexTable {
     pub fn clear(&mut self) {
-        self.owner_indices.clear();
-        self.ghost_indices.clear();
+        self.resident_indices.clear();
+        self.support_indices.clear();
+        self.outgoing_particles.clear();
         self.block_neighbors.clear();
         self.moved_particle_count = 0;
         self.rebinned_this_step = false;
     }
 
     pub fn ensure_block_count(&mut self, block_count: usize) {
-        self.owner_indices.resize_with(block_count, Vec::new);
-        self.ghost_indices.resize_with(block_count, Vec::new);
+        self.resident_indices.resize_with(block_count, Vec::new);
+        self.support_indices.resize_with(block_count, Vec::new);
+        self.outgoing_particles.resize_with(block_count, Vec::new);
         self.block_neighbors.resize_with(block_count, Vec::new);
-        if self.owner_indices.len() > block_count {
-            self.owner_indices.truncate(block_count);
+        if self.resident_indices.len() > block_count {
+            self.resident_indices.truncate(block_count);
         }
-        if self.ghost_indices.len() > block_count {
-            self.ghost_indices.truncate(block_count);
+        if self.support_indices.len() > block_count {
+            self.support_indices.truncate(block_count);
+        }
+        if self.outgoing_particles.len() > block_count {
+            self.outgoing_particles.truncate(block_count);
         }
         if self.block_neighbors.len() > block_count {
             self.block_neighbors.truncate(block_count);
@@ -677,26 +683,37 @@ impl MpmBlockIndexTable {
             .unwrap_or(&[])
     }
 
-    pub fn owner_indices(&self, block_index: usize) -> &[usize] {
-        self.owner_indices
+    pub fn resident_indices(&self, block_index: usize) -> &[usize] {
+        self.resident_indices
             .get(block_index)
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub fn ghost_indices(&self, block_index: usize) -> &[usize] {
-        self.ghost_indices
+    pub fn support_indices(&self, block_index: usize) -> &[usize] {
+        self.support_indices
             .get(block_index)
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
 
-    pub fn owner_indices_mut(&mut self, block_index: usize) -> Option<&mut Vec<usize>> {
-        self.owner_indices.get_mut(block_index)
+    pub fn outgoing_particles(&self, block_index: usize) -> &[usize] {
+        self.outgoing_particles
+            .get(block_index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
-    pub fn ghost_indices_mut(&mut self, block_index: usize) -> Option<&mut Vec<usize>> {
-        self.ghost_indices.get_mut(block_index)
+    pub fn resident_indices_mut(&mut self, block_index: usize) -> Option<&mut Vec<usize>> {
+        self.resident_indices.get_mut(block_index)
+    }
+
+    pub fn support_indices_mut(&mut self, block_index: usize) -> Option<&mut Vec<usize>> {
+        self.support_indices.get_mut(block_index)
+    }
+
+    pub fn outgoing_particles_mut(&mut self, block_index: usize) -> Option<&mut Vec<usize>> {
+        self.outgoing_particles.get_mut(block_index)
     }
 
     pub fn moved_particle_count(&self) -> usize {
@@ -704,7 +721,10 @@ impl MpmBlockIndexTable {
     }
 
     pub fn block_count(&self) -> usize {
-        self.owner_indices.len().min(self.ghost_indices.len())
+        self.resident_indices
+            .len()
+            .min(self.support_indices.len())
+            .min(self.outgoing_particles.len())
     }
 
     pub fn set_moved_particle_count(&mut self, moved_particle_count: usize) {
@@ -717,6 +737,23 @@ impl MpmBlockIndexTable {
 
     pub fn set_rebinned_this_step(&mut self, rebinned_this_step: bool) {
         self.rebinned_this_step = rebinned_this_step;
+    }
+
+    // Compatibility accessors while solver migration is in progress.
+    pub fn owner_indices(&self, block_index: usize) -> &[usize] {
+        self.resident_indices(block_index)
+    }
+
+    pub fn ghost_indices(&self, block_index: usize) -> &[usize] {
+        self.support_indices(block_index)
+    }
+
+    pub fn owner_indices_mut(&mut self, block_index: usize) -> Option<&mut Vec<usize>> {
+        self.resident_indices_mut(block_index)
+    }
+
+    pub fn ghost_indices_mut(&mut self, block_index: usize) -> Option<&mut Vec<usize>> {
+        self.support_indices_mut(block_index)
     }
 }
 
