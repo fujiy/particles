@@ -4,6 +4,7 @@ use bevy::prelude::*;
 
 use super::*;
 use crate::physics::material::particle_properties;
+use crate::physics::world::constants::CELL_SIZE_M;
 use crate::physics::world::grid::GridHierarchy;
 use crate::physics::world::particle::ParticleMaterial;
 
@@ -88,9 +89,9 @@ pub fn sync_water_dots_to_render(
     water_state.had_any_water = true;
     let rendered_chunks_prev = water_state.rendered_chunks_last_frame.clone();
 
-    let Some(first_block) = grid_hierarchy.blocks().first() else {
+    if grid_hierarchy.blocks().is_empty() {
         return;
-    };
+    }
     let dot_threshold = REST_DENSITY * WATER_GRID_DENSITY_THRESHOLD_REST_DENSITY_RATIO;
     let chunk_width = CHUNK_PIXEL_SIZE;
     let chunk_height = CHUNK_PIXEL_SIZE;
@@ -122,11 +123,8 @@ pub fn sync_water_dots_to_render(
                         continue;
                     }
                     let idx = chunk_density_index(px, py, chunk_width, chunk_height);
-                    water_state.density[idx] = sample_grid_density_at_world(
-                        &grid_hierarchy,
-                        first_block.h_b,
-                        sample_world,
-                    );
+                    water_state.density[idx] =
+                        sample_grid_density_at_world(&grid_hierarchy, sample_world);
                 }
             }
 
@@ -295,7 +293,23 @@ fn water_palette_color(x: i32, y: i32, density: f32, dot_threshold: f32) -> [u8;
     palette[(base + boost).min(3)]
 }
 
-fn sample_grid_density_at_world(grid_hierarchy: &GridHierarchy, h: f32, world_pos: Vec2) -> f32 {
+fn node_scale_for_h(h: f32) -> i32 {
+    ((h.max(1e-6) / CELL_SIZE_M).round() as i32).max(1)
+}
+
+fn sample_grid_density_at_world(grid_hierarchy: &GridHierarchy, world_pos: Vec2) -> f32 {
+    let (h, scale) = match grid_hierarchy
+        .block_index_for_position(world_pos)
+        .and_then(|block_index| grid_hierarchy.blocks().get(block_index))
+    {
+        Some(block) => (block.h_b.max(1e-6), node_scale_for_h(block.h_b)),
+        None => {
+            let Some(block) = grid_hierarchy.blocks().first() else {
+                return 0.0;
+            };
+            (block.h_b.max(1e-6), node_scale_for_h(block.h_b))
+        }
+    };
     let inv_h = 1.0 / h.max(1e-6);
     let node_f = world_pos * inv_h;
     let x0 = node_f.x.floor() as i32;
@@ -303,10 +317,10 @@ fn sample_grid_density_at_world(grid_hierarchy: &GridHierarchy, h: f32, world_po
     let tx = node_f.x - x0 as f32;
     let ty = node_f.y - y0 as f32;
 
-    let m00 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0, y0));
-    let m10 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0 + 1, y0));
-    let m01 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0, y0 + 1));
-    let m11 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0 + 1, y0 + 1));
+    let m00 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0, y0) * scale);
+    let m10 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0 + 1, y0) * scale);
+    let m01 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0, y0 + 1) * scale);
+    let m11 = sample_grid_node_mass(grid_hierarchy, IVec2::new(x0 + 1, y0 + 1) * scale);
 
     let mx0 = m00 + (m10 - m00) * tx;
     let mx1 = m01 + (m11 - m01) * tx;

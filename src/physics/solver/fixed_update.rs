@@ -13,8 +13,8 @@ use crate::physics::state::{
     ReplayState, SimulationParallelSettings, SimulationPerfMetrics, SimulationState,
 };
 use crate::physics::world::constants::{
-    CELL_SIZE_M, CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
-    WORLD_MIN_CHUNK_Y,
+    CELL_SIZE_M, CHUNK_SIZE_I32, DEFAULT_MPM_BLOCK_NODE_SPAN, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
+    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };
 use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::{GridBlock, GridHierarchy, MpmBlockIndexTable};
@@ -45,7 +45,7 @@ pub(crate) fn initialize_default_world(
     reset_mpm_grid_hierarchy(
         &mut grid_hierarchy,
         solver_params.fixed_dt,
-        solver_params.sub_block_size_cells,
+        DEFAULT_MPM_BLOCK_NODE_SPAN,
     );
     mpm_block_index_table.clear();
     terrain_boundary_sampler.clear();
@@ -219,25 +219,30 @@ pub(crate) fn step_physics(
             if !sim_step.mpm_phases.is_empty() {
                 // MPM water frame: show per-phase breakdown instead of particle_step::other.
                 let mut mpm_accounted_wall_ms = 0.0_f64;
+                let mut mpm_accounted_cpu_ms = 0.0_f64;
                 for phase in &sim_step.mpm_phases {
                     if phase.wall_secs <= 0.0 {
                         continue;
                     }
                     let wall_ms = phase.wall_secs * 1000.0;
+                    let cpu_ms = phase.cpu_secs * 1000.0;
                     mpm_accounted_wall_ms += wall_ms;
+                    mpm_accounted_cpu_ms += cpu_ms;
                     step_profiler.segments.push(PhysicsStepProfileSegment {
                         name: phase.name.to_string(),
                         wall_duration_ms: wall_ms,
-                        cpu_duration_ms: wall_ms, // wall ≈ cpu for these sequential-ish phases
+                        cpu_duration_ms: cpu_ms,
                     });
                 }
                 let mpm_other_ms =
                     (sim_step.particle_step_secs * 1000.0 - mpm_accounted_wall_ms).max(0.0);
+                let mpm_other_cpu_ms =
+                    (sim_step.particle_step_cpu_secs * 1000.0 - mpm_accounted_cpu_ms).max(0.0);
                 if mpm_other_ms > 0.001 {
                     step_profiler.segments.push(PhysicsStepProfileSegment {
                         name: "mpm::other".to_string(),
                         wall_duration_ms: mpm_other_ms,
-                        cpu_duration_ms: mpm_other_ms,
+                        cpu_duration_ms: mpm_other_cpu_ms,
                     });
                 }
             } else {
@@ -325,7 +330,7 @@ pub(crate) fn reset_mpm_grid_hierarchy(
     block_node_span: i32,
 ) {
     grid_hierarchy.clear();
-    let span = block_node_span.max(4);
+    let span = block_node_span.max(1);
     reset_mpm_grid_hierarchy_with_span(grid_hierarchy, dt, span);
 }
 
@@ -335,8 +340,20 @@ pub(crate) fn reset_mpm_grid_hierarchy_for_mode(
     block_node_span: i32,
     force_single_block: bool,
     block_divisions: Option<UVec2>,
+    level_map: &[(IVec2, u8, UVec2)],
 ) {
-    let (min_cell, node_dims) = mpm_grid_bounds_with_padding();
+    // level_map が指定されている場合は最優先で適用する（空間LoDシナリオ用）
+    if !level_map.is_empty() {
+        reset_mpm_grid_hierarchy_with_level_map(
+            grid_hierarchy,
+            dt,
+            block_node_span,
+            level_map,
+        );
+        return;
+    }
+    let (min_cell, total_node_dims) = mpm_grid_bounds_with_padding();
+    let total_cell_dims = (total_node_dims - IVec2::ONE).max(IVec2::ONE);
     if force_single_block {
         grid_hierarchy.clear();
         grid_hierarchy.add_block(GridBlock::new(
@@ -344,7 +361,7 @@ pub(crate) fn reset_mpm_grid_hierarchy_for_mode(
             CELL_SIZE_M,
             dt.max(1e-6),
             min_cell,
-            UVec2::new(node_dims.x as u32, node_dims.y as u32),
+            UVec2::new(total_node_dims.x as u32, total_node_dims.y as u32),
         ));
         return;
     }
@@ -353,17 +370,17 @@ pub(crate) fn reset_mpm_grid_hierarchy_for_mode(
         let div_y = divisions.y.max(1) as i32;
         grid_hierarchy.clear();
         for by in 0..div_y {
-            let y0 = by * node_dims.y / div_y;
-            let y1 = (by + 1) * node_dims.y / div_y;
-            let block_h = y1 - y0;
-            if block_h <= 0 {
+            let y0 = by * total_cell_dims.y / div_y;
+            let y1 = (by + 1) * total_cell_dims.y / div_y;
+            let block_cell_h = y1 - y0;
+            if block_cell_h <= 0 {
                 continue;
             }
             for bx in 0..div_x {
-                let x0 = bx * node_dims.x / div_x;
-                let x1 = (bx + 1) * node_dims.x / div_x;
-                let block_w = x1 - x0;
-                if block_w <= 0 {
+                let x0 = bx * total_cell_dims.x / div_x;
+                let x1 = (bx + 1) * total_cell_dims.x / div_x;
+                let block_cell_w = x1 - x0;
+                if block_cell_w <= 0 {
                     continue;
                 }
                 grid_hierarchy.add_block(GridBlock::new(
@@ -371,7 +388,7 @@ pub(crate) fn reset_mpm_grid_hierarchy_for_mode(
                     CELL_SIZE_M,
                     dt.max(1e-6),
                     min_cell + IVec2::new(x0, y0),
-                    UVec2::new(block_w as u32, block_h as u32),
+                    UVec2::new((block_cell_w + 1) as u32, (block_cell_h + 1) as u32),
                 ));
             }
         }
@@ -381,23 +398,50 @@ pub(crate) fn reset_mpm_grid_hierarchy_for_mode(
 }
 
 fn reset_mpm_grid_hierarchy_with_span(grid_hierarchy: &mut GridHierarchy, dt: f32, span: i32) {
-    let (min_cell, node_dims) = mpm_grid_bounds_with_padding();
+    let (min_cell, total_node_dims) = mpm_grid_bounds_with_padding();
+    let total_cell_dims = (total_node_dims - IVec2::ONE).max(IVec2::ONE);
     let mut by = 0;
-    while by < node_dims.y {
-        let block_h = (node_dims.y - by).min(span);
+    while by < total_cell_dims.y {
+        let block_cell_h = (total_cell_dims.y - by).min(span);
         let mut bx = 0;
-        while bx < node_dims.x {
-            let block_w = (node_dims.x - bx).min(span);
+        while bx < total_cell_dims.x {
+            let block_cell_w = (total_cell_dims.x - bx).min(span);
             grid_hierarchy.add_block(GridBlock::new(
                 0,
                 CELL_SIZE_M,
                 dt.max(1e-6),
                 min_cell + IVec2::new(bx, by),
-                UVec2::new(block_w as u32, block_h as u32),
+                UVec2::new((block_cell_w + 1) as u32, (block_cell_h + 1) as u32),
             ));
             bx += span;
         }
         by += span;
+    }
+}
+
+/// 指定されたlevel mapからMPM gridを構築する（空間LoD対応）。
+///
+/// `level_entries` は `(block_origin_node, level, block_cell_dims)` のリスト。
+/// level L のblockは `h_b = CELL_SIZE_M * 2^L` の空間解像度を持つ。
+/// 各blockは `block_cell_dims + 1` のノード数を持ち、境界ノードを隣接blockと共有する。
+/// `block_cell_dims` が `UVec2::ZERO` の場合は `block_node_span × block_node_span` を使う。
+pub(crate) fn reset_mpm_grid_hierarchy_with_level_map(
+    grid_hierarchy: &mut GridHierarchy,
+    dt: f32,
+    block_node_span: i32,
+    level_entries: &[(IVec2, u8, UVec2)],
+) {
+    grid_hierarchy.clear();
+    let default_span = block_node_span.max(1) as u32;
+    for &(origin, level, block_cell_dims) in level_entries {
+        let h_b = CELL_SIZE_M * (1u32 << level) as f32;
+        let cell_dims = if block_cell_dims == UVec2::ZERO {
+            UVec2::new(default_span, default_span)
+        } else {
+            UVec2::new(block_cell_dims.x.max(1), block_cell_dims.y.max(1))
+        };
+        let node_dims = cell_dims + UVec2::ONE;
+        grid_hierarchy.add_block(GridBlock::new(level, h_b, dt.max(1e-6), origin, node_dims));
     }
 }
 

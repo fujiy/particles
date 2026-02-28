@@ -4,6 +4,7 @@ use crate::physics::world::particle::ParticleStepBreakdown;
 pub(crate) struct MpmPhase {
     pub(crate) name: &'static str,
     pub(crate) wall_secs: f64,
+    pub(crate) cpu_secs: f64,
 }
 
 #[derive(Clone, Debug, Default)]

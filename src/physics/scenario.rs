@@ -119,6 +119,12 @@ pub struct ScenarioSpec {
     pub reset_fixed_world: bool,
     pub mpm_force_single_block: bool,
     pub mpm_block_divisions: Option<UVec2>,
+    /// 空間LoD: `(block_origin_node, level, block_cell_dims)` のリスト。
+    /// 指定時は `mpm_force_single_block` / `mpm_block_divisions` より優先される。
+    /// level L のblockは `h_b = CELL_SIZE_M * 2^L` の空間解像度を持つ。
+    /// blockノード数は `block_cell_dims + 1`（境界ノード共有）として構築される。
+    /// `block_cell_dims` が `UVec2::ZERO` の場合はデフォルト (`DEFAULT_MPM_BLOCK_NODE_SPAN`) を使う。
+    pub mpm_level_map: Vec<(IVec2, u8, UVec2)>,
     pub loaded_chunk_min: Option<IVec2>,
     pub loaded_chunk_max: Option<IVec2>,
     pub terrain_fills: Vec<TerrainFillSpec>,
@@ -221,6 +227,7 @@ struct FinalStateJson {
 pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
     let world_min_cell: i32 = -32;
     let world_max_cell: i32 = 31;
+    let lod_block_dims = UVec2::new(16, 16);
     let loaded_chunk_min = IVec2::new(
         world_min_cell.div_euclid(CHUNK_SIZE_I32),
         world_min_cell.div_euclid(CHUNK_SIZE_I32),
@@ -239,6 +246,7 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
             reset_fixed_world: false,
             mpm_force_single_block: false,
             mpm_block_divisions: None,
+            mpm_level_map: Vec::new(),
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -310,6 +318,7 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
             reset_fixed_world: false,
             mpm_force_single_block: false,
             mpm_block_divisions: Some(UVec2::new(2, 2)),
+            mpm_level_map: Vec::new(),
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -354,11 +363,78 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 margin_cells: 2,
             }),
         },
+        // water_drop_spatial_lod: 空間LoDが有効なwater_dropシナリオ。
+        //
+        // 方針:
+        // - block形状は全levelで 16x16 cells の正方形に統一する（=> 17x17 nodes）。
+        // - block境界はtile (chunk) 境界に揃える。
+        // - level 0 (fine) は中央2x2、level 1 (coarse) はその外周リングを担当する。
+        ScenarioSpec {
+            name: "water_drop_spatial_lod".to_string(),
+            reset_fixed_world: false,
+            mpm_force_single_block: false,
+            mpm_block_divisions: None,
+            mpm_level_map: vec![
+                // Level 0 fine: 中央 8m x 8m を 2x2 block で表現。
+                (IVec2::new(-16, -16), 0, lod_block_dims),
+                (IVec2::new(0, -16), 0, lod_block_dims),
+                (IVec2::new(-16, 0), 0, lod_block_dims),
+                (IVec2::new(0, 0), 0, lod_block_dims),
+                // Level 1 coarse: 外周リング (3x3 の中央を除いた8 block)。
+                (IVec2::new(-24, -24), 1, lod_block_dims),
+                (IVec2::new(-8, -24), 1, lod_block_dims),
+                (IVec2::new(8, -24), 1, lod_block_dims),
+                (IVec2::new(-24, -8), 1, lod_block_dims),
+                (IVec2::new(8, -8), 1, lod_block_dims),
+                (IVec2::new(-24, 8), 1, lod_block_dims),
+                (IVec2::new(-8, 8), 1, lod_block_dims),
+                (IVec2::new(8, 8), 1, lod_block_dims),
+            ],
+            loaded_chunk_min: Some(IVec2::new(-1, -1)),
+            loaded_chunk_max: Some(IVec2::new(0, 0)),
+            terrain_fills: vec![
+                TerrainFillSpec {
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(world_max_cell, world_min_cell + wall_thickness - 1),
+                    ),
+                    material: TerrainMaterial::Stone,
+                },
+                TerrainFillSpec {
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(left_wall_max, world_max_cell),
+                    ),
+                    material: TerrainMaterial::Stone,
+                },
+                TerrainFillSpec {
+                    rect: CellRect::new(
+                        IVec2::new(right_wall_min, world_min_cell),
+                        IVec2::new(world_max_cell, world_max_cell),
+                    ),
+                    material: TerrainMaterial::Stone,
+                },
+            ],
+            free_particles: vec![ParticleSpawnSpec {
+                rect: CellRect::new(IVec2::new(-10, -2), IVec2::new(10, 14)),
+                material: ParticleMaterial::WaterLiquid,
+                initial_velocity: Vec2::ZERO,
+            }],
+            objects: Vec::new(),
+            step_count: 300,
+            thresholds: ScenarioThresholds {
+                max_penetration_rate: Some(0.10),
+                max_max_speed_mps: Some(30.0),
+                min_sleep_ratio: None,
+            },
+            water_surface_assertion: None,
+        },
         ScenarioSpec {
             name: "terrain_contact_stability".to_string(),
             reset_fixed_world: false,
             mpm_force_single_block: false,
             mpm_block_divisions: None,
+            mpm_level_map: Vec::new(),
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -1213,7 +1289,7 @@ mod tests {
     use super::{apply_scenario_spec, default_scenario_spec_by_name, parse_toggle_value};
     use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
     use crate::physics::world::particle::ParticleWorld;
-    use crate::physics::world::terrain::{TerrainCell, TerrainWorld};
+    use crate::physics::world::terrain::{CHUNK_SIZE_I32, TerrainCell, TerrainWorld};
     use bevy::prelude::{IVec2, UVec2};
 
     #[test]
@@ -1265,5 +1341,44 @@ mod tests {
         let spec = default_scenario_spec_by_name("water_drop").expect("water_drop must exist");
         assert!(!spec.mpm_force_single_block);
         assert_eq!(spec.mpm_block_divisions, Some(UVec2::new(2, 2)));
+    }
+
+    #[test]
+    fn water_drop_spatial_lod_blocks_are_uniform_square_and_tile_aligned() {
+        let spec = default_scenario_spec_by_name("water_drop_spatial_lod")
+            .expect("water_drop_spatial_lod must exist");
+        assert!(!spec.mpm_level_map.is_empty());
+
+        let expected_dims = spec.mpm_level_map[0].2;
+        assert!(spec.mpm_level_map.iter().any(|(_, level, _)| *level == 1));
+
+        for (origin, level, dims) in &spec.mpm_level_map {
+            assert_eq!(dims.x, dims.y, "block dims must be square");
+            assert_eq!(*dims, expected_dims, "all levels must use same cell dims");
+
+            let cell_scale = 1_i32 << (*level as i32);
+            let min_cell = *origin * cell_scale;
+            let max_cell_exclusive = (*origin + dims.as_ivec2()) * cell_scale;
+            assert_eq!(
+                min_cell.x.rem_euclid(CHUNK_SIZE_I32),
+                0,
+                "min x boundary must align to chunk"
+            );
+            assert_eq!(
+                min_cell.y.rem_euclid(CHUNK_SIZE_I32),
+                0,
+                "min y boundary must align to chunk"
+            );
+            assert_eq!(
+                max_cell_exclusive.x.rem_euclid(CHUNK_SIZE_I32),
+                0,
+                "max x boundary must align to chunk"
+            );
+            assert_eq!(
+                max_cell_exclusive.y.rem_euclid(CHUNK_SIZE_I32),
+                0,
+                "max y boundary must align to chunk"
+            );
+        }
     }
 }

@@ -8,3 +8,6 @@ pub const WORLD_MAX_CHUNK_X: i32 = 1;
 pub const WORLD_MIN_CHUNK_Y: i32 = -2;
 pub const WORLD_MAX_CHUNK_Y: i32 = 1;
 pub const TERRAIN_SDF_SAMPLES_PER_CELL: i32 = 2;
+// Default MPM block edge length in grid cells.
+// Node count is (cell span + 1) per axis because boundary nodes are shared.
+pub const DEFAULT_MPM_BLOCK_NODE_SPAN: i32 = 16;

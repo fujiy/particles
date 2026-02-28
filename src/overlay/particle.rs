@@ -15,7 +15,6 @@ pub(super) fn draw_particle_overlay(
         return;
     }
 
-    let water_overlay_radius = nominal_particle_draw_radius_m();
     let terrain_overlay_chunk_bounds =
         active_region
             .chunk_min
@@ -28,21 +27,22 @@ pub(super) fn draw_particle_overlay(
                 )
             });
 
+    let water_overlay_radius = nominal_particle_draw_radius_m();
+
     for pos in terrain_world.static_particle_positions() {
-        let Some((overlay_min_chunk, overlay_max_chunk)) = terrain_overlay_chunk_bounds else {
-            continue;
-        };
-        let cell = world_to_cell(*pos);
-        let chunk = IVec2::new(
-            cell.x.div_euclid(CHUNK_SIZE_I32),
-            cell.y.div_euclid(CHUNK_SIZE_I32),
-        );
-        if chunk.x < overlay_min_chunk.x
-            || chunk.x > overlay_max_chunk.x
-            || chunk.y < overlay_min_chunk.y
-            || chunk.y > overlay_max_chunk.y
-        {
-            continue;
+        if let Some((overlay_min_chunk, overlay_max_chunk)) = terrain_overlay_chunk_bounds {
+            let cell = world_to_cell(*pos);
+            let chunk = IVec2::new(
+                cell.x.div_euclid(CHUNK_SIZE_I32),
+                cell.y.div_euclid(CHUNK_SIZE_I32),
+            );
+            if chunk.x < overlay_min_chunk.x
+                || chunk.x > overlay_max_chunk.x
+                || chunk.y < overlay_min_chunk.y
+                || chunk.y > overlay_max_chunk.y
+            {
+                continue;
+            }
         }
         gizmos
             .circle_2d(

@@ -68,21 +68,20 @@ fn configure_block_rate_level(
     rate_level_by_block: &mut [u8],
     step_units_by_block: &mut [u64],
 ) {
-    let Some(h_b) = grid_hierarchy
-        .blocks()
-        .get(block_index)
-        .map(|block| block.h_b.max(1e-6))
-    else {
+    if grid_hierarchy.blocks().get(block_index).is_none() {
         return;
-    };
+    }
+    // Spatial LoD test path: keep temporal scheduling independent from block spatial level.
+    // Using base cell width avoids coarse blocks receiving systematically larger dt.
+    let h_rate = CELL_SIZE_M.max(1e-6);
     let u_max = estimate_block_max_speed(continuum_world, mpm_block_index_table, block_index);
     let dt_u = if u_max > 1e-5 {
-        MPM_CFL_SAFETY * h_b / u_max
+        MPM_CFL_SAFETY * h_rate / u_max
     } else {
         frame_dt
     };
-    let dt_c = MPM_CFL_SAFETY * h_b / (c + u_max).max(1e-6);
-    let dt_a = MPM_CFL_ACCEL_SAFETY * (h_b / a_max).sqrt();
+    let dt_c = MPM_CFL_SAFETY * h_rate / (c + u_max).max(1e-6);
+    let dt_a = MPM_CFL_ACCEL_SAFETY * (h_rate / a_max).sqrt();
     let target_dt = dt_u.min(dt_c).min(dt_a).clamp(MPM_MIN_DT_SUB, frame_dt);
     let rate_level =
         quantize_pow2_rate_level(frame_dt, target_dt, max_rate_level).max(min_rate_level);
@@ -305,7 +304,8 @@ pub(crate) fn step_simulation_once(
             }
 
             // Per-boundary ghost refresh: rebuild ghost_indices for every
-            // active block from its neighbor blocks' owner particles.
+            // block so currently inactive receiver blocks can become active
+            // when nearby owner particles approach a boundary.
             //
             // `refresh_block_index_table` above has an early-exit when no
             // ownership change occurred, which leaves ghost_indices stale for
@@ -317,7 +317,7 @@ pub(crate) fn step_simulation_once(
                 let _span = tracing::info_span!("physics::mpm::ghost_refresh").entered();
                 let t0 = std::time::Instant::now();
                 let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
-                for &active_block in &active_blocks {
+                for active_block in 0..block_count {
                     refresh_ghost_indices_for_block(
                         continuum_world,
                         grid_hierarchy,
@@ -332,13 +332,21 @@ pub(crate) fn step_simulation_once(
                     (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
             }
 
+            // Ghost refresh can activate additional grid blocks (ghost-only).
+            // Use the refreshed set for P2G/grid phases so cross-boundary
+            // transfer remains continuous even when ownership did not rebin.
+            let grid_blocks_for_step = active_blocks_from_index_table(mpm_block_index_table);
+            if grid_blocks_for_step.is_empty() {
+                continue;
+            }
+
             {
                 let _span = tracing::info_span!("physics::mpm::step_block_coupled").entered();
                 let step_metrics = step_block_set_coupled(
                     continuum_world,
                     grid_hierarchy,
                     mpm_block_index_table,
-                    &active_blocks,
+                    &grid_blocks_for_step,
                     &due_blocks,
                     &owner_block_drift_secs,
                     Some(terrain_world),

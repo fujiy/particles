@@ -24,7 +24,9 @@ const GRID_PHYSICS_REGION_COLOR: Color = Color::srgba(0.96, 0.72, 0.12, 0.98);
 const GRID_TERRAIN_UPDATED_COLOR: Color = Color::srgba(0.13, 0.85, 0.92, 1.00);
 const GRID_PARTICLE_UPDATED_COLOR: Color = Color::srgba(0.76, 0.56, 0.98, 1.00);
 const GRID_MPM_BLOCK_COLOR: Color = Color::srgba(1.00, 0.62, 0.18, 0.92);
+const GRID_MPM_BLOCK_COARSE_COLOR: Color = Color::srgba(0.20, 0.80, 0.96, 0.88);
 const GRID_MPM_NODE_COLOR: Color = Color::srgba(1.00, 0.80, 0.36, 0.30);
+const GRID_MPM_NODE_COARSE_COLOR: Color = Color::srgba(0.20, 0.80, 0.96, 0.22);
 const GRID_MPM_ACTIVE_NODE_COLOR: Color = Color::srgba(0.98, 0.94, 0.20, 0.95);
 const GRID_SUB_BLOCK_DEBT_HOT_COLOR: Color = Color::srgba(0.96, 0.12, 0.12, 0.96);
 const GRID_SUB_BLOCK_LABEL_BASE_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.98);
@@ -33,6 +35,7 @@ const GRID_OBJECT_CENTER_COLOR: Color = Color::srgba(0.98, 0.98, 0.98, 0.90);
 const GRID_OBJECT_LOCAL_X_COLOR: Color = Color::srgba(0.95, 0.26, 0.21, 0.95);
 const GRID_OBJECT_LOCAL_Y_COLOR: Color = Color::srgba(0.18, 0.80, 0.44, 0.95);
 const TILE_BUTTON_BOTTOM_PX: f32 = 88.0;
+const SDF_BUTTON_BOTTOM_PX: f32 = 126.0;
 const PHYSICS_AREA_BUTTON_BOTTOM_PX: f32 = 50.0;
 const PARTICLE_BUTTON_BOTTOM_PX: f32 = 12.0;
 const WATER_KERNEL_RADIUS_M: f32 = water_kernel_radius_m(DEFAULT_MATERIAL_PARAMS);
@@ -40,6 +43,10 @@ const TERRAIN_PARTICLE_RADIUS_M: f32 = particle_radius_m(DEFAULT_MATERIAL_PARAMS
 const PARTICLE_OVERLAY_CIRCLE_RESOLUTION: u32 = 8;
 const GRID_OBJECT_AXIS_LENGTH_M: f32 = CELL_SIZE_M * 1.6;
 const GRID_OBJECT_CENTER_RADIUS_M: f32 = CELL_SIZE_M * 0.12;
+const TERRAIN_SDF_OVERLAY_STEP_M: f32 = CELL_SIZE_M;
+const TERRAIN_SDF_OVERLAY_CELL_RADIUS_M: f32 = CELL_SIZE_M * 0.45;
+const TERRAIN_SDF_OVERLAY_RANGE_M: f32 = CELL_SIZE_M * 6.0;
+const TERRAIN_SDF_OVERLAY_NEGATIVE_FILL_Z: f32 = 0.2;
 
 mod grid;
 mod particle;
@@ -51,12 +58,14 @@ impl Plugin for OverlayPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ParticleOverlayState>()
             .init_resource::<TileOverlayState>()
+            .init_resource::<SdfOverlayState>()
             .init_resource::<PhysicsAreaOverlayState>()
             .add_systems(Startup, setup_overlay_ui)
             .add_systems(
                 Update,
                 (
                     handle_tile_overlay_button,
+                    handle_sdf_overlay_button,
                     handle_physics_area_overlay_button,
                     handle_particle_overlay_button,
                 )
@@ -67,6 +76,7 @@ impl Plugin for OverlayPlugin {
                 Update,
                 (
                     update_tile_overlay_button_label,
+                    update_sdf_overlay_button_label,
                     update_physics_area_overlay_button_label,
                     update_particle_overlay_button_label,
                     update_overlay_info_text,
@@ -78,6 +88,7 @@ impl Plugin for OverlayPlugin {
                 Update,
                 (
                     draw_tile_overlay,
+                    draw_sdf_overlay,
                     draw_physics_area_overlay,
                     draw_particle_overlay,
                 )
@@ -121,6 +132,12 @@ struct TileOverlayToggleButton;
 struct TileOverlayToggleButtonLabel;
 
 #[derive(Component)]
+struct SdfOverlayToggleButton;
+
+#[derive(Component)]
+struct SdfOverlayToggleButtonLabel;
+
+#[derive(Component)]
 struct PhysicsAreaOverlayToggleButton;
 
 #[derive(Component)]
@@ -137,15 +154,27 @@ impl Default for PhysicsAreaOverlayState {
     }
 }
 
+#[derive(Resource, Debug)]
+struct SdfOverlayState {
+    enabled: bool,
+}
+
+impl Default for SdfOverlayState {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
 #[derive(Component)]
 struct OverlayInfoText;
 
 use ui::{
-    handle_particle_overlay_button, handle_physics_area_overlay_button, handle_tile_overlay_button,
-    setup_overlay_ui, update_overlay_info_text, update_particle_overlay_button_label,
-    update_physics_area_overlay_button_label, update_tile_overlay_button_label,
+    handle_particle_overlay_button, handle_physics_area_overlay_button, handle_sdf_overlay_button,
+    handle_tile_overlay_button, setup_overlay_ui, update_overlay_info_text,
+    update_particle_overlay_button_label, update_physics_area_overlay_button_label,
+    update_sdf_overlay_button_label, update_tile_overlay_button_label,
 };
 
-use grid::{draw_physics_area_overlay, draw_tile_overlay};
+use grid::{draw_physics_area_overlay, draw_sdf_overlay, draw_tile_overlay};
 
 use particle::draw_particle_overlay;

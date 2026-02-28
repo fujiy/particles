@@ -16,6 +16,7 @@ use crate::physics::state::{
     ReplayState, ResetSimulationRequest, SaveMapRequest, SimulationParallelSettings,
     SimulationState, TerrainStreamingSettings,
 };
+use crate::physics::world::constants::DEFAULT_MPM_BLOCK_NODE_SPAN;
 use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::{GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
@@ -106,9 +107,10 @@ pub(crate) fn handle_replay_requests(
         reset_mpm_grid_hierarchy_for_mode(
             &mut grid_hierarchy,
             particle_world.solver_params.fixed_dt,
-            particle_world.solver_params.sub_block_size_cells,
+            DEFAULT_MPM_BLOCK_NODE_SPAN,
             spec.mpm_force_single_block,
             spec.mpm_block_divisions,
+            &spec.mpm_level_map,
         );
         mpm_block_index_table.clear();
         terrain_boundary_sampler.clear();
@@ -263,9 +265,10 @@ pub(crate) fn apply_sim_reset(
                 reset_mpm_grid_hierarchy_for_mode(
                     &mut grid_hierarchy,
                     particle_world.solver_params.fixed_dt,
-                    particle_world.solver_params.sub_block_size_cells,
+                    DEFAULT_MPM_BLOCK_NODE_SPAN,
                     spec.mpm_force_single_block,
                     spec.mpm_block_divisions,
+                    &spec.mpm_level_map,
                 );
                 mpm_block_index_table.clear();
                 terrain_boundary_sampler.clear();
@@ -289,7 +292,7 @@ pub(crate) fn apply_sim_reset(
     reset_mpm_grid_hierarchy(
         &mut grid_hierarchy,
         particle_world.solver_params.fixed_dt,
-        particle_world.solver_params.sub_block_size_cells,
+        DEFAULT_MPM_BLOCK_NODE_SPAN,
     );
     mpm_block_index_table.clear();
     terrain_boundary_sampler.clear();

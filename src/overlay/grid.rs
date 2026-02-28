@@ -5,6 +5,9 @@ use crate::physics::solver::params_types::SolverParams;
 use crate::physics::world::grid::GridHierarchy;
 use crate::physics::world::sub_block::{rate_level_from_divisor, sub_block_world_bounds};
 
+#[derive(Component)]
+pub(super) struct SdfOverlayNegativeFillCell;
+
 pub(super) fn draw_tile_overlay(
     mut gizmos: Gizmos,
     overlay_state: Res<TileOverlayState>,
@@ -21,6 +24,81 @@ pub(super) fn draw_tile_overlay(
             GRID_LOD_CHUNK_COLOR
         };
         draw_chunk_rect_outline(&mut gizmos, tile.origin_chunk, tile.span_chunks, color);
+    }
+}
+
+pub(super) fn draw_sdf_overlay(
+    mut commands: Commands,
+    mut gizmos: Gizmos,
+    overlay_state: Res<SdfOverlayState>,
+    active_region: Res<PhysicsActiveRegion>,
+    region_settings: Res<PhysicsRegionSettings>,
+    terrain_world: Res<TerrainWorld>,
+    negative_fill_cells: Query<Entity, With<SdfOverlayNegativeFillCell>>,
+) {
+    let needs_rebuild = overlay_state.is_changed()
+        || active_region.is_changed()
+        || region_settings.is_changed()
+        || terrain_world.is_changed();
+
+    if !overlay_state.enabled {
+        for entity in &negative_fill_cells {
+            commands.entity(entity).despawn();
+        }
+        return;
+    }
+
+    let Some((world_min, world_max)) =
+        sdf_overlay_world_bounds(&active_region, &region_settings, &terrain_world)
+    else {
+        for entity in &negative_fill_cells {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
+    if needs_rebuild {
+        for entity in &negative_fill_cells {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    let step = TERRAIN_SDF_OVERLAY_STEP_M.max(1e-3);
+    let x0 = (world_min.x / step).floor() as i32;
+    let x1 = (world_max.x / step).ceil() as i32;
+    let y0 = (world_min.y / step).floor() as i32;
+    let y1 = (world_max.y / step).ceil() as i32;
+
+    for gy in y0..=y1 {
+        for gx in x0..=x1 {
+            let center = Vec2::new((gx as f32 + 0.5) * step, (gy as f32 + 0.5) * step);
+            let Some((sdf, _)) = terrain_world.sample_signed_distance_and_normal(center) else {
+                continue;
+            };
+            if sdf <= 0.0 {
+                if needs_rebuild {
+                    let color = sdf_overlay_negative_fill_color(sdf);
+                    if color.to_srgba().alpha > 1e-3 {
+                        commands.spawn((
+                            Sprite::from_color(color, Vec2::splat(step * 0.98)),
+                            Transform::from_xyz(
+                                center.x,
+                                center.y,
+                                TERRAIN_SDF_OVERLAY_NEGATIVE_FILL_Z,
+                            ),
+                            SdfOverlayNegativeFillCell,
+                        ));
+                    }
+                }
+            } else {
+                let color = sdf_overlay_cell_color(sdf);
+                if color.to_srgba().alpha <= 1e-3 {
+                    continue;
+                }
+                gizmos
+                    .circle_2d(center, TERRAIN_SDF_OVERLAY_CELL_RADIUS_M, color)
+                    .resolution(4);
+            }
+        }
     }
 }
 
@@ -210,7 +288,19 @@ fn draw_mpm_grid_overlay(
             continue;
         };
 
-        draw_rect_outline(gizmos, block_min, block_max, GRID_MPM_BLOCK_COLOR);
+        let is_coarse = block.level > 0;
+        let block_outline_color = if is_coarse {
+            GRID_MPM_BLOCK_COARSE_COLOR
+        } else {
+            GRID_MPM_BLOCK_COLOR
+        };
+        let node_line_color = if is_coarse {
+            GRID_MPM_NODE_COARSE_COLOR
+        } else {
+            GRID_MPM_NODE_COLOR
+        };
+        draw_rect_outline(gizmos, block_min, block_max, block_outline_color);
+        draw_mpm_block_level_label(gizmos, block, draw_min, draw_max);
         draw_mpm_block_rate_level(gizmos, block, frame_dt, draw_min, draw_max);
 
         let step = block.h_b.max(1e-6);
@@ -221,12 +311,41 @@ fn draw_mpm_grid_overlay(
         let start_y = (((draw_min.y - block_min.y) / step).floor() as i32).clamp(0, max_y_index);
         let end_y = (((draw_max.y - block_min.y) / step).ceil() as i32).clamp(0, max_y_index);
 
+        if is_coarse && step > CELL_SIZE_M * 1.01 {
+            let minor_step = CELL_SIZE_M.max(1e-6);
+            let minor_color = blend_color(node_line_color, GRID_MPM_NODE_COLOR, 0.75);
+            let minor_start_x =
+                (((draw_min.x - block_min.x) / minor_step).floor() as i32).clamp(0, max_x_index);
+            let minor_end_x =
+                (((draw_max.x - block_min.x) / minor_step).ceil() as i32).clamp(0, max_x_index);
+            let minor_start_y =
+                (((draw_min.y - block_min.y) / minor_step).floor() as i32).clamp(0, max_y_index);
+            let minor_end_y =
+                (((draw_max.y - block_min.y) / minor_step).ceil() as i32).clamp(0, max_y_index);
+            for ix in minor_start_x..=minor_end_x {
+                let x = block_min.x + ix as f32 * minor_step;
+                gizmos.line_2d(
+                    Vec2::new(x, draw_min.y),
+                    Vec2::new(x, draw_max.y),
+                    minor_color,
+                );
+            }
+            for iy in minor_start_y..=minor_end_y {
+                let y = block_min.y + iy as f32 * minor_step;
+                gizmos.line_2d(
+                    Vec2::new(draw_min.x, y),
+                    Vec2::new(draw_max.x, y),
+                    minor_color,
+                );
+            }
+        }
+
         for ix in start_x..=end_x {
             let x = block_min.x + ix as f32 * step;
             gizmos.line_2d(
                 Vec2::new(x, draw_min.y),
                 Vec2::new(x, draw_max.y),
-                GRID_MPM_NODE_COLOR,
+                node_line_color,
             );
         }
         for iy in start_y..=end_y {
@@ -234,11 +353,11 @@ fn draw_mpm_grid_overlay(
             gizmos.line_2d(
                 Vec2::new(draw_min.x, y),
                 Vec2::new(draw_max.x, y),
-                GRID_MPM_NODE_COLOR,
+                node_line_color,
             );
         }
 
-        let marker_half = (step * 0.12).clamp(0.01, 0.05);
+        let marker_half = (step * 0.14).clamp(0.01, 0.10);
         for &node in block.active_nodes() {
             let p = node.as_vec2() * block.h_b;
             if p.x < draw_min.x || p.x > draw_max.x || p.y < draw_min.y || p.y > draw_max.y {
@@ -256,6 +375,35 @@ fn draw_mpm_grid_overlay(
             );
         }
     }
+}
+
+fn draw_mpm_block_level_label(
+    gizmos: &mut Gizmos,
+    block: &crate::physics::world::grid::GridBlock,
+    draw_min: Vec2,
+    draw_max: Vec2,
+) {
+    if block.level == 0 {
+        return;
+    }
+    let block_min = block.world_node_min();
+    let block_max = block.world_node_max();
+    let extent = block_max - block_min;
+    let size = (extent.x.min(extent.y) * 0.12).clamp(0.04, 0.20);
+    // 右上コーナーに "L1", "L2" ... を表示（blockが画面内の場合）
+    let label_pos = Vec2::new(
+        (block_max.x - size * 1.2).clamp(draw_min.x, draw_max.x),
+        (block_max.y - size * 1.2).clamp(draw_min.y, draw_max.y),
+    );
+    if label_pos.x < draw_min.x
+        || label_pos.x > draw_max.x
+        || label_pos.y < draw_min.y
+        || label_pos.y > draw_max.y
+    {
+        return;
+    }
+    let color = GRID_MPM_BLOCK_COARSE_COLOR;
+    draw_number_stroke(gizmos, block.level as u8, label_pos, size, color);
 }
 
 fn draw_mpm_block_rate_level(
@@ -292,6 +440,55 @@ fn clipped_rect(min: Vec2, max: Vec2, clip_rect: Option<(Vec2, Vec2)>) -> Option
     } else {
         Some((draw_min, draw_max))
     }
+}
+
+fn sdf_overlay_world_bounds(
+    active_region: &PhysicsActiveRegion,
+    region_settings: &PhysicsRegionSettings,
+    terrain_world: &TerrainWorld,
+) -> Option<(Vec2, Vec2)> {
+    if let (Some(min_chunk), Some(max_chunk)) = (active_region.chunk_min, active_region.chunk_max) {
+        let halo_chunks = region_settings.active_halo_chunks.max(0);
+        let overlay_min_chunk = min_chunk - IVec2::splat(halo_chunks);
+        let overlay_max_chunk = max_chunk + IVec2::splat(halo_chunks);
+        return Some((
+            overlay_min_chunk.as_vec2() * CHUNK_WORLD_SIZE_M,
+            (overlay_max_chunk + IVec2::ONE).as_vec2() * CHUNK_WORLD_SIZE_M,
+        ));
+    }
+    let positions = terrain_world.static_particle_positions();
+    if positions.is_empty() {
+        return None;
+    }
+    let mut min = Vec2::splat(f32::INFINITY);
+    let mut max = Vec2::splat(f32::NEG_INFINITY);
+    for &p in positions {
+        min = min.min(p);
+        max = max.max(p);
+    }
+    let margin = Vec2::splat(CHUNK_WORLD_SIZE_M * 0.5);
+    Some((min - margin, max + margin))
+}
+
+fn sdf_overlay_cell_color(sdf: f32) -> Color {
+    let range = TERRAIN_SDF_OVERLAY_RANGE_M.max(1e-4);
+    let signed = (sdf / range).clamp(-1.0, 1.0);
+    if signed >= 1.0 {
+        return Color::srgba(0.0, 0.0, 0.0, 0.0);
+    }
+    let near = 1.0 - signed;
+    Color::srgba(0.10, 0.72, 0.95, 0.06 + 0.24 * near)
+}
+
+fn sdf_overlay_negative_fill_color(sdf: f32) -> Color {
+    let range = TERRAIN_SDF_OVERLAY_RANGE_M.max(1e-4);
+    let depth = (-sdf / range).clamp(0.0, 1.0);
+    Color::srgba(
+        0.92,
+        0.22 + 0.30 * depth,
+        0.10 + 0.12 * depth,
+        0.24 + 0.54 * depth,
+    )
 }
 
 fn blend_color(from: Color, to: Color, t: f32) -> Color {

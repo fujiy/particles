@@ -10,10 +10,33 @@ use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::{GridBlock, GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::kernel::evaluate_quadratic_bspline_stencil_2d;
 use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
-use crate::physics::world::terrain::TerrainWorld;
+use crate::physics::world::terrain::{CELL_SIZE_M, TerrainWorld};
 
 const GRID_MASS_EPSILON: f32 = 1e-8;
 const DET_EPSILON: f32 = 1e-6;
+
+fn node_scale_for_h(h: f32) -> i32 {
+    ((h.max(DET_EPSILON) / CELL_SIZE_M).round() as i32).max(1)
+}
+
+fn missing_stencil_nodes_for_block(
+    grid: &GridHierarchy,
+    block_index: usize,
+    world_pos: Vec2,
+) -> usize {
+    let Some(block) = grid.blocks().get(block_index) else {
+        return usize::MAX / 4;
+    };
+    let h = block.h_b.max(DET_EPSILON);
+    let scale = node_scale_for_h(h);
+    let inv_h = 1.0 / h;
+    let stencil = evaluate_quadratic_bspline_stencil_2d(world_pos, inv_h);
+    stencil
+        .samples()
+        .iter()
+        .filter(|sample| grid.node_location(sample.node * scale).is_none())
+        .count()
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct MpmWaterParams {
@@ -216,9 +239,31 @@ pub fn refresh_block_index_table(
             .unwrap_or(0.0)
             .max(0.0);
         let x_pred = particles.x[i] + particles.v[i] * drift + 0.5 * gravity * drift * drift;
-        let next_owner = grid
+        let mut next_owner = grid
             .block_index_for_position(x_pred)
             .unwrap_or_else(|| particles.owner_block_id[i].min(block_count.saturating_sub(1)));
+        let mut best_missing = missing_stencil_nodes_for_block(grid, next_owner, x_pred);
+        if best_missing > 0 {
+            let mut candidates = Vec::with_capacity(9);
+            candidates.push(next_owner);
+            for maybe_neighbor in index_table.neighbor_block_indices(next_owner) {
+                if let Some(neighbor) = maybe_neighbor {
+                    candidates.push(neighbor);
+                }
+            }
+            candidates.sort_unstable();
+            candidates.dedup();
+            for candidate in candidates {
+                let missing = missing_stencil_nodes_for_block(grid, candidate, x_pred);
+                if missing < best_missing {
+                    next_owner = candidate;
+                    best_missing = missing;
+                    if best_missing == 0 {
+                        break;
+                    }
+                }
+            }
+        }
         if particles.owner_block_id[i] != next_owner {
             particles.owner_block_id[i] = next_owner;
             moved += 1;
@@ -245,13 +290,6 @@ pub fn refresh_block_index_table(
         }
     }
 
-    let inv_h = 1.0
-        / grid
-            .blocks()
-            .first()
-            .map(|b| b.h_b)
-            .unwrap_or(1.0)
-            .max(DET_EPSILON);
     for particle_index in 0..particle_count {
         let owner = particles.owner_block_id[particle_index];
         let mut touched_blocks = Vec::with_capacity(4);
@@ -269,9 +307,19 @@ pub fn refresh_block_index_table(
         let x_pred = particles.x[particle_index]
             + particles.v[particle_index] * drift
             + 0.5 * gravity * drift * drift;
+        // 各粒子はowner blockのh_bでカーネルstencilを評価する（可変h_b対応）
+        let h_owner = grid
+            .blocks()
+            .get(owner)
+            .map(|b| b.h_b)
+            .unwrap_or(1.0)
+            .max(DET_EPSILON);
+        let owner_scale = node_scale_for_h(h_owner);
+        let inv_h = 1.0 / h_owner;
         let stencil = evaluate_quadratic_bspline_stencil_2d(x_pred, inv_h);
         for sample in stencil.samples() {
-            let Some(location) = grid.node_location(sample.node) else {
+            let world_key = sample.node * owner_scale;
+            let Some(location) = grid.node_location(world_key) else {
                 continue;
             };
             if location.block_index != owner {
@@ -297,16 +345,15 @@ pub fn refresh_block_index_table(
     clear_inactive_block_nodes(grid, index_table);
 }
 
-/// Rebuilds `ghost_indices` for a single block by scanning only the owner
-/// particles of its 8-connected adjacent neighbor blocks.
+/// Rebuilds `ghost_indices` for a single block by scanning owner particles
+/// from world-space nearby blocks.
 ///
 /// This is the per-boundary ghost update described in MPM-WATER-04: instead
 /// of a full global scan (which `refresh_block_index_table` performs only on
-/// rebin), we rebuild the ghost list for *one* block from its neighbors' owner
-/// particles. The work is O(particles-in-neighbors) rather than
-/// O(all-particles), and it is called for every active block just before P2G
-/// so that ghosts always reflect current predicted positions — even when no
-/// ownership change has occurred.
+/// rebin), we rebuild the ghost list for *one* block from nearby blocks'
+/// owner particles. Callers can execute this for all blocks before P2G so
+/// ghosts reflect current predicted positions — even when no ownership
+/// change has occurred.
 pub fn refresh_ghost_indices_for_block(
     particles: &ContinuumParticleWorld,
     grid: &GridHierarchy,
@@ -322,29 +369,48 @@ pub fn refresh_ghost_indices_for_block(
     let Some(target_block) = grid.blocks().get(block_index) else {
         return;
     };
-    let inv_h = 1.0 / target_block.h_b.max(DET_EPSILON);
+    let t_h = target_block.h_b.max(DET_EPSILON);
     let t_origin = target_block.origin_node;
     let t_end = t_origin + target_block.node_dims.as_ivec2(); // exclusive upper bound
+    let t_world_min = t_origin.as_vec2() * t_h - Vec2::splat(0.5 * t_h);
+    let t_world_max = (t_end - IVec2::ONE).as_vec2() * t_h + Vec2::splat(0.5 * t_h);
 
-    // 事前計算済み隣接マップを O(1) で参照（旧: O(block_count) スキャン）。
-    let neighbors = index_table.neighbor_block_indices(block_index);
-
-    // Collect owner particle indices from neighboring blocks.
+    // Collect owner particle indices from world-space nearby blocks.
     // We clone the slices into a local Vec to release the immutable borrow on
     // `index_table` before taking a mutable borrow for ghost_indices_mut below.
     let mut candidate_particles: Vec<usize> = Vec::new();
-    for maybe_nk in neighbors {
-        let Some(nk) = maybe_nk else { continue };
+    for nk in 0..block_count {
+        if nk == block_index {
+            continue;
+        }
+        let Some(block) = grid.blocks().get(nk) else {
+            continue;
+        };
+        let b_h = block.h_b.max(DET_EPSILON);
+        let b_origin = block.origin_node;
+        let b_end = b_origin + block.node_dims.as_ivec2();
+        let b_world_min = b_origin.as_vec2() * b_h - Vec2::splat(0.5 * b_h);
+        let b_world_max = (b_end - IVec2::ONE).as_vec2() * b_h + Vec2::splat(0.5 * b_h);
+        let margin = (t_h.max(b_h)) * 2.5;
+        let separated = b_world_max.x + margin < t_world_min.x
+            || b_world_min.x - margin > t_world_max.x
+            || b_world_max.y + margin < t_world_min.y
+            || b_world_min.y - margin > t_world_max.y;
+        if separated {
+            continue;
+        }
         candidate_particles.extend_from_slice(index_table.owner_indices(nk));
     }
 
     // Check each candidate particle's predicted kernel stencil for overlap
     // with any node belonging to `block_index`.
-    // 最適化: `grid.node_location()` のHashMap lookupを使わず、対象blockのノード範囲
-    // に対する直接range checkで置換する (HashMap probe 0回、算術演算4回)。
-    let in_target = |node: IVec2| -> bool {
-        node.x >= t_origin.x && node.x < t_end.x && node.y >= t_origin.y && node.y < t_end.y
-    };
+    //
+    // 可変h_b対応: 各粒子はowner blockのh_bでstencilを評価するが、target blockの
+    // ノード範囲チェックはtarget blockのh_bの整数座標系で行う必要がある。
+    // owner block h_b != target block h_bの場合、stencilのノード座標はowner座標系の
+    // ためtargetのノード範囲と一致しない。そこでtarget h_bでも stencil を評価し、
+    // どちらかのstencilのノードがtarget範囲に届くかを判定する。
+    // これにより粗→細・細→粗の境界をまたぐゴーストを正しく捕捉できる。
     let mut new_ghost_indices: Vec<usize> = Vec::with_capacity(candidate_particles.len());
     for particle_index in candidate_particles {
         let owner_blk = particles
@@ -361,8 +427,33 @@ pub fn refresh_ghost_indices_for_block(
         let x_pred = particles.x[particle_index]
             + particles.v[particle_index] * drift
             + 0.5 * gravity * drift * drift;
-        let stencil = evaluate_quadratic_bspline_stencil_2d(x_pred, inv_h);
-        if stencil.samples().iter().any(|s| in_target(s.node)) {
+
+        // owner blockのh_bでstencilを評価してtarget範囲に届くか判定する。
+        // target blockと同じh_bを使う場合は最適化済みrange checkを使う。
+        // 異なるh_bの場合はworld座標ベースで物理的な重なりを判定する。
+        let h_owner = grid
+            .blocks()
+            .get(owner_blk)
+            .map(|b| b.h_b)
+            .unwrap_or(t_h)
+            .max(DET_EPSILON);
+        let in_target_world_range = |node: IVec2, inv_h: f32| -> bool {
+            // このノードのworld座標範囲と target blockのworld座標範囲が交差するか
+            let node_world_min = node.as_vec2() * (1.0 / inv_h) - Vec2::splat(0.5 / inv_h);
+            let node_world_max = node.as_vec2() * (1.0 / inv_h) + Vec2::splat(0.5 / inv_h);
+            node_world_min.x <= t_world_max.x
+                && node_world_max.x >= t_world_min.x
+                && node_world_min.y <= t_world_max.y
+                && node_world_max.y >= t_world_min.y
+        };
+        // 常にworld座標ベースで判定することで、可変h_b境界での取りこぼしを防ぐ。
+        let inv_h_owner = 1.0 / h_owner;
+        let stencil = evaluate_quadratic_bspline_stencil_2d(x_pred, inv_h_owner);
+        let touches_target = stencil
+            .samples()
+            .iter()
+            .any(|s| in_target_world_range(s.node, inv_h_owner));
+        if touches_target {
             new_ghost_indices.push(particle_index);
         }
     }
@@ -499,6 +590,12 @@ pub fn step_block_set_coupled(
         let blocks = unsafe { &mut *(grid_ptr as *mut GridHierarchy) }.blocks_mut();
         (blocks.as_mut_ptr() as usize, blocks.len())
     };
+    // 各blockのh_bスライス: ghost粒子がowner block h_bでカーネルを評価するために使う。
+    // ブロックレイアウトはこのステップ中に変わらないため、一度だけ収集する。
+    let block_h_b: Vec<f32> = {
+        let grid_ref = unsafe { &*(grid_ptr as *const GridHierarchy) };
+        grid_ref.blocks().iter().map(|b| b.h_b).collect()
+    };
     {
         let _span = tracing::info_span!("physics::mpm::p2g_mass_momentum").entered();
         let t0 = Instant::now();
@@ -518,6 +615,7 @@ pub fn step_block_set_coupled(
                     ghost_indices,
                     block,
                     owner_block_drift_secs,
+                    &block_h_b,
                     params,
                 );
             });
@@ -533,6 +631,7 @@ pub fn step_block_set_coupled(
                     index_table.ghost_indices(block_index),
                     block,
                     owner_block_drift_secs,
+                    &block_h_b,
                     params,
                 );
             }
@@ -883,10 +982,13 @@ fn p2g_mass_momentum(
     ghost_indices: &[usize],
     block: &mut GridBlock,
     owner_block_drift_secs: &[f32],
+    // 各blockのh_b（block index順）: ghost粒子がowner block h_bでカーネルを評価するために使う
+    block_h_b: &[f32],
     params: &MpmWaterParams,
 ) {
     block.clear_nodes();
     let h = block.h_b.max(DET_EPSILON);
+    let block_scale = node_scale_for_h(h);
     let inv_h = 1.0 / h;
 
     // Pass 1A: owner particles — render mass 集計も行う。
@@ -918,15 +1020,22 @@ fn p2g_mass_momentum(
             (x_p.x * inv_h).round() as i32,
             (x_p.y * inv_h).round() as i32,
         );
-        if let Some(node) = block.node_mut_by_world(nearest_node) {
-            node.render_mass_sum += m_p;
-            node.render_mass_pos_sum += m_p * x_p;
+        let nearest_key = nearest_node * block_scale;
+        if block.is_world_key_owned(nearest_key) {
+            if let Some(node) = block.node_mut_by_world_key(nearest_key) {
+                node.render_mass_sum += m_p;
+                node.render_mass_pos_sum += m_p * x_p;
+            }
         }
         let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h);
         for sample in stencil.samples() {
+            let world_key = sample.node * block_scale;
+            if !block.is_world_key_owned(world_key) {
+                continue;
+            }
             let node_world = sample.node.as_vec2() * h;
             let affine_velocity = c_p * (node_world - x_p);
-            let Some(node) = block.node_mut_by_world(sample.node) else {
+            let Some(node) = block.node_mut_by_world_key(world_key) else {
                 continue;
             };
             let mass_contrib = sample.weight * m_p;
@@ -934,7 +1043,8 @@ fn p2g_mass_momentum(
             node.p += mass_contrib * (v_p + affine_velocity);
         }
     }
-    // Pass 1B: ghost particles — 質量・運動量のみ。
+    // Pass 1B: ghost particles — owner block h_bでカーネルを評価する（可変h_b対応）。
+    // coarse/fine境界でも owner h_b 基準のAPIC affine項を使って運動量転送する。
     for &i in ghost_indices {
         let Some((&x_base, &v_base)) = particles.x.get(i).zip(particles.v.get(i)) else {
             continue;
@@ -959,15 +1069,29 @@ fn p2g_mass_momentum(
         let x_p = x_base + v_base * drift + 0.5 * params.gravity * drift * drift;
         let v_p = v_base + params.gravity * drift;
         let m_p = m_p_raw.max(0.0);
-        let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h);
+        // ghost粒子のカーネルはowner blockのh_bで評価する
+        let h_owner = block_h_b
+            .get(owner_block)
+            .copied()
+            .unwrap_or(h)
+            .max(DET_EPSILON);
+        let owner_scale = node_scale_for_h(h_owner);
+        let inv_h_owner = 1.0 / h_owner;
+        let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h_owner);
         for sample in stencil.samples() {
-            let node_world = sample.node.as_vec2() * h;
-            let affine_velocity = c_p * (node_world - x_p);
-            let Some(node) = block.node_mut_by_world(sample.node) else {
+            let world_key = sample.node * owner_scale;
+            if !block.is_world_key_owned(world_key) {
+                continue;
+            }
+            let Some(node) = block.node_mut_by_world_key(world_key) else {
                 continue;
             };
             let mass_contrib = sample.weight * m_p;
             node.m += mass_contrib;
+            // 異解像度境界でも owner block のh_bで評価したAPIC affine項を使う。
+            // これにより境界での不自然な運動量減衰を抑える。
+            let node_world = sample.node.as_vec2() * h_owner;
+            let affine_velocity = c_p * (node_world - x_p);
             node.p += mass_contrib * (v_p + affine_velocity);
         }
     }
@@ -995,8 +1119,6 @@ fn p2g_pressure(
 ) {
     let dt = dt.max(0.0);
     let h = block.h_b.max(DET_EPSILON);
-    let inv_h = 1.0 / h;
-    let inv_cell_area = inv_h * inv_h;
 
     let mut particle_indices = Vec::with_capacity(owner_indices.len() + ghost_indices.len());
     particle_indices.extend_from_slice(owner_indices);
@@ -1025,15 +1147,25 @@ fn p2g_pressure(
             .copied()
             .unwrap_or(0.0)
             .max(0.0);
+        let h_p = grid
+            .blocks()
+            .get(owner_block)
+            .map(|b| b.h_b)
+            .unwrap_or(h)
+            .max(DET_EPSILON);
+        let node_scale_p = node_scale_for_h(h_p);
+        let inv_h_p = 1.0 / h_p;
+        let inv_cell_area_p = inv_h_p * inv_h_p;
         let x_p = x_base + v_base * drift + 0.5 * params.gravity * drift * drift;
-        let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h);
+        let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h_p);
         let mut rho_acc = 0.0f32;
         for sample in stencil.samples() {
+            let world_key = sample.node * node_scale_p;
             // 全グリッド参照: 隣接ブロックのノードも参照可能
-            let Some(node) = grid.node_by_world(sample.node) else {
+            let Some(node) = grid.node_by_world(world_key) else {
                 continue;
             };
-            rho_acc += sample.weight * node.m * inv_cell_area;
+            rho_acc += sample.weight * node.m * inv_cell_area_p;
         }
         density[local] = rho_acc.max(0.0);
     }
@@ -1059,6 +1191,14 @@ fn p2g_pressure(
             .copied()
             .unwrap_or(0.0)
             .max(0.0);
+        let h_p = grid
+            .blocks()
+            .get(owner_block)
+            .map(|b| b.h_b)
+            .unwrap_or(h)
+            .max(DET_EPSILON);
+        let node_scale_p = node_scale_for_h(h_p);
+        let inv_h_p = 1.0 / h_p;
         let x_p = x_base + v_base * drift + 0.5 * params.gravity * drift * drift;
         let v0_p = particles
             .v0
@@ -1072,10 +1212,14 @@ fn p2g_pressure(
         let stress =
             Mat2::from_cols(Vec2::new(-pressure, 0.0), Vec2::new(0.0, -pressure)) + viscous;
 
-        let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h);
+        let stencil = evaluate_quadratic_bspline_stencil_2d(x_p, inv_h_p);
         for sample in stencil.samples() {
-            // 圧力力はローカルブロックのノードにのみ書き込む
-            let Some(node) = block.node_mut_by_world(sample.node) else {
+            let world_key = sample.node * node_scale_p;
+            if !block.is_world_key_owned(world_key) {
+                continue;
+            }
+            // 圧力力はローカルブロックのownerノードにのみ書き込む
+            let Some(node) = block.node_mut_by_world_key(world_key) else {
                 continue;
             };
             let internal_force = -(stress * sample.grad) * v0_p;
@@ -1156,7 +1300,9 @@ fn g2p_collect_owner_updates(
     params: &MpmWaterParams,
 ) -> Vec<G2pParticleUpdate> {
     let dt = dt.max(0.0);
-    let inv_h = 1.0 / h.max(DET_EPSILON);
+    let h = h.max(DET_EPSILON);
+    let node_scale = node_scale_for_h(h);
+    let inv_h = 1.0 / h;
     let mut updates = Vec::with_capacity(owner_indices.len());
     for &i in owner_indices {
         let Some(&x_p) = particles.x.get(i) else {
@@ -1167,7 +1313,8 @@ fn g2p_collect_owner_updates(
         let mut next_grad_v = Mat2::ZERO;
 
         for sample in stencil.samples() {
-            let Some(node) = grid.node_by_world(sample.node) else {
+            let world_key = sample.node * node_scale;
+            let Some(node) = grid.node_by_world(world_key) else {
                 continue;
             };
             if node.m <= GRID_MASS_EPSILON {
@@ -1356,6 +1503,35 @@ mod tests {
         particles.spawn_particle(
             Vec2::new(0.45, 0.35),
             Vec2::new(0.1, -0.2),
+            1.0,
+            1.0 / 1_000.0,
+            ContinuumMaterial::Water,
+        );
+        (particles, grid)
+    }
+
+    fn make_world_with_coarse_fine_boundary() -> (ContinuumParticleWorld, GridHierarchy) {
+        let mut particles = ContinuumParticleWorld::default();
+        let mut grid = GridHierarchy::default();
+        // Fine block on the left: x in [-4.0, 0.0].
+        grid.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 120.0,
+            IVec2::new(-16, -16),
+            UVec2::new(17, 17),
+        ));
+        // Coarse block on the right: x in [0.0, 8.0].
+        grid.add_block(GridBlock::new(
+            1,
+            0.5,
+            1.0 / 120.0,
+            IVec2::new(0, -8),
+            UVec2::new(17, 17),
+        ));
+        particles.spawn_particle(
+            Vec2::new(1.0, -0.25),
+            Vec2::ZERO,
             1.0,
             1.0 / 1_000.0,
             ContinuumMaterial::Water,
@@ -1879,6 +2055,76 @@ mod tests {
         assert!(
             !table.ghost_indices(1).contains(&0),
             "particle 0 must be removed from block 1 ghost list after moving away"
+        );
+    }
+
+    #[test]
+    fn coarse_to_fine_boundary_requires_refreshing_receiver_block_ghosts() {
+        let (mut particles, mut grid) = make_world_with_coarse_fine_boundary();
+        let mut table = MpmBlockIndexTable::default();
+        let drift = vec![0.0_f32; grid.block_count()];
+
+        refresh_block_index_table(&mut particles, &mut grid, &mut table, &drift, Vec2::ZERO);
+        assert_eq!(particles.owner_block_id[0], 1);
+        assert!(!table.ghost_indices(0).contains(&0));
+
+        // Move within the coarse owner block near shared boundary x=0.
+        particles.x[0] = Vec2::new(0.10, -0.25);
+
+        // Refreshing only the owner-side block leaves the fine receiver stale.
+        refresh_ghost_indices_for_block(&particles, &grid, &mut table, 1, &drift, Vec2::ZERO);
+        assert!(!table.ghost_indices(0).contains(&0));
+
+        // Refreshing all blocks activates the fine receiver as expected.
+        for block_index in 0..grid.block_count() {
+            refresh_ghost_indices_for_block(
+                &particles,
+                &grid,
+                &mut table,
+                block_index,
+                &drift,
+                Vec2::ZERO,
+            );
+        }
+        assert!(table.ghost_indices(0).contains(&0));
+        let active = active_blocks_from_index_table(&table);
+        assert!(active.contains(&0));
+    }
+
+    #[test]
+    fn coarse_fine_boundary_crossing_does_not_stall_without_forces() {
+        let (mut particles, mut grid) = make_world_with_coarse_fine_boundary();
+        particles.x[0] = Vec2::new(-0.20, -0.25);
+        particles.v[0] = Vec2::new(1.0, 0.0);
+        let params = MpmWaterParams {
+            dt: 1.0 / 120.0,
+            gravity: Vec2::ZERO,
+            viscosity: 0.0,
+            bulk_modulus: 0.0,
+            ..Default::default()
+        };
+
+        let mut min_vx = f32::MAX;
+        let mut crossed = false;
+        for _ in 0..120 {
+            let _ = step_single_rate(&mut particles, &mut grid, &params);
+            min_vx = min_vx.min(particles.v[0].x);
+            if particles.x[0].x > 0.40 {
+                crossed = true;
+                break;
+            }
+        }
+
+        assert!(
+            crossed,
+            "particle did not cross the coarse/fine boundary in expected time; x={:.6}, vx={:.6}",
+            particles.x[0].x,
+            particles.v[0].x
+        );
+        assert!(
+            min_vx > 0.15,
+            "velocity dropped too much near coarse/fine boundary; min_vx={:.6}",
+            min_vx
         );
     }
 

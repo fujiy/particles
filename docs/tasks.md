@@ -133,7 +133,7 @@
 
 ### [MPM-WATER-07] 空間LoD block拡張（可変 `h_b`）
 
-- Status: `Planned`
+- Status: `In Progress`
 - 背景:
   - 広域最適化には時間LoDだけでなく、blockごとに空間幅を変える空間LoDが必要。
   - 粗密境界で保存量を壊さないため、均一幅フェーズとは別Work Unitで段階導入する。
@@ -143,9 +143,22 @@
 - Subtasks:
   - [ ] level別 block 管理（`h_b`, `dt_b`）を実装する。
   - [ ] coarse-fine 境界の質量/運動量フラックス交換を実装する。
-  - [ ] 粗密境界での ghost参照半径と補間規約を実装する。
+  - [x] 粗密境界での ghost参照半径と補間規約を実装する。
   - [ ] 境界補間での保存誤差メトリクスを追加する。
   - [ ] 空間LoD回帰テストを追加する（境界通過、保存量、安定性）。
+- Progress:
+  - 2026-02-28: block定義を「16x16セル（17x17ノード）」へ切り替え、境界ノード共有を許可。
+  - 2026-02-28: 共有境界ノードのowner規約を実装（fine level優先、同levelは`origin.x`, `origin.y`が小さいblock優先）。
+  - 2026-02-28: P2G圧力/運動量転送で非owner境界ノードへの書き込みを抑止。
+  - 2026-02-28: ノードlookupキーをbase-cell基準へ統一し、level間で同一world位置を同一キーとして扱うよう修正（level 1のgrid/particleずれ対策）。
+  - 2026-02-28: 空間LoD検証向けにblock rate算出の空間幅依存を抑制（`CELL_SIZE_M`基準）し、level跨ぎ時の見かけ減速を緩和。
+  - 2026-02-28: overlayでcoarse blockに補助グリッド線を追加し、level 0/1間の見た目連続性を改善。
+  - 2026-02-28: ghost再構築を全block対象に変更し、ghost更新後のactive集合でP2G/Grid Updateを実行するよう修正（block 1 -> block 0 境界停止の抑制）。
+  - 2026-02-28: coarse->fine境界でreceiver blockのghost更新漏れを検出する回帰テスト `coarse_to_fine_boundary_requires_refreshing_receiver_block_ghosts` を追加。
+  - 2026-02-28: water dot描画のグリッド密度サンプルを `first_block.h_b` 固定から world位置ベースのblock選択へ変更し、tile/blockスケール差による投影ずれを抑制。
+  - 2026-02-28: owner再bin時に「stencil欠損ノード数が最小となる隣接block」を選ぶ補正を追加し、粗密境界手前での速度失速を緩和。
+  - 2026-02-28: ghost運動量転送の異解像度パスでAPIC affine項を有効化し、`p2g_pressure` もowner block `h_b` 基準で評価するよう整合。
+  - 2026-02-28: 粗密境界通過時の極端な速度低下を検出する回帰テスト `coarse_fine_boundary_crossing_does_not_stall_without_forces` を追加。
 - 完了条件:
   - 可変 `h_b` の空間LoDで、粗密境界を跨ぐ流れでも保存量誤差が許容範囲に収まる。
 

@@ -32,6 +32,28 @@ pub(super) fn setup_overlay_ui(mut commands: Commands) {
             Node {
                 position_type: PositionType::Absolute,
                 right: px(12.0),
+                bottom: px(SDF_BUTTON_BOTTOM_PX),
+                padding: UiRect::axes(px(10.0), px(6.0)),
+                ..default()
+            },
+            BackgroundColor(BUTTON_BG_OFF),
+            SdfOverlayToggleButton,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("SDF Overlay: OFF"),
+                TextFont::from_font_size(14.0),
+                TextColor(Color::WHITE),
+                SdfOverlayToggleButtonLabel,
+            ));
+        });
+
+    commands
+        .spawn((
+            Button,
+            Node {
+                position_type: PositionType::Absolute,
+                right: px(12.0),
                 bottom: px(PHYSICS_AREA_BUTTON_BOTTOM_PX),
                 padding: UiRect::axes(px(10.0), px(6.0)),
                 ..default()
@@ -153,6 +175,29 @@ pub(super) fn handle_physics_area_overlay_button(
     }
 }
 
+pub(super) fn handle_sdf_overlay_button(
+    mut interactions: Query<
+        (&Interaction, &mut BackgroundColor),
+        (Changed<Interaction>, With<SdfOverlayToggleButton>),
+    >,
+    mut overlay_state: ResMut<SdfOverlayState>,
+) {
+    for (interaction, mut bg) in &mut interactions {
+        match *interaction {
+            Interaction::Pressed => {
+                overlay_state.enabled = !overlay_state.enabled;
+                *bg = BUTTON_BG_PRESS.into();
+            }
+            Interaction::Hovered => {
+                *bg = BUTTON_BG_HOVER.into();
+            }
+            Interaction::None => {
+                *bg = toggle_button_bg(overlay_state.enabled);
+            }
+        }
+    }
+}
+
 pub(super) fn update_tile_overlay_button_label(
     overlay_state: Res<TileOverlayState>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
@@ -176,6 +221,22 @@ pub(super) fn update_tile_overlay_button_label(
             )
         } else {
             "Tile Overlay: OFF".to_string()
+        };
+    }
+}
+
+pub(super) fn update_sdf_overlay_button_label(
+    overlay_state: Res<SdfOverlayState>,
+    mut labels: Query<&mut Text, With<SdfOverlayToggleButtonLabel>>,
+) {
+    if !overlay_state.is_changed() {
+        return;
+    }
+    for mut label in &mut labels {
+        label.0 = if overlay_state.enabled {
+            "SDF Overlay: ON".to_string()
+        } else {
+            "SDF Overlay: OFF".to_string()
         };
     }
 }
@@ -250,6 +311,7 @@ pub(super) fn update_particle_overlay_button_label(
 
 pub(super) fn update_overlay_info_text(
     tile_overlay_state: Res<TileOverlayState>,
+    sdf_overlay_state: Res<SdfOverlayState>,
     physics_overlay_state: Res<PhysicsAreaOverlayState>,
     active_region: Res<PhysicsActiveRegion>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
@@ -258,6 +320,7 @@ pub(super) fn update_overlay_info_text(
     mut labels: Query<&mut Text, With<OverlayInfoText>>,
 ) {
     if !tile_overlay_state.is_changed()
+        && !sdf_overlay_state.is_changed()
         && !physics_overlay_state.is_changed()
         && !active_region.is_changed()
         && !render_diagnostics.is_changed()
@@ -305,6 +368,9 @@ pub(super) fn update_overlay_info_text(
                 render_diagnostics.visible_tiles.len(),
                 lod_tile_count
             ));
+        }
+        if sdf_overlay_state.enabled {
+            lines.push("SDF Overlay: per-cell signed distance".to_string());
         }
         label.0 = lines.join("\n");
     }

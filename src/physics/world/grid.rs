@@ -18,6 +18,7 @@ pub struct GridBlock {
     pub dt_b: f32,
     pub origin_node: IVec2,
     pub node_dims: UVec2,
+    owned_nodes: Vec<bool>,
     nodes: Vec<GridNode>,
     active_nodes: Vec<IVec2>,
 }
@@ -39,6 +40,7 @@ impl GridBlock {
             dt_b,
             origin_node,
             node_dims,
+            owned_nodes: vec![true; node_count],
             nodes: vec![GridNode::default(); node_count],
             active_nodes: Vec::new(),
         }
@@ -67,6 +69,76 @@ impl GridBlock {
     pub fn clear_nodes(&mut self) {
         self.nodes.fill(GridNode::default());
         self.active_nodes.clear();
+    }
+
+    pub fn node_scale(&self) -> i32 {
+        1_i32 << self.level.min(30)
+    }
+
+    pub fn world_key_from_node(&self, node: IVec2) -> IVec2 {
+        node * self.node_scale()
+    }
+
+    pub fn world_key_for_local_node(&self, local_node: IVec2) -> IVec2 {
+        self.world_key_from_node(self.origin_node + local_node)
+    }
+
+    pub fn world_key_to_local(&self, world_key: IVec2) -> Option<UVec2> {
+        let scale = self.node_scale();
+        if world_key.x.rem_euclid(scale) != 0 || world_key.y.rem_euclid(scale) != 0 {
+            return None;
+        }
+        let node = IVec2::new(world_key.x / scale, world_key.y / scale);
+        self.world_node_to_local(node)
+    }
+
+    pub fn node_mut_by_world_key(&mut self, world_key: IVec2) -> Option<&mut GridNode> {
+        let local = self.world_key_to_local(world_key)?;
+        let index = self.local_node_index(local)?;
+        self.nodes.get_mut(index)
+    }
+
+    pub fn node_by_world_key(&self, world_key: IVec2) -> Option<&GridNode> {
+        let local = self.world_key_to_local(world_key)?;
+        let index = self.local_node_index(local)?;
+        self.nodes.get(index)
+    }
+
+    pub fn is_world_key_owned(&self, world_key: IVec2) -> bool {
+        let Some(local) = self.world_key_to_local(world_key) else {
+            return false;
+        };
+        let Some(index) = self.local_node_index(local) else {
+            return false;
+        };
+        self.owned_nodes.get(index).copied().unwrap_or(false)
+    }
+
+    pub fn is_world_node_owned(&self, world_node: IVec2) -> bool {
+        let Some(local) = self.world_node_to_local(world_node) else {
+            return false;
+        };
+        let Some(index) = self.local_node_index(local) else {
+            return false;
+        };
+        self.owned_nodes.get(index).copied().unwrap_or(false)
+    }
+
+    pub fn is_local_node_owned(&self, local_index: usize) -> bool {
+        self.owned_nodes.get(local_index).copied().unwrap_or(false)
+    }
+
+    fn reset_owned_nodes(&mut self) {
+        if self.owned_nodes.len() != self.nodes.len() {
+            self.owned_nodes.resize(self.nodes.len(), true);
+        }
+        self.owned_nodes.fill(true);
+    }
+
+    fn set_local_node_owned(&mut self, local_index: usize, owned: bool) {
+        if let Some(slot) = self.owned_nodes.get_mut(local_index) {
+            *slot = owned;
+        }
     }
 
     pub fn local_node_index(&self, local_node: UVec2) -> Option<usize> {
@@ -108,7 +180,7 @@ impl GridBlock {
         for y in 0..height {
             for x in 0..width {
                 let index = y * width + x;
-                if self.nodes[index].m >= mass_threshold {
+                if self.is_local_node_owned(index) && self.nodes[index].m >= mass_threshold {
                     self.active_nodes
                         .push(self.origin_node + IVec2::new(x as i32, y as i32));
                 }
@@ -183,10 +255,7 @@ impl GridHierarchy {
 
     pub fn node_by_world(&self, world_node: IVec2) -> Option<&GridNode> {
         let location = self.node_location(world_node)?;
-        self.blocks
-            .get(location.block_index)?
-            .nodes()
-            .get(location.local_index)
+        self.blocks.get(location.block_index)?.nodes().get(location.local_index)
     }
 
     pub fn node_mut_by_world(&mut self, world_node: IVec2) -> Option<&mut GridNode> {
@@ -198,21 +267,47 @@ impl GridHierarchy {
     }
 
     pub fn block_index_for_position(&self, world_pos: Vec2) -> Option<usize> {
-        let h = self.blocks.first()?.h_b.max(1e-6);
-        let world_node = IVec2::new(
-            (world_pos.x / h).floor() as i32,
-            (world_pos.y / h).floor() as i32,
-        );
-        if let Some(location) = self.node_location(world_node) {
-            return Some(location.block_index);
+        // 可変h_b対応: floor(x/h_b)でノード座標を計算し、まず直接lookupを試みる。
+        // 見つかればそのblockを返す。見つからない場合は各blockのAABBで判定する。
+        // AABBは [origin * h, (origin + dims) * h) = floor(x/h) が [origin, origin+dims-1] に収まる範囲。
+        //
+        // 均一h_bの場合は元の実装と同じ動作。可変h_bでは全blockのh_bで試みる。
+        for block in &self.blocks {
+            let h = block.h_b.max(1e-6);
+            let world_node = IVec2::new(
+                (world_pos.x / h).floor() as i32,
+                (world_pos.y / h).floor() as i32,
+            );
+            let origin = block.origin_node;
+            let end = origin + block.node_dims.as_ivec2() - IVec2::ONE;
+            if world_node.x >= origin.x
+                && world_node.x <= end.x
+                && world_node.y >= origin.y
+                && world_node.y <= end.y
+            {
+                let world_key = block.world_key_from_node(world_node);
+                if let Some(location) = self.node_location(world_key) {
+                    return Some(location.block_index);
+                }
+            }
         }
-        let (min_node, max_node) = self.global_node_bounds()?;
-        let clamped = IVec2::new(
-            world_node.x.clamp(min_node.x, max_node.x),
-            world_node.y.clamp(min_node.y, max_node.y),
-        );
-        self.node_location(clamped)
-            .map(|location| location.block_index)
+        // 範囲外の場合はAABBクランプして最近傍ノードでlookup
+        let mut best_index = None;
+        let mut best_dist_sq = f32::MAX;
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            let h = block.h_b.max(1e-6);
+            let min_world = block.origin_node.as_vec2() * h;
+            let max_world = (block.origin_node + block.node_dims.as_ivec2()).as_vec2() * h;
+            let center = (min_world + max_world) * 0.5;
+            let dx = (world_pos.x - center.x).abs() - (max_world.x - min_world.x) * 0.5;
+            let dy = (world_pos.y - center.y).abs() - (max_world.y - min_world.y) * 0.5;
+            let dist_sq = dx.max(0.0) * dx.max(0.0) + dy.max(0.0) * dy.max(0.0);
+            if dist_sq < best_dist_sq {
+                best_dist_sq = dist_sq;
+                best_index = Some(block_index);
+            }
+        }
+        best_index
     }
 
     pub fn add_block(&mut self, block: GridBlock) {
@@ -222,54 +317,64 @@ impl GridHierarchy {
         self.rebuild_node_lookup();
     }
 
+    fn prefer_block_owner(&self, lhs_block_index: usize, rhs_block_index: usize) -> bool {
+        let lhs = &self.blocks[lhs_block_index];
+        let rhs = &self.blocks[rhs_block_index];
+        if lhs.level != rhs.level {
+            return lhs.level < rhs.level;
+        }
+        if lhs.origin_node.x != rhs.origin_node.x {
+            return lhs.origin_node.x < rhs.origin_node.x;
+        }
+        if lhs.origin_node.y != rhs.origin_node.y {
+            return lhs.origin_node.y < rhs.origin_node.y;
+        }
+        lhs_block_index < rhs_block_index
+    }
+
+    fn set_node_owner_flag(&mut self, location: GridNodeLocation, owned: bool) {
+        if let Some(block) = self.blocks.get_mut(location.block_index) {
+            block.set_local_node_owned(location.local_index, owned);
+        }
+    }
+
     fn rebuild_node_lookup(&mut self) {
         self.node_lookup.clear();
-        for (block_index, block) in self.blocks.iter().enumerate() {
-            let width = block.node_dims.x as usize;
-            for y in 0..block.node_dims.y as i32 {
-                for x in 0..block.node_dims.x as i32 {
+        for block in &mut self.blocks {
+            block.reset_owned_nodes();
+        }
+        for block_index in 0..self.blocks.len() {
+            let node_dims = {
+                let block = &self.blocks[block_index];
+                block.node_dims
+            };
+            let width = node_dims.x as usize;
+            for y in 0..node_dims.y as i32 {
+                for x in 0..node_dims.x as i32 {
                     let local_index = y as usize * width + x as usize;
-                    let world_node = block.origin_node + IVec2::new(x, y);
-                    let previous = self.node_lookup.insert(
-                        world_node,
-                        GridNodeLocation {
-                            block_index,
-                            local_index,
-                        },
-                    );
-                    debug_assert!(
-                        previous.is_none(),
-                        "grid node overlap detected at {:?}: {:?} and block {}",
-                        world_node,
-                        previous,
-                        block_index
-                    );
+                    let world_node = {
+                        let block = &self.blocks[block_index];
+                        block.world_key_for_local_node(IVec2::new(x, y))
+                    };
+                    let candidate = GridNodeLocation {
+                        block_index,
+                        local_index,
+                    };
+                    let Some(previous) = self.node_lookup.get(&world_node).copied() else {
+                        self.node_lookup.insert(world_node, candidate);
+                        continue;
+                    };
+                    if self.prefer_block_owner(candidate.block_index, previous.block_index) {
+                        self.set_node_owner_flag(previous, false);
+                        self.node_lookup.insert(world_node, candidate);
+                    } else {
+                        self.set_node_owner_flag(candidate, false);
+                    }
                 }
             }
         }
     }
 
-    fn global_node_bounds(&self) -> Option<(IVec2, IVec2)> {
-        let mut min_node = IVec2::new(i32::MAX, i32::MAX);
-        let mut max_node = IVec2::new(i32::MIN, i32::MIN);
-        for block in &self.blocks {
-            let block_min = block.origin_node;
-            let block_max = block.origin_node
-                + IVec2::new(
-                    block.node_dims.x.saturating_sub(1) as i32,
-                    block.node_dims.y.saturating_sub(1) as i32,
-                );
-            min_node.x = min_node.x.min(block_min.x);
-            min_node.y = min_node.y.min(block_min.y);
-            max_node.x = max_node.x.max(block_max.x);
-            max_node.y = max_node.y.max(block_max.y);
-        }
-        if min_node.x > max_node.x || min_node.y > max_node.y {
-            None
-        } else {
-            Some((min_node, max_node))
-        }
-    }
 }
 
 impl MpmBlockIndexTable {
@@ -304,8 +409,7 @@ impl MpmBlockIndexTable {
     pub fn rebuild_neighbor_map(&mut self, blocks: &[GridBlock]) {
         let block_count = blocks.len();
         self.block_neighbors.clear();
-        self.block_neighbors
-            .resize_with(block_count, || [None; 8]);
+        self.block_neighbors.resize_with(block_count, || [None; 8]);
         for (i, bi) in blocks.iter().enumerate() {
             let i_origin = bi.origin_node;
             let i_end = i_origin + bi.node_dims.as_ivec2(); // exclusive
@@ -455,5 +559,53 @@ mod tests {
             hierarchy.block_index_for_position(Vec2::new(1.30, 0.30)),
             Some(right.block_index)
         );
+    }
+
+    #[test]
+    fn shared_boundary_node_prefers_lower_level_block_owner() {
+        let mut hierarchy = GridHierarchy::default();
+        hierarchy.add_block(GridBlock::new(
+            1,
+            0.5,
+            1.0 / 60.0,
+            IVec2::new(0, 0),
+            UVec2::new(17, 17),
+        ));
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(16, 0),
+            UVec2::new(17, 17),
+        ));
+        let shared = IVec2::new(16, 8);
+        let owner = hierarchy
+            .node_location(shared)
+            .expect("shared node must have an owner");
+        assert_eq!(hierarchy.blocks()[owner.block_index].level, 0);
+    }
+
+    #[test]
+    fn shared_boundary_node_prefers_smaller_origin_when_same_level() {
+        let mut hierarchy = GridHierarchy::default();
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(0, 0),
+            UVec2::new(17, 17),
+        ));
+        hierarchy.add_block(GridBlock::new(
+            0,
+            0.25,
+            1.0 / 60.0,
+            IVec2::new(16, 0),
+            UVec2::new(17, 17),
+        ));
+        let shared = IVec2::new(16, 8);
+        let owner = hierarchy
+            .node_location(shared)
+            .expect("shared node must have an owner");
+        assert_eq!(hierarchy.blocks()[owner.block_index].origin_node, IVec2::new(0, 0));
     }
 }

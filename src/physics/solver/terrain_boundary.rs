@@ -168,7 +168,9 @@ impl TerrainBoundarySampler {
 
 fn desired_lod_level(block: &GridBlock) -> u8 {
     let base = block.level.min(CACHE_LOD_MAX);
-    if block.active_node_count() == 0 {
+    // Inactive fine blocks can use one level coarser cache, but coarse blocks
+    // should keep their nominal level to avoid terrain under-sampling artifacts.
+    if block.active_node_count() == 0 && block.level == 0 {
         (base + 1).min(CACHE_LOD_MAX)
     } else {
         base
@@ -222,11 +224,6 @@ fn build_block_samples(
         return Vec::new();
     }
 
-    let dilation_cells = if lod_level == 0 {
-        0
-    } else {
-        1i32 << lod_level.saturating_sub(1)
-    };
     let eps = (0.5 * block.h_b).max(1e-4);
     let mut samples = vec![TerrainBoundarySample::default(); width * height];
     for y in 0..height {
@@ -234,7 +231,7 @@ fn build_block_samples(
             let i = y * width + x;
             let world_node = block.origin_node + IVec2::new(x as i32, y as i32);
             let world_pos = world_node.as_vec2() * block.h_b;
-            let (mut sdf_m, mut normal) = if let Some((signed_distance, sample_normal)) =
+            let (sdf_m, mut normal) = if let Some((signed_distance, sample_normal)) =
                 terrain.sample_signed_distance_and_normal(world_pos)
             {
                 (signed_distance, sample_normal)
@@ -247,20 +244,7 @@ fn build_block_samples(
                 (signed_distance, Vec2::new(dx, dy).normalize_or_zero())
             };
 
-            let mut solid = sdf_m < 0.0;
-            if !solid && dilation_cells > 0 {
-                let cell = world_to_cell(world_pos);
-                'scan: for dy in -dilation_cells..=dilation_cells {
-                    for dx in -dilation_cells..=dilation_cells {
-                        let c = cell + IVec2::new(dx, dy);
-                        if matches!(terrain.get_cell_or_generated(c), TerrainCell::Solid { .. }) {
-                            solid = true;
-                            sdf_m = sdf_m.min(0.0);
-                            break 'scan;
-                        }
-                    }
-                }
-            }
+            let solid = sdf_m < 0.0;
             if normal == Vec2::ZERO {
                 normal = Vec2::Y;
             }
@@ -313,5 +297,17 @@ mod tests {
         assert_eq!(a.len(), 16 * 16);
         assert_eq!(a.len(), b.len());
         assert!(sampler.last_step_stats().sample_query_count >= (16 * 16 * 2) as u64);
+    }
+
+    #[test]
+    fn inactive_level1_block_uses_nominal_lod() {
+        let block = GridBlock::new(1, 0.5, 1.0 / 60.0, IVec2::new(-8, -8), UVec2::new(16, 16));
+        assert_eq!(desired_lod_level(&block), 1);
+    }
+
+    #[test]
+    fn inactive_level0_block_can_promote_cache_lod_by_one() {
+        let block = GridBlock::new(0, 0.25, 1.0 / 60.0, IVec2::new(-8, -8), UVec2::new(16, 16));
+        assert_eq!(desired_lod_level(&block), 1);
     }
 }
