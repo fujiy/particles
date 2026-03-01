@@ -1,6 +1,7 @@
 use super::*;
 use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, terrain_boundary_radius_m};
 use crate::physics::solver::granular;
+use crate::physics::solver::params_defaults::DEFAULT_SOLVER_PARAMS;
 use crate::physics::world::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA};
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
@@ -163,6 +164,9 @@ fn particles_fall_under_gravity() {
     particles.vel = vec![Vec2::ZERO];
     particles.mass = vec![default_particle_mass()];
     particles.material = vec![ParticleMaterial::WaterLiquid];
+    let mut solver_params = DEFAULT_SOLVER_PARAMS;
+    solver_params.fixed_dt = 1.0 / 60.0;
+    particles.set_solver_params(solver_params);
     particles.resize_work_buffers();
     let mut object_world = ObjectWorld::default();
     let object_field = ObjectPhysicsField::default();
@@ -210,6 +214,9 @@ fn static_terrain_boundary_push_affects_motion() {
     with_terrain.vel = vec![Vec2::new(0.0, -8.0)];
     with_terrain.mass = vec![default_particle_mass()];
     with_terrain.material = vec![ParticleMaterial::WaterLiquid];
+    let mut solver_params = DEFAULT_SOLVER_PARAMS;
+    solver_params.fixed_dt = 1.0 / 60.0;
+    with_terrain.set_solver_params(solver_params);
     with_terrain.resize_work_buffers();
 
     let mut without_terrain = ParticleWorld::default();
@@ -218,6 +225,7 @@ fn static_terrain_boundary_push_affects_motion() {
     without_terrain.vel = with_terrain.vel.clone();
     without_terrain.mass = with_terrain.mass.clone();
     without_terrain.material = with_terrain.material.clone();
+    without_terrain.set_solver_params(solver_params);
     without_terrain.resize_work_buffers();
     let mut object_world = ObjectWorld::default();
     let object_field = ObjectPhysicsField::default();
