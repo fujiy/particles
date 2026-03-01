@@ -34,6 +34,15 @@
 - After code changes, run compile checks and tests.
 - Continue fixing until errors are resolved as a rule.
 
+## Runtime Verification Rule
+- Do not stop verification at compile checks and tests when a task requires runtime behavior validation.
+- For each implementation item, design an appropriate verification artifact before running:
+  - snapshot (state dump / metrics JSON), and/or
+  - screenshot (render output), as needed by the feature.
+- When sandbox execution cannot validate the target behavior (especially GPU/rendering), use escalated execution and run the app directly.
+- Prefer repeatable automated loops (auto-load scenario, fixed frame count, artifact export, auto-exit) so Codex can verify results without manual user observation each time.
+- Report verification outcomes based on the generated artifacts.
+
 ## Test Change Approval Rule
 - Unit tests:
   - The agent may add/update/remove unit tests without prior approval.
