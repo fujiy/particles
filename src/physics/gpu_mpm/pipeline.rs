@@ -28,9 +28,6 @@ pub struct MpmComputePipelines {
 
     pub g2p_layout: BindGroupLayout,
     pub g2p_pipeline: CachedComputePipelineId,
-
-    pub drift_layout: BindGroupLayout,
-    pub drift_pipeline: CachedComputePipelineId,
 }
 
 impl FromWorld for MpmComputePipelines {
@@ -135,29 +132,6 @@ impl FromWorld for MpmComputePipelines {
             zero_initialize_workgroup_memory: false,
         });
 
-        // drift: 0=params, 1=particles(rw)
-        let drift_entries = BindGroupLayoutEntries::sequential(
-            ShaderStages::COMPUTE,
-            (
-                binding_types::uniform_buffer_sized(false, None),
-                binding_types::storage_buffer_sized(false, None),
-            ),
-        );
-        let drift_layout =
-            render_device.create_bind_group_layout("mpm_drift_layout", &*drift_entries);
-        let drift_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("mpm_drift".into()),
-            layout: vec![BindGroupLayoutDescriptor::new(
-                "mpm_drift_layout",
-                &*drift_entries,
-            )],
-            push_constant_ranges: vec![],
-            shader: shaders.drift.clone(),
-            shader_defs: vec![],
-            entry_point: Some("drift_particles".into()),
-            zero_initialize_workgroup_memory: false,
-        });
-
         Self {
             clear_layout,
             clear_pipeline,
@@ -167,8 +141,6 @@ impl FromWorld for MpmComputePipelines {
             grid_update_pipeline,
             g2p_layout,
             g2p_pipeline,
-            drift_layout,
-            drift_pipeline,
         }
     }
 }

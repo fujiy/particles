@@ -219,8 +219,6 @@ pub struct MpmGpuControl {
     pub readback_enabled: bool,
     /// Readback cadence in render frames (60 ~= once per second at 60 FPS).
     pub readback_interval_frames: u32,
-    /// If true, disable MLS-MPM passes and run a lightweight debug drift compute only.
-    pub drift_only: bool,
 }
 
 impl Default for MpmGpuControl {
@@ -229,7 +227,6 @@ impl Default for MpmGpuControl {
             init_only: false,
             readback_enabled: true,
             readback_interval_frames: 60,
-            drift_only: false,
         }
     }
 }

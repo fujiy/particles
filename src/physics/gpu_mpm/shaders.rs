@@ -9,7 +9,6 @@ pub struct MpmShaders {
     pub p2g: Handle<Shader>,
     pub grid_update: Handle<Shader>,
     pub g2p: Handle<Shader>,
-    pub drift: Handle<Shader>,
 }
 
 impl FromWorld for MpmShaders {
@@ -21,7 +20,6 @@ impl FromWorld for MpmShaders {
             p2g: asset_server.load("shaders/mpm_p2g.wgsl"),
             grid_update: asset_server.load("shaders/mpm_grid_update.wgsl"),
             g2p: asset_server.load("shaders/mpm_g2p.wgsl"),
-            drift: asset_server.load("shaders/mpm_drift.wgsl"),
         }
     }
 }

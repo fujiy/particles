@@ -95,6 +95,7 @@
   - 2026-03-01: GPU MPM の時間進行を render FPS 依存から固定ステップ積算へ変更。`MpmGpuRunRequest.substeps` と `MpmGpuStepClock` を導入し、`fixed_dt` ベースで1フレーム内に複数 substep 実行、処理限界超過時は上限で打ち切ってスロー化する挙動を実装。
   - 2026-03-01: 左壁接触での上向き吹き飛び対策として、GPU境界SDF生成を CPU `terrain_boundary` 実装へ整合化（距離を「セル中心近似」から「セルAABB最近点距離」へ修正し、可能時は `TerrainWorld::sample_signed_distance_and_normal` を直接使用）。`PARTICLES_AUTOVERIFY_MPM=1`（1200フレーム）で `water_surface_height_p95` を含む全指標の通過を確認。
   - 2026-03-01: 物性のCPU相当化として GPU 減衰/境界パラメータをCPU経路に合わせて調整（`C_DAMPING=0.05`、全体速度減衰/速度cap撤去、`bulk_modulus=ρc²`、`j_min/j_max=0.6/1.4`、境界の `threshold/gain/cap/tangential` をCPU式へ一致）。`PARTICLES_AUTOVERIFY_MPM=1`（1200フレーム）再実行で指標通過を確認。
+  - 2026-03-01: モジュール整理として `drift` デバッグ経路を削除（`MpmGpuControl.drift_only`、`run_drift_autoverify`、`mpm_drift.wgsl` と対応 pipeline/node 分岐を撤去）。あわせて CPU 側 MPM 実行ルートを撤去し、`step_simulation_once` は粒子ステップ専用へ簡素化。
 - 完了条件:
   - `water_drop` がGPU経路で安定再現され、品質指標を自動計測できる。
 

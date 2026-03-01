@@ -93,28 +93,10 @@ pub fn prepare_particle_upload(
         upload.particles.clear();
         return;
     }
-    if control.drift_only {
-        if continuum.is_changed() || upload.particles.is_empty() {
-            upload.particles = (0..continuum.len())
-                .map(|i| {
-                    GpuParticle::from_cpu(
-                        continuum.x[i],
-                        continuum.v[i],
-                        continuum.m[i],
-                        continuum.v0[i],
-                        continuum.f[i],
-                        continuum.c[i],
-                        continuum.material_id[i],
-                    )
-                })
-                .collect();
-            upload.upload_particles = !upload.particles.is_empty();
-        }
-        sim_state.gpu_mpm_active = !continuum.is_empty();
-        return;
-    }
     sim_state.gpu_mpm_active = sim_state.mpm_enabled && !continuum.is_empty();
-    if !continuum.is_changed() {
+    // Ensure at least one upload after startup/scenario load even when change detection
+    // is not observed in this system's frame.
+    if !continuum.is_changed() && !upload.particles.is_empty() {
         return;
     }
     let particles: Vec<GpuParticle> = (0..continuum.len())
@@ -147,11 +129,6 @@ pub fn prepare_terrain_upload(
     upload.upload_terrain = false;
 
     if control.init_only {
-        upload.terrain_sdf.clear();
-        upload.terrain_normal.clear();
-        return;
-    }
-    if control.drift_only {
         upload.terrain_sdf.clear();
         upload.terrain_normal.clear();
         return;
@@ -260,11 +237,7 @@ pub fn prepare_gpu_run_state(
         step_clock.accumulator_secs = 0.0;
         return;
     }
-    let active = if control.drift_only {
-        sim_state.gpu_mpm_active
-    } else {
-        sim_state.mpm_enabled && sim_state.gpu_mpm_active
-    };
+    let active = sim_state.mpm_enabled && sim_state.gpu_mpm_active;
     if !active {
         run_req.enabled = false;
         run_req.substeps = 0;
