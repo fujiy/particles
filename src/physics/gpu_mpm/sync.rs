@@ -7,15 +7,17 @@ use bevy::prelude::*;
 
 use super::buffers::{GpuMpmParams, GpuParticle};
 use super::gpu_resources::{
-    MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuUploadRequest, world_grid_layout,
+    MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest,
+    world_grid_layout,
 };
 use super::readback::GpuReadbackResult;
+use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, particle_radius_m};
 use crate::physics::solver::mpm_water::{
     MpmTerrainBoundaryParams, MpmWaterParams, rebuild_continuum_from_particle_world,
     sync_continuum_to_particle_world,
 };
 use crate::physics::solver::params_types::SolverParams;
-use crate::physics::state::SimulationState;
+use crate::physics::state::{ReplayState, SimulationState};
 use crate::physics::world::constants::CELL_SIZE_M;
 use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::particle::ParticleWorld;
@@ -24,6 +26,11 @@ use crate::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
 
 const SDF_QUERY_RADIUS_CELLS: i32 = 10;
 const SDF_INF: f32 = 1.0e9;
+const MPM_TARGET_SOUND_SPEED_MPS: f32 = 16.0;
+const MPM_TARGET_RHO0: f32 = 1_000.0;
+const MPM_BOUNDARY_THRESHOLD_SCALE_DIAMETER: f32 = 0.01;
+const MPM_BOUNDARY_DEEP_PUSH_GAIN_PER_S: f32 = 0.1;
+const MPM_BOUNDARY_DEEP_PUSH_SPEED_CAP_MPS: f32 = 1.0;
 
 /// Ensure GPU upload source (`ContinuumParticleWorld`) is seeded from `ParticleWorld`.
 ///
@@ -169,6 +176,15 @@ pub fn prepare_terrain_upload(
             let idx = (ny * layout.dims.x + nx) as usize;
             let node = layout.origin + IVec2::new(nx as i32, ny as i32);
             let world_pos = Vec2::new(node.x as f32 * h, node.y as f32 * h);
+            if let Some((signed_distance, normal)) = terrain.sample_signed_distance_and_normal(world_pos)
+            {
+                sdf[idx] = signed_distance;
+                if normal != Vec2::ZERO {
+                    normals[idx] = normal.to_array();
+                }
+                continue;
+            }
+
             let sdf_val = sample_terrain_sdf_for_gpu(&terrain, world_pos);
             sdf[idx] = sdf_val;
 
@@ -201,13 +217,16 @@ pub fn prepare_gpu_params(
     let layout = world_grid_layout();
     let h = CELL_SIZE_M;
     let boundary = MpmTerrainBoundaryParams::default();
+    // Keep GPU params in parity with CPU MPM setup in solver/step.rs.
+    let boundary_threshold_m = particle_radius_m(DEFAULT_MATERIAL_PARAMS)
+        * MPM_BOUNDARY_THRESHOLD_SCALE_DIAMETER;
 
     params_req.params = GpuMpmParams {
         dt: solver_params.fixed_dt,
         gx: 0.0,
         gy: -9.81,
-        rho0: 1_000.0,
-        bulk_modulus: 6.0e4,
+        rho0: MPM_TARGET_RHO0,
+        bulk_modulus: MPM_TARGET_RHO0 * MPM_TARGET_SOUND_SPEED_MPS * MPM_TARGET_SOUND_SPEED_MPS,
         h,
         grid_origin_x: layout.origin.x,
         grid_origin_y: layout.origin.y,
@@ -217,9 +236,9 @@ pub fn prepare_gpu_params(
         j_min: 0.6,
         j_max: 1.4,
         c_max_norm: 80.0,
-        sdf_velocity_threshold_m: boundary.sdf_velocity_threshold_m,
-        deep_push_gain_per_s: boundary.deep_push_gain_per_s,
-        deep_push_speed_cap_mps: boundary.deep_push_speed_cap_mps,
+        sdf_velocity_threshold_m: boundary_threshold_m,
+        deep_push_gain_per_s: MPM_BOUNDARY_DEEP_PUSH_GAIN_PER_S,
+        deep_push_speed_cap_mps: MPM_BOUNDARY_DEEP_PUSH_SPEED_CAP_MPS,
         tangential_damping: boundary.tangential_damping,
         _pad: [0; 2],
     };
@@ -229,19 +248,68 @@ pub fn prepare_gpu_params(
 pub fn prepare_gpu_run_state(
     control: Res<MpmGpuControl>,
     sim_state: Res<SimulationState>,
+    mut replay_state: ResMut<ReplayState>,
+    solver_params: Res<SolverParams>,
+    time: Res<Time>,
+    mut step_clock: ResMut<MpmGpuStepClock>,
     mut run_req: ResMut<MpmGpuRunRequest>,
 ) {
     if control.init_only {
         run_req.enabled = false;
+        run_req.substeps = 0;
+        step_clock.accumulator_secs = 0.0;
         return;
     }
-    if control.drift_only {
-        run_req.enabled = sim_state.gpu_mpm_active && (sim_state.running || sim_state.step_once);
+    let active = if control.drift_only {
+        sim_state.gpu_mpm_active
+    } else {
+        sim_state.mpm_enabled && sim_state.gpu_mpm_active
+    };
+    if !active {
+        run_req.enabled = false;
+        run_req.substeps = 0;
+        step_clock.accumulator_secs = 0.0;
         return;
     }
-    run_req.enabled = sim_state.mpm_enabled
-        && sim_state.gpu_mpm_active
-        && (sim_state.running || sim_state.step_once);
+
+    // Single-step command always executes exactly one substep.
+    if sim_state.step_once {
+        run_req.enabled = true;
+        run_req.substeps = 1;
+        step_clock.accumulator_secs = 0.0;
+        if replay_state.enabled {
+            replay_state.current_step = replay_state.current_step.saturating_add(1);
+        }
+        return;
+    }
+
+    if !sim_state.running {
+        run_req.enabled = false;
+        run_req.substeps = 0;
+        return;
+    }
+
+    let fixed_dt = solver_params.fixed_dt.max(1.0e-5);
+    // Avoid runaway catch-up (spiral of death). If we can't keep up, simulation slows down.
+    let max_catchup = fixed_dt * step_clock.max_substeps_per_frame as f32;
+    step_clock.accumulator_secs = (step_clock.accumulator_secs + time.delta_secs()).min(max_catchup);
+
+    let mut substeps = (step_clock.accumulator_secs / fixed_dt).floor() as u32;
+    if substeps > step_clock.max_substeps_per_frame {
+        substeps = step_clock.max_substeps_per_frame;
+    }
+    if substeps == 0 {
+        run_req.enabled = false;
+        run_req.substeps = 0;
+        return;
+    }
+
+    step_clock.accumulator_secs = (step_clock.accumulator_secs - fixed_dt * substeps as f32).max(0.0);
+    run_req.enabled = true;
+    run_req.substeps = substeps;
+    if replay_state.enabled {
+        replay_state.current_step = replay_state.current_step.saturating_add(substeps as usize);
+    }
 }
 
 /// Diagnostics counter for GPU readback frames.
@@ -325,9 +393,10 @@ fn sample_terrain_sdf_for_gpu(terrain: &TerrainWorld, world_pos: Vec2) -> f32 {
             if cell_is_solid == inside {
                 continue;
             }
-            let cell_center = Vec2::new((cell.x as f32 + 0.5) * h, (cell.y as f32 + 0.5) * h);
-            let dist = (world_pos - cell_center).length() - 0.5 * h;
-            best = best.min(dist.max(0.0));
+            let min = cell.as_vec2() * h;
+            let max = min + Vec2::splat(h);
+            let closest = world_pos.clamp(min, max);
+            best = best.min(world_pos.distance(closest));
         }
     }
     if best >= SDF_INF {

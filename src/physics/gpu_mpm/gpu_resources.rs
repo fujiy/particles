@@ -185,6 +185,28 @@ pub struct MpmGpuParamsRequest {
 #[derive(Resource, Default)]
 pub struct MpmGpuRunRequest {
     pub enabled: bool,
+    /// Number of fixed MPM substeps to execute this render frame.
+    pub substeps: u32,
+}
+
+/// Fixed-step accumulator for GPU MPM.
+///
+/// This decouples physics time from render FPS:
+/// - if render is fast enough, multiple substeps can run per frame;
+/// - if render is too slow, simulation falls behind (slow motion) after hitting max_substeps.
+#[derive(Resource, Debug)]
+pub struct MpmGpuStepClock {
+    pub accumulator_secs: f32,
+    pub max_substeps_per_frame: u32,
+}
+
+impl Default for MpmGpuStepClock {
+    fn default() -> Self {
+        Self {
+            accumulator_secs: 0.0,
+            max_substeps_per_frame: 8,
+        }
+    }
 }
 
 /// Runtime control for staged bring-up of GPU MPM.

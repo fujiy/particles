@@ -12,7 +12,6 @@
 @group(0) @binding(3) var<storage, read> terrain_normal: array<vec2<f32>>;
 
 const MASS_EPSILON: f32 = 1e-8;
-
 @compute @workgroup_size(64)
 fn grid_update(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
@@ -44,38 +43,43 @@ fn grid_update(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let threshold = params.sdf_velocity_threshold_m;
 
-    if sdf <= threshold {
-        // Normal velocity component
-        let vn = vx * nx + vy * ny;
-
-        if sdf > -threshold {
-            // Shallow zone: zero out inward normal velocity
-            if vn < 0.0 {
-                vx -= vn * nx;
-                vy -= vn * ny;
-            }
+    if sdf < threshold {
+        // Match CPU boundary logic: use SDF normal (fallback to +Y).
+        var cnx = nx;
+        var cny = ny;
+        let nlen = sqrt(cnx * cnx + cny * cny);
+        if nlen > 1e-6 {
+            cnx /= nlen;
+            cny /= nlen;
         } else {
-            // Deep zone: push back proportionally
-            let push_speed = clamp(
-                params.deep_push_gain_per_s * (-sdf - threshold) / params.dt,
-                0.0,
-                params.deep_push_speed_cap_mps,
-            );
-            vx += push_speed * nx;
-            vy += push_speed * ny;
-            // Also zero inward normal
-            let vn2 = vx * nx + vy * ny;
-            if vn2 < 0.0 {
-                vx -= vn2 * nx;
-                vy -= vn2 * ny;
-            }
+            cnx = 0.0;
+            cny = 1.0;
         }
 
-        // Tangential damping
-        let tang_x = vx - (vx * nx + vy * ny) * nx;
-        let tang_y = vy - (vx * nx + vy * ny) * ny;
-        vx = vx - params.tangential_damping * tang_x;
-        vy = vy - params.tangential_damping * tang_y;
+        var corrected_vx = vx;
+        var corrected_vy = vy;
+        let normal_speed = corrected_vx * cnx + corrected_vy * cny;
+        if normal_speed < 0.0 {
+            corrected_vx -= cnx * normal_speed;
+            corrected_vy -= cny * normal_speed;
+        }
+
+        let depth = threshold - sdf;
+        if depth > 0.0 {
+            let push_speed = clamp(
+                depth * max(params.deep_push_gain_per_s, 0.0),
+                0.0,
+                max(params.deep_push_speed_cap_mps, 0.0),
+            );
+            corrected_vx += cnx * push_speed;
+            corrected_vy += cny * push_speed;
+        }
+
+        let normal_speed2 = corrected_vx * cnx + corrected_vy * cny;
+        let tang_x = corrected_vx - normal_speed2 * cnx;
+        let tang_y = corrected_vy - normal_speed2 * cny;
+        vx = corrected_vx - params.tangential_damping * tang_x;
+        vy = corrected_vy - params.tangential_damping * tang_y;
     }
 
     // Write back as momentum (other passes read velocity from px/py / mass)

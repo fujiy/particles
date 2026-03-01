@@ -8,6 +8,7 @@
 @group(0) @binding(2) var<storage, read> grid: array<GpuGridNode>;
 
 const MASS_EPSILON: f32 = 1e-8;
+const C_DAMPING: f32 = 0.05;
 
 @compute @workgroup_size(64)
 fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -76,6 +77,9 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
         c00 *= scale; c01 *= scale;
         c10 *= scale; c11 *= scale;
     }
+    let c_keep = 1.0 - C_DAMPING;
+    c00 *= c_keep; c01 *= c_keep;
+    c10 *= c_keep; c11 *= c_keep;
 
     // Update F: F_new = (I + dt * C) * F_old
     let f00 = particles[pid].f_a; let f01 = particles[pid].f_b;

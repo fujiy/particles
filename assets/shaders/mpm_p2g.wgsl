@@ -79,8 +79,9 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Clamp J for stability
     let j_clamped = clamp(j, params.j_min, params.j_max);
 
-    // Pressure (weak compressibility EOS)
-    let pressure = params.bulk_modulus * max(j_clamped - 1.0, 0.0);
+    // Pressure (weak compressibility EOS):
+    // positive only under compression (J < 1), no tensile pressure.
+    let pressure = params.bulk_modulus * max(1.0 - j_clamped, 0.0);
 
     let vj = v0p * j_clamped;
 
@@ -123,8 +124,8 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             // Total momentum contribution
             let dp = vec2<f32>(
-                w * mp * affine_v.x - dt * stress_contrib.x,
-                w * mp * affine_v.y - dt * stress_contrib.y,
+                w * mp * affine_v.x + dt * stress_contrib.x,
+                w * mp * affine_v.y + dt * stress_contrib.y,
             );
             let dm = w * mp;
 

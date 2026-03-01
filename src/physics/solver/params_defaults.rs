@@ -6,7 +6,7 @@ use crate::physics::world::constants::{CELL_SIZE_M, CHUNK_SIZE_I32};
 
 pub const DEFAULT_SOLVER_PARAMS: SolverParams = SolverParams {
     gravity_mps2: Vec2::new(0.0, -9.81),
-    fixed_dt: 1.0 / 60.0,
+    fixed_dt: 1.0 / 240.0,
     mpm_block_rate_level_min: 0,
     substeps: 2,
     solver_iters: 6,

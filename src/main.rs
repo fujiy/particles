@@ -13,7 +13,9 @@ use particles::physics::PhysicsPlugin;
 use particles::physics::gpu_mpm::GpuMpmPlugin;
 use particles::physics::gpu_mpm::sync::apply_gpu_readback;
 use particles::physics::gpu_mpm::gpu_resources::MpmGpuControl;
-use particles::physics::state::{ReplayLoadScenarioRequest, SimulationState};
+use particles::physics::scenario::{default_scenario_spec_by_name, evaluate_scenario_state};
+use particles::physics::state::{ReplayLoadScenarioRequest, ReplayState, SimulationState};
+use particles::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use particles::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use particles::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
 use particles::render::TerrainRenderDiagnostics;
@@ -167,6 +169,14 @@ struct MpmAutoVerifyReport {
     end_mean_y: f32,
     mean_drop: f32,
     terrain_penetration_ratio: f32,
+    max_speed_mps: f32,
+    max_speed_ok: bool,
+    water_surface_height_ok: bool,
+    water_surface_assertion_active: bool,
+    max_speed_expected: String,
+    max_speed_actual: String,
+    water_surface_expected: String,
+    water_surface_actual: String,
 }
 
 fn env_bool(key: &str) -> bool {
@@ -306,8 +316,11 @@ fn run_drift_autoverify(
 fn run_mpm_autoverify(
     mut state: ResMut<MpmAutoVerifyState>,
     time: Res<Time>,
+    replay_state: Res<ReplayState>,
     particle_world: Res<ParticleWorld>,
     terrain_world: Res<TerrainWorld>,
+    object_world: Res<ObjectWorld>,
+    object_field: Res<ObjectPhysicsField>,
     mut sim_state: ResMut<SimulationState>,
     mut gpu_control: ResMut<MpmGpuControl>,
     mut scenario_writer: MessageWriter<ReplayLoadScenarioRequest>,
@@ -356,6 +369,14 @@ fn run_mpm_autoverify(
                     end_mean_y: 0.0,
                     mean_drop: 0.0,
                     terrain_penetration_ratio: 0.0,
+                    max_speed_mps: 0.0,
+                    max_speed_ok: false,
+                    water_surface_height_ok: false,
+                    water_surface_assertion_active: false,
+                    max_speed_expected: String::new(),
+                    max_speed_actual: String::new(),
+                    water_surface_expected: String::new(),
+                    water_surface_actual: String::new(),
                 };
                 write_drift_report(&state.output_path, &report);
                 exit_writer.write(bevy::app::AppExit::from_code(4));
@@ -411,6 +432,14 @@ fn run_mpm_autoverify(
             end_mean_y: 0.0,
             mean_drop: 0.0,
             terrain_penetration_ratio: 1.0,
+            max_speed_mps: 0.0,
+            max_speed_ok: false,
+            water_surface_height_ok: false,
+            water_surface_assertion_active: false,
+            max_speed_expected: String::new(),
+            max_speed_actual: String::new(),
+            water_surface_expected: String::new(),
+            water_surface_actual: String::new(),
         };
         write_drift_report(&state.output_path, &report);
         exit_writer.write(bevy::app::AppExit::from_code(5));
@@ -432,13 +461,53 @@ fn run_mpm_autoverify(
     let fps_ok = avg_fps >= state.min_avg_fps;
     let drop_ok = mean_drop >= state.min_mean_drop;
     let terrain_ok = penetration_ratio <= state.max_penetration_ratio;
-    let passed = fps_ok && drop_ok && terrain_ok;
+    let mut max_speed_mps = 0.0_f32;
+    let mut max_speed_ok = true;
+    let mut water_surface_height_ok = true;
+    let mut water_surface_assertion_active = false;
+    let mut max_speed_expected = String::new();
+    let mut max_speed_actual = String::new();
+    let mut water_surface_expected = String::new();
+    let mut water_surface_actual = String::new();
+    if let Some(spec) = default_scenario_spec_by_name(&state.scenario_name) {
+        let (metrics, assertions) = evaluate_scenario_state(
+            &spec,
+            replay_state.current_step,
+            replay_state.baseline_particle_count,
+            replay_state.baseline_solid_cell_count,
+            &terrain_world,
+            &particle_world,
+            &object_world,
+            &object_field,
+        );
+        max_speed_mps = metrics.max_speed_mps;
+        for row in assertions {
+            if row.label == "max_speed_mps" && row.active {
+                max_speed_ok = row.ok;
+                max_speed_expected = row.expected;
+                max_speed_actual = row.actual;
+            } else if row.label == "water_surface_height_p95" {
+                water_surface_assertion_active = row.active;
+                water_surface_expected = row.expected;
+                water_surface_actual = row.actual;
+                if row.active {
+                    water_surface_height_ok = row.ok;
+                }
+            }
+        }
+    }
+
+    let passed = fps_ok
+        && drop_ok
+        && terrain_ok
+        && max_speed_ok
+        && (!water_surface_assertion_active || water_surface_height_ok);
     let note = if passed {
-        "MPM verification passed: falling, terrain interaction, and FPS are within thresholds."
+        "MPM verification passed: falling, terrain interaction, FPS, and assertions are within thresholds."
             .to_string()
     } else {
         format!(
-            "MPM verification failed: fps_ok={fps_ok}, drop_ok={drop_ok}, terrain_ok={terrain_ok}"
+            "MPM verification failed: fps_ok={fps_ok}, drop_ok={drop_ok}, terrain_ok={terrain_ok}, max_speed_ok={max_speed_ok}, water_surface_ok={water_surface_height_ok}, water_surface_active={water_surface_assertion_active}"
         )
     };
 
@@ -453,6 +522,14 @@ fn run_mpm_autoverify(
         end_mean_y,
         mean_drop,
         terrain_penetration_ratio: penetration_ratio,
+        max_speed_mps,
+        max_speed_ok,
+        water_surface_height_ok,
+        water_surface_assertion_active,
+        max_speed_expected,
+        max_speed_actual,
+        water_surface_expected,
+        water_surface_actual,
     };
     write_drift_report(&state.output_path, &report);
     gpu_control.readback_enabled = false;

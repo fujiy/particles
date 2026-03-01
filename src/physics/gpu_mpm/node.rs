@@ -99,7 +99,7 @@ impl Node for MpmComputeNode {
                 }
                 return Ok(());
             };
-            if run_req.enabled {
+            if run_req.enabled && run_req.substeps > 0 {
                 let drift_bg = device.create_bind_group(
                     "mpm_drift_bg",
                     &pipelines.drift_layout,
@@ -108,16 +108,18 @@ impl Node for MpmComputeNode {
                         buffers.particle_buf.as_entire_binding(),
                     )),
                 );
-                let mut pass =
-                    render_context
-                        .command_encoder()
-                        .begin_compute_pass(&ComputePassDescriptor {
-                            label: Some("mpm_drift"),
-                            timestamp_writes: None,
-                        });
-                pass.set_pipeline(drift_pipeline);
-                pass.set_bind_group(0, &drift_bg, &[]);
-                pass.dispatch_workgroups(particles_wgs, 1, 1);
+                for _ in 0..run_req.substeps {
+                    let mut pass =
+                        render_context
+                            .command_encoder()
+                            .begin_compute_pass(&ComputePassDescriptor {
+                                label: Some("mpm_drift"),
+                                timestamp_writes: None,
+                            });
+                    pass.set_pipeline(drift_pipeline);
+                    pass.set_bind_group(0, &drift_bg, &[]);
+                    pass.dispatch_workgroups(particles_wgs, 1, 1);
+                }
             }
         } else {
             let node_count = buffers.layout.node_count() as u32;
@@ -165,7 +167,7 @@ impl Node for MpmComputeNode {
                 return Ok(());
             };
 
-            if run_req.enabled {
+            if run_req.enabled && run_req.substeps > 0 {
                 // ---- Clear ----
                 let clear_bg = device.create_bind_group(
                     "mpm_clear_bg",
@@ -212,49 +214,50 @@ impl Node for MpmComputeNode {
                 );
 
                 let encoder = render_context.command_encoder();
+                for _ in 0..run_req.substeps {
+                    // Pass 1: Clear grid
+                    {
+                        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                            label: Some("mpm_clear"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(clear_pipeline);
+                        pass.set_bind_group(0, &clear_bg, &[]);
+                        pass.dispatch_workgroups(nodes_wgs, 1, 1);
+                    }
 
-                // Pass 1: Clear grid
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_clear"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(clear_pipeline);
-                    pass.set_bind_group(0, &clear_bg, &[]);
-                    pass.dispatch_workgroups(nodes_wgs, 1, 1);
-                }
+                    // Pass 2: P2G
+                    {
+                        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                            label: Some("mpm_p2g"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(p2g_pipeline);
+                        pass.set_bind_group(0, &p2g_bg, &[]);
+                        pass.dispatch_workgroups(particles_wgs, 1, 1);
+                    }
 
-                // Pass 2: P2G
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_p2g"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(p2g_pipeline);
-                    pass.set_bind_group(0, &p2g_bg, &[]);
-                    pass.dispatch_workgroups(particles_wgs, 1, 1);
-                }
+                    // Pass 3: Grid update
+                    {
+                        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                            label: Some("mpm_grid_update"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(grid_update_pipeline);
+                        pass.set_bind_group(0, &grid_update_bg, &[]);
+                        pass.dispatch_workgroups(nodes_wgs, 1, 1);
+                    }
 
-                // Pass 3: Grid update
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_grid_update"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(grid_update_pipeline);
-                    pass.set_bind_group(0, &grid_update_bg, &[]);
-                    pass.dispatch_workgroups(nodes_wgs, 1, 1);
-                }
-
-                // Pass 4: G2P
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_g2p"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(g2p_pipeline);
-                    pass.set_bind_group(0, &g2p_bg, &[]);
-                    pass.dispatch_workgroups(particles_wgs, 1, 1);
+                    // Pass 4: G2P
+                    {
+                        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                            label: Some("mpm_g2p"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(g2p_pipeline);
+                        pass.set_bind_group(0, &g2p_bg, &[]);
+                        pass.dispatch_workgroups(particles_wgs, 1, 1);
+                    }
                 }
             }
         }

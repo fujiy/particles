@@ -101,9 +101,6 @@ pub(crate) fn step_physics(
     if sim_state.gpu_mpm_active {
         // GPU MPM path: skip CPU-side fixed-step bookkeeping and solver work.
         // Terrain/object interactions are handled in GPU compute passes.
-        if replay_state.enabled && (sim_state.running || sim_state.step_once) {
-            replay_state.current_step = replay_state.current_step.saturating_add(1);
-        }
         particle_world.set_active_chunk_region_bounds(None, None);
         particle_world.set_active_halo_chunks(0);
         particle_world.configure_far_field_queue(None, 0, 0, 0, 0.0, 0);

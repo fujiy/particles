@@ -22,7 +22,8 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use self::gpu_resources::{
-    MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuUploadRequest,
+    MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock,
+    MpmGpuUploadRequest,
 };
 use self::node::MpmComputeNode;
 use self::pipeline::MpmComputePipelines;
@@ -73,6 +74,7 @@ impl ExtractResource for MpmGpuRunRequest {
     fn extract_resource(source: &Self::Source) -> Self {
         Self {
             enabled: source.enabled,
+            substeps: source.substeps,
         }
     }
 }
@@ -88,6 +90,15 @@ impl Clone for MpmGpuParamsRequest {
     fn clone(&self) -> Self {
         Self {
             params: self.params,
+        }
+    }
+}
+
+impl Clone for MpmGpuRunRequest {
+    fn clone(&self) -> Self {
+        Self {
+            enabled: self.enabled,
+            substeps: self.substeps,
         }
     }
 }
@@ -207,6 +218,7 @@ impl Plugin for GpuMpmPlugin {
         app.init_resource::<MpmGpuUploadRequest>()
             .init_resource::<MpmGpuParamsRequest>()
             .init_resource::<MpmGpuRunRequest>()
+            .init_resource::<MpmGpuStepClock>()
             .init_resource::<MpmGpuControl>()
             .insert_resource(readback)
             .add_systems(

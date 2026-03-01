@@ -49,6 +49,7 @@
   - [x] `water_drop` で NaN/発散なしで実時間継続することを確認する。
   - [x] assertion/デバッグ向けに GPU readback を低頻度（既定1秒）で取得できるようにする。
   - [x] compute shader import 失敗を解消し、起動直後から MPM pipeline を安定稼働させる。
+  - [x] GPU経路の物性・境界パラメータをCPU経路相当に整合させる（減衰/圧縮性/境界補正）。
   - [ ] 質量誤差・侵入率・CFLをGPU経路で計測できるようにする。
   - [ ] 旧CPU経路依存の更新ループを削除し、GPU経路のみで `water_drop` が成立することを確認する。
 - 進捗:
@@ -90,6 +91,10 @@
   - 2026-03-01: `test assertions` 向けに GPU readback を低頻度化。`MpmGpuControl.readback_interval_frames` を追加し、既定で60フレーム間隔（約1秒）でのみ `particle_buf -> readback_buf` コピー/マップを行うよう変更。`PARTICLES_GPU_READBACK_INTERVAL_FRAMES` で上書き可能化。
   - 2026-03-01: GPU MPM経路で `ReplayState.current_step` が進まず assertion 条件が発火しない問題を修正。`fixed_update` の `gpu_mpm_active` 早期return分岐でも `running || step_once` 時に step を進めるようにした。
   - 2026-03-01: `water_drop` 非落下の主因だった compute shader import 失敗（`Shader import not yet available`）を修正。`mpm_types.wgsl` を明示ロードし、import composerで失敗する識別子（数字/先頭 `_` を含む名前）を改名して MPM pipeline のコンパイル失敗を解消。`PARTICLES_AUTOVERIFY_MPM=1 cargo run` で `run_frames=240` でも落下・地形相互作用・FPS指標の通過を再確認。
+  - 2026-03-01: 水塊が縦列で跳ねて横拡散しない問題に対し、GPU `p2g` の圧力項を修正（圧縮時のみ圧力を発生させ、応力寄与の運動量符号を CPU 実装と整合化）。`water_drop` で落下後の横方向広がり改善を確認。
+  - 2026-03-01: GPU MPM の時間進行を render FPS 依存から固定ステップ積算へ変更。`MpmGpuRunRequest.substeps` と `MpmGpuStepClock` を導入し、`fixed_dt` ベースで1フレーム内に複数 substep 実行、処理限界超過時は上限で打ち切ってスロー化する挙動を実装。
+  - 2026-03-01: 左壁接触での上向き吹き飛び対策として、GPU境界SDF生成を CPU `terrain_boundary` 実装へ整合化（距離を「セル中心近似」から「セルAABB最近点距離」へ修正し、可能時は `TerrainWorld::sample_signed_distance_and_normal` を直接使用）。`PARTICLES_AUTOVERIFY_MPM=1`（1200フレーム）で `water_surface_height_p95` を含む全指標の通過を確認。
+  - 2026-03-01: 物性のCPU相当化として GPU 減衰/境界パラメータをCPU経路に合わせて調整（`C_DAMPING=0.05`、全体速度減衰/速度cap撤去、`bulk_modulus=ρc²`、`j_min/j_max=0.6/1.4`、境界の `threshold/gain/cap/tangential` をCPU式へ一致）。`PARTICLES_AUTOVERIFY_MPM=1`（1200フレーム）再実行で指標通過を確認。
 - 完了条件:
   - `water_drop` がGPU経路で安定再現され、品質指標を自動計測できる。
 
