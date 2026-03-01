@@ -7,6 +7,7 @@ use bevy::prelude::*;
 use super::params_types::SolverParams;
 use super::step::step_simulation_once;
 use super::terrain_boundary::TerrainBoundarySampler;
+use super::types::StepSimulationTiming;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::state::{
@@ -83,6 +84,36 @@ pub(crate) fn step_physics(
     ),
     camera_transforms: Query<&Transform, With<Camera2d>>,
 ) {
+    if !sim_state.mpm_enabled {
+        // Debug/overlay mode: skip all fixed-step physics bookkeeping.
+        // This avoids spending CPU on active-region scanning and object field rebuild
+        // while MLS-MPM is globally disabled.
+        particle_world.set_active_chunk_region_bounds(None, None);
+        particle_world.set_active_halo_chunks(0);
+        particle_world.configure_far_field_queue(None, 0, 0, 0, 0.0, 0);
+        active_region.active_chunks.clear();
+        active_region.chunk_min = None;
+        active_region.chunk_max = None;
+        sim_state.step_once = false;
+        return;
+    }
+
+    if sim_state.gpu_mpm_active {
+        // GPU MPM path: skip CPU-side fixed-step bookkeeping and solver work.
+        // Terrain/object interactions are handled in GPU compute passes.
+        if replay_state.enabled && (sim_state.running || sim_state.step_once) {
+            replay_state.current_step = replay_state.current_step.saturating_add(1);
+        }
+        particle_world.set_active_chunk_region_bounds(None, None);
+        particle_world.set_active_halo_chunks(0);
+        particle_world.configure_far_field_queue(None, 0, 0, 0, 0.0, 0);
+        active_region.active_chunks.clear();
+        active_region.chunk_min = None;
+        active_region.chunk_max = None;
+        sim_state.step_once = false;
+        return;
+    }
+
     let (mut grid_hierarchy, mut mpm_block_index_table) = mpm_resources;
     let (mut object_world, mut object_field) = object_resources;
     let (mut perf_metrics, mut step_profiler, mut block_coloring_experiment) = profiling_resources;
@@ -206,18 +237,26 @@ pub(crate) fn step_physics(
             .max(0.0);
         let start = Instant::now();
         let cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
-        let sim_step = step_simulation_once(
-            &mut terrain_world,
-            &mut particle_world,
-            &mut continuum_world,
-            &mut grid_hierarchy,
-            &mut mpm_block_index_table,
-            &mut object_world,
-            &mut object_field,
-            &mut terrain_boundary_sampler,
-            parallel_settings.enabled,
-            terrain_boundary_radius_m,
-        );
+        let sim_step = if !sim_state.mpm_enabled {
+            // Overlay/debug mode: disable all MLS-MPM stepping.
+            StepSimulationTiming::default()
+        } else if sim_state.gpu_mpm_active {
+            // GPU compute path owns ContinuumParticleWorld updates; skip CPU MPM.
+            StepSimulationTiming::default()
+        } else {
+            step_simulation_once(
+                &mut terrain_world,
+                &mut particle_world,
+                &mut continuum_world,
+                &mut grid_hierarchy,
+                &mut mpm_block_index_table,
+                &mut object_world,
+                &mut object_field,
+                &mut terrain_boundary_sampler,
+                parallel_settings.enabled,
+                terrain_boundary_radius_m,
+            )
+        };
         let total_secs = start.elapsed().as_secs_f64();
         let total_cpu_secs = (process_cpu_time_seconds().unwrap_or(cpu_start) - cpu_start).max(0.0);
         perf_metrics.physics_time_this_frame_secs += total_secs;

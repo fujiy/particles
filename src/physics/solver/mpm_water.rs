@@ -863,7 +863,8 @@ pub fn step_block_set_coupled(
             }
         }
         metrics.g2p_collect_wall_secs += t0.elapsed().as_secs_f64();
-        metrics.g2p_collect_cpu_secs += (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
+        metrics.g2p_collect_cpu_secs +=
+            (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
     }
     {
         let _span = tracing::info_span!("physics::mpm::g2p_sort_apply").entered();

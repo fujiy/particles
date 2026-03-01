@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use super::*;
-use crate::physics::world::grid::GridHierarchy;
+use crate::physics::gpu_mpm::gpu_resources::world_grid_layout;
 use crate::physics::world::sub_block::{rate_level_from_divisor, sub_block_world_bounds};
 
 #[derive(Component)]
@@ -109,7 +109,6 @@ pub(super) fn draw_physics_area_overlay(
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     object_world: Res<ObjectWorld>,
     particle_world: Res<ParticleWorld>,
-    grid_hierarchy: Res<GridHierarchy>,
 ) {
     if !overlay_state.enabled {
         return;
@@ -234,10 +233,8 @@ pub(super) fn draw_physics_area_overlay(
         }
     }
 
-    draw_mpm_grid_overlay(
+    draw_gpu_grid_overlay(
         &mut gizmos,
-        &grid_hierarchy,
-        particle_world.solver_params.fixed_dt,
         active_world_bounds.map(|(_, _, min, max)| (min, max)),
     );
 }
@@ -270,65 +267,53 @@ fn draw_rect_outline(gizmos: &mut Gizmos, min: Vec2, max: Vec2, color: Color) {
     gizmos.line_2d(Vec2::new(min.x, max.y), Vec2::new(min.x, min.y), color);
 }
 
-fn draw_mpm_grid_overlay(
-    gizmos: &mut Gizmos,
-    grid_hierarchy: &GridHierarchy,
-    frame_dt: f32,
-    clip_rect: Option<(Vec2, Vec2)>,
-) {
-    for block in grid_hierarchy.blocks() {
-        if block.node_dims.x == 0 || block.node_dims.y == 0 {
-            continue;
-        }
-        let block_min = block.world_node_min();
-        let block_max = block.world_node_max();
-        let Some((draw_min, draw_max)) = clipped_rect(block_min, block_max, clip_rect) else {
-            continue;
-        };
-
-        let base_color = mpm_block_color(block.color_class() as usize);
-        let block_outline_color = base_color;
-        let node_line_color = color_with_alpha(base_color, 0.26);
-        draw_rect_outline(gizmos, block_min, block_max, block_outline_color);
-
-        let step = block.h_b.max(1e-6);
-        let max_x_index = block.node_dims.x as i32 - 1;
-        let max_y_index = block.node_dims.y as i32 - 1;
-        let start_x = (((draw_min.x - block_min.x) / step).floor() as i32).clamp(0, max_x_index);
-        let end_x = (((draw_max.x - block_min.x) / step).ceil() as i32).clamp(0, max_x_index);
-        let start_y = (((draw_min.y - block_min.y) / step).floor() as i32).clamp(0, max_y_index);
-        let end_y = (((draw_max.y - block_min.y) / step).ceil() as i32).clamp(0, max_y_index);
-
-        for ix in start_x..=end_x {
-            let x = block_min.x + ix as f32 * step;
-            gizmos.line_2d(
-                Vec2::new(x, draw_min.y),
-                Vec2::new(x, draw_max.y),
-                node_line_color,
-            );
-        }
-        for iy in start_y..=end_y {
-            let y = block_min.y + iy as f32 * step;
-            gizmos.line_2d(
-                Vec2::new(draw_min.x, y),
-                Vec2::new(draw_max.x, y),
-                node_line_color,
-            );
-        }
-
-        let time_level = block_time_level_from_dt(frame_dt, block.dt_b);
-        let center = (block_min + block_max) * 0.5;
-        let label_size =
-            ((block_max.x - block_min.x).min(block_max.y - block_min.y) * 0.18).max(0.06);
-        draw_number_stroke(gizmos, time_level, center, label_size, block_outline_color);
+fn draw_gpu_grid_overlay(gizmos: &mut Gizmos, clip_rect: Option<(Vec2, Vec2)>) {
+    let layout = world_grid_layout();
+    if layout.dims.x < 2 || layout.dims.y < 2 {
+        return;
     }
-}
 
-fn block_time_level_from_dt(frame_dt: f32, block_dt: f32) -> u8 {
-    let frame_dt = frame_dt.max(1e-8);
-    let block_dt = block_dt.max(1e-8).min(frame_dt);
-    let ratio = (frame_dt / block_dt).max(1.0);
-    ratio.log2().round().clamp(0.0, u8::MAX as f32) as u8
+    let h = CELL_SIZE_M.max(1e-6);
+    let min_node = layout.origin;
+    let max_node = layout.origin + IVec2::new(layout.dims.x as i32 - 1, layout.dims.y as i32 - 1);
+    let grid_min = min_node.as_vec2() * h;
+    let grid_max = max_node.as_vec2() * h;
+    let Some((draw_min, draw_max)) = clipped_rect(grid_min, grid_max, clip_rect) else {
+        return;
+    };
+
+    let outline_color = Color::srgba(0.98, 0.48, 0.22, 0.88);
+    let minor_line_color = Color::srgba(0.98, 0.48, 0.22, 0.14);
+    let major_line_color = Color::srgba(0.98, 0.48, 0.22, 0.34);
+    draw_rect_outline(gizmos, grid_min, grid_max, outline_color);
+
+    let start_x =
+        (((draw_min.x - grid_min.x) / h).floor() as i32).clamp(0, max_node.x - min_node.x);
+    let end_x = (((draw_max.x - grid_min.x) / h).ceil() as i32).clamp(0, max_node.x - min_node.x);
+    let start_y =
+        (((draw_min.y - grid_min.y) / h).floor() as i32).clamp(0, max_node.y - min_node.y);
+    let end_y = (((draw_max.y - grid_min.y) / h).ceil() as i32).clamp(0, max_node.y - min_node.y);
+
+    for ix in start_x..=end_x {
+        let x = grid_min.x + ix as f32 * h;
+        let node_x = min_node.x + ix;
+        let color = if node_x.rem_euclid(CHUNK_SIZE_I32) == 0 {
+            major_line_color
+        } else {
+            minor_line_color
+        };
+        gizmos.line_2d(Vec2::new(x, draw_min.y), Vec2::new(x, draw_max.y), color);
+    }
+    for iy in start_y..=end_y {
+        let y = grid_min.y + iy as f32 * h;
+        let node_y = min_node.y + iy;
+        let color = if node_y.rem_euclid(CHUNK_SIZE_I32) == 0 {
+            major_line_color
+        } else {
+            minor_line_color
+        };
+        gizmos.line_2d(Vec2::new(draw_min.x, y), Vec2::new(draw_max.x, y), color);
+    }
 }
 
 fn clipped_rect(min: Vec2, max: Vec2, clip_rect: Option<(Vec2, Vec2)>) -> Option<(Vec2, Vec2)> {
@@ -401,16 +386,6 @@ fn blend_color(from: Color, to: Color, t: f32) -> Color {
         from.blue + (to.blue - from.blue) * t,
         from.alpha + (to.alpha - from.alpha) * t,
     )
-}
-
-fn color_with_alpha(color: Color, alpha: f32) -> Color {
-    let rgba = color.to_srgba();
-    Color::srgba(rgba.red, rgba.green, rgba.blue, alpha.clamp(0.0, 1.0))
-}
-
-fn mpm_block_color(color_class: usize) -> Color {
-    let palette = GRID_MPM_BLOCK_COLOR_PALETTE;
-    palette[color_class % palette.len()]
 }
 
 fn draw_sub_block_rate_digits(

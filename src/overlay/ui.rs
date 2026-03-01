@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 
 use super::*;
-use crate::physics::world::grid::GridHierarchy;
+use crate::physics::gpu_mpm::gpu_resources::world_grid_layout;
 
 pub(super) fn setup_overlay_ui(mut commands: Commands) {
     commands
@@ -246,18 +246,21 @@ pub(super) fn update_physics_area_overlay_button_label(
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     active_region: Res<PhysicsActiveRegion>,
     particle_world: Res<ParticleWorld>,
-    grid_hierarchy: Res<GridHierarchy>,
     mut labels: Query<&mut Text, With<PhysicsAreaOverlayToggleButtonLabel>>,
 ) {
     if !overlay_state.is_changed()
         && !render_diagnostics.is_changed()
         && !active_region.is_changed()
         && !particle_world.is_changed()
-        && !grid_hierarchy.is_changed()
     {
         return;
     }
 
+    let gpu_layout = world_grid_layout();
+    let gpu_cells = UVec2::new(
+        gpu_layout.dims.x.saturating_sub(1),
+        gpu_layout.dims.y.saturating_sub(1),
+    );
     for mut label in &mut labels {
         let sub_block_count = particle_world.sub_block_overlay_samples().len();
         let max_debt = particle_world
@@ -265,16 +268,9 @@ pub(super) fn update_physics_area_overlay_button_label(
             .iter()
             .map(|sample| sample.debt_ratio)
             .fold(0.0, f32::max);
-        let mpm_block_count = grid_hierarchy.block_count();
-        let mpm_active_nodes: usize = grid_hierarchy
-            .blocks()
-            .iter()
-            .map(|block| block.active_node_count())
-            .sum();
-        let mpm_color_count = grid_hierarchy.block_color_count();
         label.0 = if overlay_state.enabled {
             format!(
-                "Physics Area Overlay: ON (A:{} T:{} P:{} SB:{} D:{:.2} MPM:{} AN:{} C:{})",
+                "Physics Area Overlay: ON (A:{} T:{} P:{} SB:{} D:{:.2} GPU:{}x{} nodes {}x{} cells)",
                 active_region.active_chunks.len(),
                 render_diagnostics
                     .terrain_updated_chunk_highlight_frames
@@ -284,9 +280,10 @@ pub(super) fn update_physics_area_overlay_button_label(
                     .len(),
                 sub_block_count,
                 max_debt,
-                mpm_block_count,
-                mpm_active_nodes,
-                mpm_color_count,
+                gpu_layout.dims.x,
+                gpu_layout.dims.y,
+                gpu_cells.x,
+                gpu_cells.y,
             )
         } else {
             "Physics Area Overlay: OFF".to_string()
@@ -318,7 +315,6 @@ pub(super) fn update_overlay_info_text(
     active_region: Res<PhysicsActiveRegion>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     particle_world: Res<ParticleWorld>,
-    grid_hierarchy: Res<GridHierarchy>,
     mut labels: Query<&mut Text, With<OverlayInfoText>>,
 ) {
     if !tile_overlay_state.is_changed()
@@ -327,10 +323,14 @@ pub(super) fn update_overlay_info_text(
         && !active_region.is_changed()
         && !render_diagnostics.is_changed()
         && !particle_world.is_changed()
-        && !grid_hierarchy.is_changed()
     {
         return;
     }
+    let gpu_layout = world_grid_layout();
+    let gpu_cells = UVec2::new(
+        gpu_layout.dims.x.saturating_sub(1),
+        gpu_layout.dims.y.saturating_sub(1),
+    );
     for mut label in &mut labels {
         let mut lines = Vec::new();
         if physics_overlay_state.enabled {
@@ -348,16 +348,9 @@ pub(super) fn update_overlay_info_text(
                 particle_world.sub_block_overlay_samples().len(),
                 max_debt,
             ));
-            let mpm_block_count = grid_hierarchy.block_count();
-            let mpm_active_nodes: usize = grid_hierarchy
-                .blocks()
-                .iter()
-                .map(|block| block.active_node_count())
-                .sum();
-            let mpm_color_count = grid_hierarchy.block_color_count();
             lines.push(format!(
-                "MPM Grid: blocks {} active nodes {} colors {}",
-                mpm_block_count, mpm_active_nodes, mpm_color_count
+                "GPU Grid: nodes {}x{} cells {}x{} (single uniform grid, no tiles)",
+                gpu_layout.dims.x, gpu_layout.dims.y, gpu_cells.x, gpu_cells.y
             ));
         }
         if tile_overlay_state.enabled {

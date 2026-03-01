@@ -1,9 +1,26 @@
 use bevy::prelude::*;
 
-#[derive(Resource, Debug, Default)]
+#[derive(Resource, Debug)]
 pub struct SimulationState {
     pub running: bool,
     pub step_once: bool,
+    /// Global kill-switch for MLS-MPM stepping (CPU and GPU).
+    pub mpm_enabled: bool,
+    /// When true, GPU compute path owns the continuum particle update.
+    /// CPU MLS-MPM step is skipped.
+    pub gpu_mpm_active: bool,
+}
+
+impl Default for SimulationState {
+    fn default() -> Self {
+        Self {
+            running: false,
+            step_once: false,
+            // Enable MPM stepping by default.
+            mpm_enabled: true,
+            gpu_mpm_active: false,
+        }
+    }
 }
 
 #[derive(Resource, Debug)]

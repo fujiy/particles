@@ -25,15 +25,15 @@
   - [x] ADR（単一grid + GPU-first）を作成する。
   - [x] `design.md` を単一grid + active tile + GPU常駐方針へ更新する。
   - [x] `physics.md` を block/ghost前提から単一grid GPUパイプライン仕様へ更新する。
-  - [ ] 旧CPU連続体コードの削除順序（依存関係と撤去単位）を設計する。
-  - [ ] GPUバッファレイアウト（particle/grid/active tile/metrics）を確定する。
+  - [x] 旧CPU連続体コードの削除順序（依存関係と撤去単位）を設計する。
+  - [x] GPUバッファレイアウト（particle/grid/active tile/metrics）を確定する。
   - [ ] 不要になったCPU実装を削除し、関連テストとドキュメント参照を整理する。
 - 完了条件:
   - 設計文書が新方針へ整合し、GPU一本化とCPU撤去の実施手順が定義されている。
 
 ### [MPM-GPU-01] Water Drop最小GPU再現（計算）
 
-- Status: `Planned`
+- Status: `In Progress`
 - 背景:
   - 新方針の最小成立条件は `water_drop` をGPU経路で安定再現すること。
   - まずは計算成立を優先し、描画経路は段階的にGPU完結化する。
@@ -41,11 +41,55 @@
   - 単一grid MLS-MPM をGPU computeで実行し、`water_drop` の物理挙動を再現する。
   - 地形SDF境界補正をGPU経路へ接続する。
 - Subtasks:
-  - [ ] GPU compute pass の最小骨格を実装する（`active build -> clear -> p2g -> grid -> g2p`）。
-  - [ ] 粒子/格子バッファのGPU常駐更新を実装し、毎ステップ全量readbackを廃止する。
-  - [ ] `water_drop` で NaN/発散なしで実時間継続することを確認する。
+  - [x] GPU compute pass の最小骨格を実装する（`clear -> p2g -> grid_update -> g2p`）。
+  - [x] 粒子/格子バッファのGPU常駐更新を実装する（CPU→GPU upload, ExtractResource経由）。
+  - [x] 地形SDF/normalをGPUバッファへ供給する経路を実装する。
+  - [x] GPU readbackバッファ（MAP_READ）を用意し、Arcベース共有チャネルで結果を転送する構造を実装する。
+  - [x] GPU readback結果をContinuumParticleWorldへ適用する（`apply_gpu_readback` system in Update）。
+  - [x] `water_drop` で NaN/発散なしで実時間継続することを確認する。
+  - [x] assertion/デバッグ向けに GPU readback を低頻度（既定1秒）で取得できるようにする。
+  - [x] compute shader import 失敗を解消し、起動直後から MPM pipeline を安定稼働させる。
   - [ ] 質量誤差・侵入率・CFLをGPU経路で計測できるようにする。
   - [ ] 旧CPU経路依存の更新ループを削除し、GPU経路のみで `water_drop` が成立することを確認する。
+- 進捗:
+  - 2026-03-01: `src/physics/gpu_mpm/` モジュール作成（buffers, gpu_resources, pipeline, shaders, node, sync, readback）。
+  - 2026-03-01: WGSL shaders作成（mpm_types, mpm_clear, mpm_p2g, mpm_grid_update, mpm_g2p）。
+  - 2026-03-01: `GpuMpmPlugin` を `main.rs` に登録、コンパイル通過、テスト105件全通過確認。
+  - 2026-03-01: GPU particle buffer 72 bytes/particle、grid buffer 16 bytes/node 確定。
+  - 2026-03-01: `apply_gpu_readback` (Update) + `readback_particles` (RenderSystems::Cleanup) 実装。GPU→CPU同期経路完成。コンパイル通過。
+  - 2026-03-01: WGSL `#define_import_path particles::mpm_types` 追加、struct field 名を `f_00/c_00/v_0` 等に修正（naga swizzle 解釈回避）。シェーダーエラーなし確認。
+  - 2026-03-01: `SimulationState::gpu_mpm_active` フラグ追加。粒子あり時に GPU 経路を有効化し CPU MPM ステップをスキップ。テスト105件通過。
+  - 2026-03-01: `SimulationState::mpm_enabled` を追加し、CPU/GPU MPM 両経路を一括停止できるよう変更。overlay検証向けに「粒子ロード + 表示のみ」動作を可能化。
+  - 2026-03-01: 性能切り分けのため `main.rs` から `GpuMpmPlugin` 登録を一時的に外し、compute shader / readback 経路を停止。
+  - 2026-03-01: 追加切り分けとして `main.rs` から `RenderPlugin` を外し、overlay依存の `TerrainRenderDiagnostics` のみ初期化。overlay以外の描画ルートを停止。
+  - 2026-03-01: Physics Area Overlay の MPM block/tile 表示を廃止し、`world_grid_layout()` に基づく GPU 単一グリッド（uniform grid, no tiles）表示へ切替。UIラベルも GPU nodes/cells 表示へ更新。
+  - 2026-03-01: `GpuMpmPlugin` を再登録。`MpmGpuControl { init_only: true }` を導入し、GPUバッファ初期化のみ有効・upload/compute/readback は停止した切り分けモードを追加。
+  - 2026-03-01: readback経路を切り分け用に有効化。compute無効時でも `particle_buf -> readback_buf` コピーを実行し、`apply_gpu_readback` で `ParticleWorld` へ同期して particle overlay 表示へ反映。
+  - 2026-03-01: particle overlay を gizmos 円描画から GPU sprite 描画へ置換。円テクスチャを一度生成し、粒子ごとの sprite transform/color/size を更新する方式へ変更。
+  - 2026-03-01: particle overlay をさらに GPU完結へ変更。Core2D render graph に専用 pass を追加し、`MpmGpuBuffers.particle_buf` を頂点インスタンス参照して円を直接描画。`MpmGpuControl.readback_enabled=false` で readback を停止。
+  - 2026-03-01: particle overlay 非表示の切り分けとして、粒子バッファ参照を使わない GPU デバッグパターン（時間変化フルスクリーン描画）を追加。overlay pass が生きているか単体確認可能にした。
+  - 2026-03-01: overlay表示元を安定化。`ensure_continuum_seed_from_particle_world` を追加し、`ParticleWorld` に水粒子があるのに `ContinuumParticleWorld` が空な場合に自動再構築して GPU upload ソースを保証。particle overlay はデバッグ強制を解除して粒子描画へ復帰。
+  - 2026-03-01: さらに切り分けのため、particle overlay shader を `view + time uniform` のみで描く強制デバッグ表示へ簡素化。粒子バッファ/params依存を外し、render pass 単体の可視化確認を優先。
+  - 2026-03-01: `particle_overlay_gpu_pipeline` の multisample 設定を `Msaa.samples()` に合わせて specialize するよう修正。RenderPass sample_count=4 との不一致パニックを解消。
+  - 2026-03-01: デバッグ可視性を優先し、particle overlay pass のブレンドを無効化（不透明上書き）して描画確認を容易化。
+  - 2026-03-01: `SimulationState.mpm_enabled=false` 時に `fixed_update::step_physics` を早期 return するよう変更。overlay/debug中に active region 走査・object field 再構築などのCPU負荷が走り続ける問題を抑制。
+  - 2026-03-01: 切り分けのため particle overlay の強制デバッグパターン描画を一時停止（overlay node 早期return）。
+  - 2026-03-01: 追加切り分けとして `main.rs` の `MpmGpuControl.init_only=true` へ切替。GpuMpmPlugin を残したまま upload/compute/readback 同期を停止し、CPU負荷源を分離。
+  - 2026-03-01: particle overlay 描画を再有効化。GPU pass を「背景1インスタンス + 粒子インスタンス群」に変更し、粒子ゼロでも薄い背景色を常時描画するよう更新。
+  - 2026-03-01: particle overlay shader を背景+粒子描画へ更新（instance 0: fullscreen tint, instance 1..N: particle circles）。overlay ON時は粒子有無に関わらず薄い背景を出す挙動を固定化。
+  - 2026-03-01: 追加切り分けとして particle overlay node の `overlay_state` 依存を一時解除し、ON/OFFに関係なく背景描画を実行。`MpmGpuBuffers` が未生成/未更新でも背景を描けるよう fallback uniform/storage buffer を追加。
+  - 2026-03-01: さらに切り分けのため particle overlay を背景専用の最小パスへ簡素化（`ViewUniform` のみbind、粒子/params/storage参照を除去）。背景の常時表示可否をまず確定する段階へ移行。
+  - 2026-03-01: 背景表示確認後、粒子描画を段階的に再導入。`instance 0` 背景 + `instance 1..N` 粒子描画へ復帰し、`main.rs` を `MpmGpuControl { init_only: false, readback_enabled: false }` に戻して GPU 粒子uploadを再有効化。合わせて `sync::prepare_particle_upload/prepare_terrain_upload` を毎フレーム再uploadしない形へ修正。
+  - 2026-03-01: GPU MPM再有効化。`SimulationState::mpm_enabled` のデフォルトを `true` に変更し、`RenderGraph` へ `MpmComputeLabel -> CameraDriverLabel` エッジを追加して compute node が毎フレーム実行されるよう修正。
+  - 2026-03-01: 切り分けのため `drift_only` モードを追加。`clear/p2g/grid_update/g2p` を停止し、GPU compute で粒子を一定速度で平行移動する `mpm_drift.wgsl` のみ実行する経路へ変更。`main.rs` は `SimulationState.mpm_enabled=false` + `MpmGpuControl{drift_only:true}` で起動するよう設定。
+  - 2026-03-01: Codex単独で回せる自動検証ループを追加。`PARTICLES_AUTOVERIFY_DRIFT=1 cargo run` で `water_drop` を自動ロードし、一定フレーム後の粒子位置差分を `artifacts/drift_autoverify.json` に出力して自動終了する仕組みを実装。
+  - 2026-03-01: `mpm_drift.wgsl` の `#import` 依存により `Shader import not yet available` で drift pipeline が不成立だった問題を修正（シェーダー内に `MpmParams/GpuParticle` を自己完結定義）。自動検証結果で `mean_dx > 0` かつ粒子間差分がほぼ一様であることを確認。
+  - 2026-03-01: MPM実行モードを復帰。通常起動時は `SimulationState.mpm_enabled=true` / `MpmGpuControl{drift_only:false, readback_enabled:false}` となるよう `main.rs` を環境変数駆動へ変更（driftデバッグは `PARTICLES_AUTOVERIFY_DRIFT=1` 時のみ有効）。
+  - 2026-03-01: MPM自動検証ループを追加。`PARTICLES_AUTOVERIFY_MPM=1 cargo run` で `water_drop` を自動ロードし、落下量・地形侵入率・平均FPSを `artifacts/mpm_autoverify.json` に出力して自動終了する仕組みを実装。
+  - 2026-03-01: GPU MPM時でも `fixed_update` のCPU重処理（active region/object field等）が走っていたため、`sim_state.gpu_mpm_active` で早期returnする軽量化を実施。MPM自動検証で `avg_fps ≈ 103`、`mean_drop > 0`、`terrain_penetration_ratio=0` を確認。
+  - 2026-03-01: `test assertions` 向けに GPU readback を低頻度化。`MpmGpuControl.readback_interval_frames` を追加し、既定で60フレーム間隔（約1秒）でのみ `particle_buf -> readback_buf` コピー/マップを行うよう変更。`PARTICLES_GPU_READBACK_INTERVAL_FRAMES` で上書き可能化。
+  - 2026-03-01: GPU MPM経路で `ReplayState.current_step` が進まず assertion 条件が発火しない問題を修正。`fixed_update` の `gpu_mpm_active` 早期return分岐でも `running || step_once` 時に step を進めるようにした。
+  - 2026-03-01: `water_drop` 非落下の主因だった compute shader import 失敗（`Shader import not yet available`）を修正。`mpm_types.wgsl` を明示ロードし、import composerで失敗する識別子（数字/先頭 `_` を含む名前）を改名して MPM pipeline のコンパイル失敗を解消。`PARTICLES_AUTOVERIFY_MPM=1 cargo run` で `run_frames=240` でも落下・地形相互作用・FPS指標の通過を再確認。
 - 完了条件:
   - `water_drop` がGPU経路で安定再現され、品質指標を自動計測できる。
 

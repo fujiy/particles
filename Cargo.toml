@@ -20,6 +20,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 noise = "0.9"
 bevy-inspector-egui = "0.36.0"
 tracing = "0.1"
+bytemuck = { version = "1.25.0", features = ["derive"] }
+wgpu = "27.0.1"
 
 [profile.dev]
 opt-level = 1

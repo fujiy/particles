@@ -1,13 +1,22 @@
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::log::{BoxedLayer, LogPlugin};
 use bevy::prelude::*;
+use bevy::render::RenderPlugin;
 use bevy_inspector_egui::bevy_egui::EguiPlugin;
-use bevy_inspector_egui::quick::WorldInspectorPlugin;
+use serde::Serialize;
+use std::fs;
+use std::path::Path;
 use particles::camera_controller::CameraControllerPlugin;
 use particles::interface::InterfacePlugin;
 use particles::overlay::OverlayPlugin;
 use particles::physics::PhysicsPlugin;
-use particles::render::RenderPlugin;
+use particles::physics::gpu_mpm::GpuMpmPlugin;
+use particles::physics::gpu_mpm::sync::apply_gpu_readback;
+use particles::physics::gpu_mpm::gpu_resources::MpmGpuControl;
+use particles::physics::state::{ReplayLoadScenarioRequest, SimulationState};
+use particles::physics::world::particle::{ParticleMaterial, ParticleWorld};
+use particles::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
+use particles::render::TerrainRenderDiagnostics;
 
 fn tracy_layer(_app: &mut App) -> Option<BoxedLayer> {
     #[cfg(feature = "tracy")]
@@ -20,25 +29,490 @@ fn tracy_layer(_app: &mut App) -> Option<BoxedLayer> {
     }
 }
 
+#[derive(Resource, Debug)]
+struct DriftAutoVerifyState {
+    enabled: bool,
+    scenario_name: String,
+    output_path: String,
+    scenario_requested: bool,
+    captured_start: bool,
+    wait_frames: u32,
+    sample_frames: u32,
+    max_wait_frames: u32,
+    sample_indices: Vec<usize>,
+    start_positions: Vec<[f32; 2]>,
+}
+
+impl DriftAutoVerifyState {
+    fn from_env() -> Self {
+        let enabled = env_bool("PARTICLES_AUTOVERIFY_DRIFT");
+        let scenario_name = std::env::var("PARTICLES_AUTOVERIFY_SCENARIO")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "water_drop".to_string());
+        let output_path = std::env::var("PARTICLES_AUTOVERIFY_OUT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "artifacts/drift_autoverify.json".to_string());
+        let sample_frames = std::env::var("PARTICLES_AUTOVERIFY_FRAMES")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(120);
+        Self {
+            enabled,
+            scenario_name,
+            output_path,
+            scenario_requested: false,
+            captured_start: false,
+            wait_frames: 0,
+            sample_frames,
+            max_wait_frames: 900,
+            sample_indices: Vec::new(),
+            start_positions: Vec::new(),
+        }
+    }
+}
+
+#[derive(Resource, Debug)]
+struct MpmAutoVerifyState {
+    enabled: bool,
+    scenario_name: String,
+    output_path: String,
+    scenario_requested: bool,
+    captured_start: bool,
+    wait_frames: u32,
+    run_frames: u32,
+    max_wait_frames: u32,
+    min_avg_fps: f32,
+    max_penetration_ratio: f32,
+    min_mean_drop: f32,
+    start_mean_y: f32,
+    elapsed_secs: f32,
+    phase: u8,
+    end_sample_wait_frames: u32,
+    end_sample_wait_max: u32,
+}
+
+impl MpmAutoVerifyState {
+    fn from_env() -> Self {
+        let enabled = env_bool("PARTICLES_AUTOVERIFY_MPM");
+        let scenario_name = std::env::var("PARTICLES_AUTOVERIFY_SCENARIO")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "water_drop".to_string());
+        let output_path = std::env::var("PARTICLES_AUTOVERIFY_MPM_OUT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "artifacts/mpm_autoverify.json".to_string());
+        let run_frames = std::env::var("PARTICLES_AUTOVERIFY_MPM_FRAMES")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(240);
+        let min_avg_fps = std::env::var("PARTICLES_AUTOVERIFY_MIN_FPS")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(20.0);
+        let max_penetration_ratio = std::env::var("PARTICLES_AUTOVERIFY_MAX_PENETRATION")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.10);
+        let min_mean_drop = std::env::var("PARTICLES_AUTOVERIFY_MIN_DROP")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.05);
+        Self {
+            enabled,
+            scenario_name,
+            output_path,
+            scenario_requested: false,
+            captured_start: false,
+            wait_frames: 0,
+            run_frames,
+            max_wait_frames: 900,
+            min_avg_fps,
+            max_penetration_ratio,
+            min_mean_drop,
+            start_mean_y: 0.0,
+            elapsed_secs: 0.0,
+            phase: 0,
+            end_sample_wait_frames: 0,
+            end_sample_wait_max: 120,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct DriftAutoVerifyReport {
+    passed: bool,
+    note: String,
+    scenario: String,
+    sampled_particles: usize,
+    sampled_frames: u32,
+    mean_dx: f32,
+    min_dx: f32,
+    max_dx: f32,
+    start_positions: Vec<[f32; 2]>,
+    end_positions: Vec<[f32; 2]>,
+}
+
+#[derive(Serialize)]
+struct MpmAutoVerifyReport {
+    passed: bool,
+    note: String,
+    scenario: String,
+    sampled_particles: usize,
+    run_frames: u32,
+    avg_fps: f32,
+    start_mean_y: f32,
+    end_mean_y: f32,
+    mean_drop: f32,
+    terrain_penetration_ratio: f32,
+}
+
+fn env_bool(key: &str) -> bool {
+    std::env::var(key)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn write_drift_report<T: Serialize>(path: &str, report: &T) {
+    if let Some(parent) = Path::new(path).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(report) {
+        let _ = fs::write(path, text);
+    }
+}
+
+fn run_drift_autoverify(
+    mut state: ResMut<DriftAutoVerifyState>,
+    particle_world: Res<ParticleWorld>,
+    mut sim_state: ResMut<SimulationState>,
+    mut scenario_writer: MessageWriter<ReplayLoadScenarioRequest>,
+    mut exit_writer: MessageWriter<bevy::app::AppExit>,
+) {
+    if !state.enabled {
+        return;
+    }
+
+    if !state.scenario_requested {
+        scenario_writer.write(ReplayLoadScenarioRequest {
+            scenario_name: state.scenario_name.clone(),
+        });
+        state.scenario_requested = true;
+        sim_state.running = false;
+        sim_state.step_once = false;
+        return;
+    }
+
+    let water_indices: Vec<usize> = particle_world
+        .materials()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &mat)| {
+            if matches!(mat, ParticleMaterial::WaterLiquid) {
+                Some(i)
+            } else {
+                None
+            }
+        })
+        .take(128)
+        .collect();
+
+    if !state.captured_start {
+        if water_indices.is_empty() {
+            state.wait_frames = state.wait_frames.saturating_add(1);
+            if state.wait_frames > state.max_wait_frames {
+                let report = DriftAutoVerifyReport {
+                    passed: false,
+                    note: "No water particles were available for sampling.".to_string(),
+                    scenario: state.scenario_name.clone(),
+                    sampled_particles: 0,
+                    sampled_frames: 0,
+                    mean_dx: 0.0,
+                    min_dx: 0.0,
+                    max_dx: 0.0,
+                    start_positions: Vec::new(),
+                    end_positions: Vec::new(),
+                };
+                write_drift_report(&state.output_path, &report);
+                exit_writer.write(bevy::app::AppExit::from_code(2));
+            }
+            return;
+        }
+
+        state.sample_indices = water_indices;
+        state.start_positions = state
+            .sample_indices
+            .iter()
+            .map(|&i| particle_world.positions()[i].to_array())
+            .collect();
+        state.captured_start = true;
+        state.wait_frames = 0;
+        sim_state.running = true;
+        return;
+    }
+
+    state.wait_frames = state.wait_frames.saturating_add(1);
+    if state.wait_frames < state.sample_frames {
+        return;
+    }
+
+    let mut end_positions = Vec::with_capacity(state.sample_indices.len());
+    let mut dx_values = Vec::with_capacity(state.sample_indices.len());
+    for (sample_i, &particle_i) in state.sample_indices.iter().enumerate() {
+        if particle_i >= particle_world.positions().len() {
+            continue;
+        }
+        let end = particle_world.positions()[particle_i].to_array();
+        end_positions.push(end);
+        let start = state.start_positions[sample_i];
+        dx_values.push(end[0] - start[0]);
+    }
+
+    let sampled_particles = dx_values.len();
+    let (mean_dx, min_dx, max_dx, passed) = if sampled_particles == 0 {
+        (0.0, 0.0, 0.0, false)
+    } else {
+        let sum = dx_values.iter().copied().sum::<f32>();
+        let mean = sum / sampled_particles as f32;
+        let min = dx_values.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = dx_values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        // Constant drift should produce near-uniform dx for all sampled particles.
+        let uniform = (max - min).abs() < 0.05;
+        (mean, min, max, mean > 0.001 && uniform)
+    };
+
+    let report = DriftAutoVerifyReport {
+        passed,
+        note: if passed {
+            "Particles moved on +X as expected.".to_string()
+        } else {
+            "Particle drift was not observed (mean_dx <= 0.001).".to_string()
+        },
+        scenario: state.scenario_name.clone(),
+        sampled_particles,
+        sampled_frames: state.sample_frames,
+        mean_dx,
+        min_dx,
+        max_dx,
+        start_positions: state.start_positions.clone(),
+        end_positions,
+    };
+    write_drift_report(&state.output_path, &report);
+    exit_writer.write(bevy::app::AppExit::Success);
+}
+
+fn run_mpm_autoverify(
+    mut state: ResMut<MpmAutoVerifyState>,
+    time: Res<Time>,
+    particle_world: Res<ParticleWorld>,
+    terrain_world: Res<TerrainWorld>,
+    mut sim_state: ResMut<SimulationState>,
+    mut gpu_control: ResMut<MpmGpuControl>,
+    mut scenario_writer: MessageWriter<ReplayLoadScenarioRequest>,
+    mut exit_writer: MessageWriter<bevy::app::AppExit>,
+) {
+    if !state.enabled {
+        return;
+    }
+
+    if !state.scenario_requested {
+        scenario_writer.write(ReplayLoadScenarioRequest {
+            scenario_name: state.scenario_name.clone(),
+        });
+        state.scenario_requested = true;
+        sim_state.running = false;
+        sim_state.step_once = false;
+        gpu_control.readback_enabled = false;
+        return;
+    }
+
+    let water_positions: Vec<Vec2> = particle_world
+        .materials()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &mat)| {
+            if matches!(mat, ParticleMaterial::WaterLiquid) {
+                Some(particle_world.positions()[i])
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if !state.captured_start {
+        if water_positions.is_empty() {
+            state.wait_frames = state.wait_frames.saturating_add(1);
+            if state.wait_frames > state.max_wait_frames {
+                let report = MpmAutoVerifyReport {
+                    passed: false,
+                    note: "No water particles were available for MPM verification.".to_string(),
+                    scenario: state.scenario_name.clone(),
+                    sampled_particles: 0,
+                    run_frames: 0,
+                    avg_fps: 0.0,
+                    start_mean_y: 0.0,
+                    end_mean_y: 0.0,
+                    mean_drop: 0.0,
+                    terrain_penetration_ratio: 0.0,
+                };
+                write_drift_report(&state.output_path, &report);
+                exit_writer.write(bevy::app::AppExit::from_code(4));
+            }
+            return;
+        }
+        state.start_mean_y =
+            water_positions.iter().map(|p| p.y).sum::<f32>() / water_positions.len() as f32;
+        state.captured_start = true;
+        state.wait_frames = 0;
+        state.elapsed_secs = 0.0;
+        state.phase = 1;
+        sim_state.running = true;
+        gpu_control.readback_enabled = false;
+        return;
+    }
+
+    if state.phase == 1 {
+        state.wait_frames = state.wait_frames.saturating_add(1);
+        state.elapsed_secs += time.delta_secs();
+        if state.wait_frames < state.run_frames {
+            return;
+        }
+        // Stop simulation and request one final readback snapshot.
+        sim_state.running = false;
+        sim_state.step_once = false;
+        gpu_control.readback_enabled = true;
+        gpu_control.readback_interval_frames = 1;
+        state.phase = 2;
+        state.end_sample_wait_frames = 0;
+        return;
+    }
+
+    if state.phase == 2 {
+        state.end_sample_wait_frames = state.end_sample_wait_frames.saturating_add(1);
+        let end_mean_y_live =
+            water_positions.iter().map(|p| p.y).sum::<f32>() / water_positions.len() as f32;
+        let got_fresh_sample = (end_mean_y_live - state.start_mean_y).abs() > 1.0e-4;
+        if !got_fresh_sample && state.end_sample_wait_frames < state.end_sample_wait_max {
+            return;
+        }
+    }
+
+    if water_positions.is_empty() {
+        let report = MpmAutoVerifyReport {
+            passed: false,
+            note: "Water particles disappeared during MPM verification.".to_string(),
+            scenario: state.scenario_name.clone(),
+            sampled_particles: 0,
+            run_frames: state.run_frames,
+            avg_fps: 0.0,
+            start_mean_y: state.start_mean_y,
+            end_mean_y: 0.0,
+            mean_drop: 0.0,
+            terrain_penetration_ratio: 1.0,
+        };
+        write_drift_report(&state.output_path, &report);
+        exit_writer.write(bevy::app::AppExit::from_code(5));
+        return;
+    }
+
+    let end_mean_y = water_positions.iter().map(|p| p.y).sum::<f32>() / water_positions.len() as f32;
+    let mean_drop = state.start_mean_y - end_mean_y;
+    let penetration_count = water_positions
+        .iter()
+        .filter(|&&pos| {
+            let cell = world_to_cell(pos);
+            matches!(terrain_world.get_cell_or_generated(cell), TerrainCell::Solid { .. })
+        })
+        .count();
+    let penetration_ratio = penetration_count as f32 / water_positions.len() as f32;
+    let avg_fps = state.run_frames as f32 / state.elapsed_secs.max(1.0e-5);
+
+    let fps_ok = avg_fps >= state.min_avg_fps;
+    let drop_ok = mean_drop >= state.min_mean_drop;
+    let terrain_ok = penetration_ratio <= state.max_penetration_ratio;
+    let passed = fps_ok && drop_ok && terrain_ok;
+    let note = if passed {
+        "MPM verification passed: falling, terrain interaction, and FPS are within thresholds."
+            .to_string()
+    } else {
+        format!(
+            "MPM verification failed: fps_ok={fps_ok}, drop_ok={drop_ok}, terrain_ok={terrain_ok}"
+        )
+    };
+
+    let report = MpmAutoVerifyReport {
+        passed,
+        note,
+        scenario: state.scenario_name.clone(),
+        sampled_particles: water_positions.len(),
+        run_frames: state.run_frames,
+        avg_fps,
+        start_mean_y: state.start_mean_y,
+        end_mean_y,
+        mean_drop,
+        terrain_penetration_ratio: penetration_ratio,
+    };
+    write_drift_report(&state.output_path, &report);
+    gpu_control.readback_enabled = false;
+    exit_writer.write(if passed {
+        bevy::app::AppExit::Success
+    } else {
+        bevy::app::AppExit::from_code(6)
+    });
+}
+
 fn main() {
+    let drift_autoverify = env_bool("PARTICLES_AUTOVERIFY_DRIFT");
+    let mpm_autoverify = env_bool("PARTICLES_AUTOVERIFY_MPM");
+    let drift_mode = drift_autoverify;
+    let readback_interval_frames = std::env::var("PARTICLES_GPU_READBACK_INTERVAL_FRAMES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(if drift_autoverify || mpm_autoverify {
+            1
+        } else {
+            60
+        });
+
     let default_plugins = DefaultPlugins
         .set(ImagePlugin::default_nearest())
+        .set(RenderPlugin {
+            synchronous_pipeline_compilation: true,
+            ..default()
+        })
         .set(LogPlugin {
             custom_layer: tracy_layer,
             ..default()
         });
     let mut app = App::new();
     app.insert_resource(ClearColor(Color::srgb(0.06, 0.06, 0.1)))
+        .init_resource::<TerrainRenderDiagnostics>()
+        .insert_resource(SimulationState {
+            mpm_enabled: !drift_mode,
+            ..Default::default()
+        })
+        .insert_resource(MpmGpuControl {
+            init_only: false,
+            readback_enabled: true,
+            readback_interval_frames,
+            drift_only: drift_mode,
+        })
+        .insert_resource(DriftAutoVerifyState::from_env())
+        .insert_resource(MpmAutoVerifyState::from_env())
         .add_plugins(default_plugins)
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
-        .add_plugins(EguiPlugin::default())
-        .add_plugins(WorldInspectorPlugin::new());
+        .add_plugins(EguiPlugin::default());
     app.add_plugins((
         PhysicsPlugin,
+        GpuMpmPlugin,
         InterfacePlugin,
         OverlayPlugin,
-        RenderPlugin,
         CameraControllerPlugin,
     ))
+    .add_systems(Update, run_drift_autoverify.after(apply_gpu_readback))
+    .add_systems(Update, run_mpm_autoverify.after(apply_gpu_readback))
     .run();
 }

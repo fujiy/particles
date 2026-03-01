@@ -1,13 +1,17 @@
+use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::prelude::*;
+use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::render_graph::RenderGraphExt;
+use bevy::render::render_graph::ViewNodeRunner;
+use bevy::render::render_resource::SpecializedRenderPipelines;
+use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
-use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, particle_radius_m, water_kernel_radius_m};
+use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, water_kernel_radius_m};
 use crate::physics::state::{PhysicsActiveRegion, PhysicsRegionSettings, SimUpdateSet};
 use crate::physics::world::object::{ObjectData, ObjectWorld};
-use crate::physics::world::particle::{
-    ParticleMaterial, ParticleWorld, nominal_particle_draw_radius_m,
-};
+use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{
-    CELL_SIZE_M, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainWorld, world_to_cell,
+    CELL_SIZE_M, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainWorld,
 };
 use crate::render::TerrainRenderDiagnostics;
 
@@ -23,20 +27,6 @@ const GRID_HALO_CHUNK_COLOR: Color = Color::srgba(0.16, 0.88, 0.60, 0.72);
 const GRID_PHYSICS_REGION_COLOR: Color = Color::srgba(0.96, 0.72, 0.12, 0.98);
 const GRID_TERRAIN_UPDATED_COLOR: Color = Color::srgba(0.13, 0.85, 0.92, 1.00);
 const GRID_PARTICLE_UPDATED_COLOR: Color = Color::srgba(0.76, 0.56, 0.98, 1.00);
-const GRID_MPM_BLOCK_COLOR_PALETTE: [Color; 12] = [
-    Color::srgba(0.94, 0.41, 0.16, 0.90),
-    Color::srgba(0.17, 0.74, 0.93, 0.90),
-    Color::srgba(0.33, 0.80, 0.42, 0.90),
-    Color::srgba(0.95, 0.66, 0.21, 0.90),
-    Color::srgba(0.75, 0.42, 0.94, 0.90),
-    Color::srgba(0.98, 0.33, 0.58, 0.90),
-    Color::srgba(0.12, 0.82, 0.72, 0.90),
-    Color::srgba(0.96, 0.51, 0.29, 0.90),
-    Color::srgba(0.42, 0.62, 0.97, 0.90),
-    Color::srgba(0.62, 0.79, 0.18, 0.90),
-    Color::srgba(0.90, 0.46, 0.74, 0.90),
-    Color::srgba(0.28, 0.88, 0.54, 0.90),
-];
 const GRID_SUB_BLOCK_DEBT_HOT_COLOR: Color = Color::srgba(0.96, 0.12, 0.12, 0.96);
 const GRID_SUB_BLOCK_LABEL_BASE_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.98);
 const GRID_OBJECT_COLOR: Color = Color::srgba(0.92, 0.36, 0.12, 0.70);
@@ -48,8 +38,6 @@ const SDF_BUTTON_BOTTOM_PX: f32 = 126.0;
 const PHYSICS_AREA_BUTTON_BOTTOM_PX: f32 = 50.0;
 const PARTICLE_BUTTON_BOTTOM_PX: f32 = 12.0;
 const WATER_KERNEL_RADIUS_M: f32 = water_kernel_radius_m(DEFAULT_MATERIAL_PARAMS);
-const TERRAIN_PARTICLE_RADIUS_M: f32 = particle_radius_m(DEFAULT_MATERIAL_PARAMS) * 0.55;
-const PARTICLE_OVERLAY_CIRCLE_RESOLUTION: u32 = 8;
 const GRID_OBJECT_AXIS_LENGTH_M: f32 = CELL_SIZE_M * 1.6;
 const GRID_OBJECT_CENTER_RADIUS_M: f32 = CELL_SIZE_M * 0.12;
 const TERRAIN_SDF_OVERLAY_STEP_M: f32 = CELL_SIZE_M;
@@ -69,6 +57,7 @@ impl Plugin for OverlayPlugin {
             .init_resource::<TileOverlayState>()
             .init_resource::<SdfOverlayState>()
             .init_resource::<PhysicsAreaOverlayState>()
+            .add_plugins(ExtractResourcePlugin::<ParticleOverlayState>::default())
             .add_systems(Startup, setup_overlay_ui)
             .add_systems(
                 Update,
@@ -99,14 +88,34 @@ impl Plugin for OverlayPlugin {
                     draw_tile_overlay,
                     draw_sdf_overlay,
                     draw_physics_area_overlay,
-                    draw_particle_overlay,
                 )
                     .in_set(SimUpdateSet::Overlay),
+            );
+
+        let render_app = app.sub_app_mut(RenderApp);
+        render_app
+            .init_resource::<SpecializedRenderPipelines<ParticleOverlayGpuPipeline>>()
+            .add_systems(RenderStartup, init_particle_overlay_gpu_pipeline)
+            .add_systems(
+                Render,
+                prepare_particle_overlay_gpu_pipeline.in_set(RenderSystems::Prepare),
+            )
+            .add_render_graph_node::<ViewNodeRunner<ParticleOverlayGpuNode>>(
+                Core2d,
+                ParticleOverlayGpuLabel,
+            )
+            .add_render_graph_edges(
+                Core2d,
+                (
+                    Node2d::MainTransparentPass,
+                    ParticleOverlayGpuLabel,
+                    Node2d::EndMainPass,
+                ),
             );
     }
 }
 
-#[derive(Resource, Debug)]
+#[derive(Resource, Debug, Clone, Copy)]
 struct ParticleOverlayState {
     enabled: bool,
 }
@@ -186,4 +195,14 @@ use ui::{
 
 use grid::{draw_physics_area_overlay, draw_sdf_overlay, draw_tile_overlay};
 
-use particle::draw_particle_overlay;
+impl ExtractResource for ParticleOverlayState {
+    type Source = ParticleOverlayState;
+    fn extract_resource(source: &Self::Source) -> Self {
+        *source
+    }
+}
+
+use particle::{
+    ParticleOverlayGpuLabel, ParticleOverlayGpuNode, ParticleOverlayGpuPipeline,
+    init_particle_overlay_gpu_pipeline, prepare_particle_overlay_gpu_pipeline,
+};
