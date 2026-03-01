@@ -12,6 +12,58 @@
 
 ## Active Work Units
 
+### [MPM-GPU-00] 単一grid回帰とGPU-First基盤再定義
+
+- Status: `In Progress`
+- 背景:
+  - block/空間LoD/時間LoD前提の実装は境界管理コストが高く、CPU並列最適化の伸びも限定的だった。
+  - 今後の水・粉体・剛体連成を見据えると、水ソルバ本番経路を早期にGPUへ移す方が手戻りを抑えられる。
+- スコープ:
+  - 物理設計を単一解像度グリッドへ回帰し、GPU常駐データ前提に再定義する。
+  - 連続体の本番経路をGPUへ一本化し、不要CPUコードを段階的に削除する。
+- Subtasks:
+  - [x] ADR（単一grid + GPU-first）を作成する。
+  - [x] `design.md` を単一grid + active tile + GPU常駐方針へ更新する。
+  - [x] `physics.md` を block/ghost前提から単一grid GPUパイプライン仕様へ更新する。
+  - [ ] 旧CPU連続体コードの削除順序（依存関係と撤去単位）を設計する。
+  - [ ] GPUバッファレイアウト（particle/grid/active tile/metrics）を確定する。
+  - [ ] 不要になったCPU実装を削除し、関連テストとドキュメント参照を整理する。
+- 完了条件:
+  - 設計文書が新方針へ整合し、GPU一本化とCPU撤去の実施手順が定義されている。
+
+### [MPM-GPU-01] Water Drop最小GPU再現（計算）
+
+- Status: `Planned`
+- 背景:
+  - 新方針の最小成立条件は `water_drop` をGPU経路で安定再現すること。
+  - まずは計算成立を優先し、描画経路は段階的にGPU完結化する。
+- スコープ:
+  - 単一grid MLS-MPM をGPU computeで実行し、`water_drop` の物理挙動を再現する。
+  - 地形SDF境界補正をGPU経路へ接続する。
+- Subtasks:
+  - [ ] GPU compute pass の最小骨格を実装する（`active build -> clear -> p2g -> grid -> g2p`）。
+  - [ ] 粒子/格子バッファのGPU常駐更新を実装し、毎ステップ全量readbackを廃止する。
+  - [ ] `water_drop` で NaN/発散なしで実時間継続することを確認する。
+  - [ ] 質量誤差・侵入率・CFLをGPU経路で計測できるようにする。
+  - [ ] 旧CPU経路依存の更新ループを削除し、GPU経路のみで `water_drop` が成立することを確認する。
+- 完了条件:
+  - `water_drop` がGPU経路で安定再現され、品質指標を自動計測できる。
+
+### [MPM-GPU-02] Water Drop表示のGPU完結化
+
+- Status: `Planned`
+- 背景:
+  - 計算だけGPU化しても、毎フレームreadback描画では同期コストが残る。
+- スコープ:
+  - 先にデバッグ用円オーバーレイを整備して物理結果を検証し、その後GPUドット絵描画へ移行する。
+- Subtasks:
+  - [ ] デバッグオーバーレイで粒子円表示を実装し、`water_drop` の挙動確認に使う。
+  - [ ] GPU粒子/密度バッファからドット絵テクスチャを生成する描画パスを実装する。
+  - [ ] フラグメントシェーダーを第一候補として実装し、必要ならcompute前処理を追加する。
+  - [ ] 表示品質（連続性、エイリアシング、tile境界、ちらつき）を確認する。
+- 完了条件:
+  - `water_drop` で「計算 + 描画」がGPU完結で実行できる。
+
 ### [MPM-WATER-02] 明示MLS-MPM水ソルバ（単一レート）実装
 
 - Status: `In Progress`
@@ -96,7 +148,9 @@
 
 ### [MPM-WATER-04A] block分割 + CPU並列基盤（空間幅均一）
 
-- Status: `In Progress`
+- Status: `Deferred`
+- 備考:
+  - GPU-firstへの方針転換により新規開発は停止。置換完了後は関連CPUコードを削除対象とする。
 - 背景:
   - block単位並列を導入するには、まず全block同一 `h_b` の構成で ownership とデータ参照規約を確立する必要がある。
   - 粒子SoAは単一Resourceを維持し、block側はindex tableで参照する方式を採用する。
@@ -115,7 +169,9 @@
 
 ### [MPM-WATER-04B] 水向けsubcycling（時間LoD, 空間幅均一）
 
-- Status: `In Progress`
+- Status: `Deferred`
+- 備考:
+  - 可変更新頻度は単一grid GPU版の一様substep成立後に再評価する。
 - 背景:
   - 時間LoDは ADR の必須要件であり、まず空間幅均一の block構成上で導入する。
 - スコープ:
@@ -133,7 +189,9 @@
 
 ### [MPM-WATER-07] 空間LoD block拡張（可変 `h_b`）
 
-- Status: `In Progress`
+- Status: `Deferred`
+- 備考:
+  - 単一grid回帰を優先するため、空間LoD block拡張は凍結する。
 - 背景:
   - 広域最適化には時間LoDだけでなく、blockごとに空間幅を変える空間LoDが必要。
   - 粗密境界で保存量を壊さないため、均一幅フェーズとは別Work Unitで段階導入する。
@@ -166,7 +224,9 @@
 
 ### [MPM-WATER-07A] block彩色実験（辺/頂点共有の排他彩色）
 
-- Status: `In Progress`
+- Status: `Deferred`
+- 備考:
+  - block彩色はCPU block並列向け検証として完了扱いとし、追加実験は停止する。
 - 背景:
   - block単位並列（特に色分け方式）を検討するため、与えられた空間LoD block配置に対し、
     「辺または頂点を共有するblock同士が同色にならない」彩色アルゴリズムの挙動確認が必要。
@@ -196,7 +256,9 @@
 
 ### [MPM-WATER-07B] ghost廃止（resident/support + outgoing queue）
 
-- Status: `In Progress`
+- Status: `Deferred`
+- 備考:
+  - 単一grid化により前提が消えるため、今後はGPU経路へ直接置換する。
 - 背景:
   - `owner_indices/ghost_indices` の再構築コストが粒子移動時に支配的になりやすく、特に異なる空間levelを跨ぐ流れでFPS低下が顕著。
   - block彩色の前提が整ったため、まずは彩色並列を有効化せず、データ経路のみを `ghost` 非依存へ置換する。
@@ -226,7 +288,9 @@
 
 ### [MPM-WATER-07C] block彩色順フェーズ並列化（同色 `into_par_iter`）
 
-- Status: `In Progress`
+- Status: `Deferred`
+- 備考:
+  - CPU並列最適化の追加は停止し、GPU pass最適化へ注力する。
 - 背景:
   - block彩色（辺/頂点共有の排他）が成立したため、CPU並列化をアトミック加算なしで段階導入できる。
   - `resident/support` 化により、block更新責務（P2G/Grid Update/G2P/移管）がblock単位で明確化された。
