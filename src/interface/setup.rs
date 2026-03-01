@@ -34,6 +34,12 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 StepProfilerMsText,
             ));
             parent.spawn((
+                Text::new("Ideal cpu/wall(block/color): --"),
+                TextFont::from_font_size(12.0),
+                TextColor(Color::srgba(0.78, 0.88, 1.00, 1.0)),
+                StepProfilerIdealParallelText,
+            ));
+            parent.spawn((
                 Node {
                     width: percent(100.0),
                     height: px(STEP_PROFILER_BAR_HEIGHT_PX),

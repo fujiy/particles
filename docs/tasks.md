@@ -218,10 +218,37 @@
   - 2026-02-28: `refresh_block_index_table` を resident 再配置 + support 再構築へ置換し、ghost再構築経路を廃止。
   - 2026-02-28: `step_block_set_coupled` を supportベースP2G / residentベースG2Pへ変更し、G2P後の outgoing キュー移管を追加。
   - 2026-02-28: scheduler から `ghost_refresh` フェーズを削除し、`refresh_block_table` 単体で active block 判定を完結。
+  - 2026-03-01: MPM簡易プロファイラのG2P計測を `mpm::g2p_collect` と `mpm::g2p_sort_apply` に分割し、並列区間と直列テールを個別に可視化。
   - 2026-02-28: mpm水ユニットテストを resident/support 前提へ更新し、`cargo test --lib` 全通過を確認。
 - 完了条件:
   - ghost経路を使わずに既存の空間LoDシナリオが成立し、境界停止/極端減速の再発がない。
   - `refresh_block_table` / ghost更新系コストが削減され、性能比較が可能な計測結果を取得できる。
+
+### [MPM-WATER-07C] block彩色順フェーズ並列化（同色 `into_par_iter`）
+
+- Status: `In Progress`
+- 背景:
+  - block彩色（辺/頂点共有の排他）が成立したため、CPU並列化をアトミック加算なしで段階導入できる。
+  - `resident/support` 化により、block更新責務（P2G/Grid Update/G2P/移管）がblock単位で明確化された。
+- スコープ:
+  - 色ごとに block list を作成し、1色内は `into_par_iter` で並列実行する。
+  - 色フェーズ間は逐次実行（barrier）とし、同一step内の順序を固定して決定論性を維持する。
+  - まずは P2G / Grid Update / G2P の block処理のみを色順フェーズへ置換し、既存スケジューラ構造は維持する。
+- Subtasks:
+  - [ ] `GridHierarchy` の `color_class` から `color -> Vec<block_index>` を構築するキャッシュを実装する。
+  - [ ] blockレイアウト変化（split/merge/rebuild）時に color list キャッシュを再構築する。
+  - [x] block更新ループを「色外側ループ + 同色 `into_par_iter`」へ置換する。
+  - [x] 色フェーズ順を固定化し、実行ごとの順序非決定を排除する。
+  - [ ] `resident/support/outgoing` 更新と整合するよう、色フェーズ境界で同期点を明示する。
+  - [x] 回帰テストを追加する（逐次経路との一致、決定論性、境界通過、保存量）。
+  - [ ] 計測を追加する（phase別 wall/cpu、色数別スケーリング、逐次比較）。
+- Progress:
+  - 2026-02-28: `step_block_set_coupled` の並列経路を色フェーズ実行へ変更（色ごと逐次barrier、同色内 `par_iter`）。
+  - 2026-02-28: P2G（mass/pressure）, Grid Update, G2P を同一色フェーズ規約で統一し、色順を固定化。
+  - 2026-02-28: 既存 `block_parallel_path_matches_serial_path` を含む `cargo test --lib` 全通過で逐次経路との整合を確認。
+- 完了条件:
+  - 色順フェーズ並列化で逐次経路と同等挙動（許容誤差内）を維持する。
+  - 同条件で逐次実行よりCPU時間短縮が確認できる（少なくとも代表シナリオで改善）。
 
 ### [MPM-WATER-05] 水シミュレーション受け入れテスト整備
 

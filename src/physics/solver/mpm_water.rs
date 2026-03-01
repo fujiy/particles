@@ -101,10 +101,14 @@ pub struct MpmWaterStepMetrics {
     pub grid_update_wall_secs: f64,
     /// Process CPU time for grid node velocity update.
     pub grid_update_cpu_secs: f64,
-    /// Wall-clock time for G2P (particle state update from grid).
-    pub g2p_wall_secs: f64,
-    /// Process CPU time for G2P (particle state update from grid).
-    pub g2p_cpu_secs: f64,
+    /// Wall-clock time for G2P collect (gather per-particle updates from grid).
+    pub g2p_collect_wall_secs: f64,
+    /// Process CPU time for G2P collect (gather per-particle updates from grid).
+    pub g2p_collect_cpu_secs: f64,
+    /// Wall-clock time for G2P sort/apply (sort staged updates and write back to particles).
+    pub g2p_sort_apply_wall_secs: f64,
+    /// Process CPU time for G2P sort/apply (sort staged updates and write back to particles).
+    pub g2p_sort_apply_cpu_secs: f64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -621,6 +625,8 @@ pub fn step_block_set_coupled(
         "g2p block indices must be unique"
     );
     debug_assert_resident_layout(particles, index_table, grid.block_count());
+    let grid_color_phases = block_indices_grouped_by_color(grid, &grid_blocks);
+    let g2p_color_phases = block_indices_grouped_by_color(grid, &g2p_blocks);
 
     // P2G Phase 1: mass/momentum transfer into each target block's local node array.
     // Store both pointers as usize so rayon closures can capture them (raw pointers are not Sync).
@@ -640,23 +646,25 @@ pub fn step_block_set_coupled(
         let t0 = Instant::now();
         let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
         if parallel_enabled {
-            grid_blocks.par_iter().for_each(|&block_index| {
-                if block_index >= blocks_len {
-                    return;
-                }
-                let support_indices = index_table.support_indices(block_index);
-                // SAFETY: block_index entries are deduplicated above, so each block is mutably borrowed once.
-                let block = unsafe { &mut *((blocks_ptr as *mut GridBlock).add(block_index)) };
-                p2g_mass_momentum(
-                    particles,
-                    support_indices,
-                    block_index,
-                    block,
-                    owner_block_drift_secs,
-                    &block_h_b,
-                    params,
-                );
-            });
+            for color_blocks in &grid_color_phases {
+                color_blocks.par_iter().for_each(|&block_index| {
+                    if block_index >= blocks_len {
+                        return;
+                    }
+                    let support_indices = index_table.support_indices(block_index);
+                    // SAFETY: same color blocks do not share edge/vertex, so they never write same owner nodes.
+                    let block = unsafe { &mut *((blocks_ptr as *mut GridBlock).add(block_index)) };
+                    p2g_mass_momentum(
+                        particles,
+                        support_indices,
+                        block_index,
+                        block,
+                        owner_block_drift_secs,
+                        &block_h_b,
+                        params,
+                    );
+                });
+            }
         } else {
             for &block_index in &grid_blocks {
                 if block_index >= blocks_len {
@@ -692,23 +700,25 @@ pub fn step_block_set_coupled(
         let t0 = Instant::now();
         let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
         if parallel_enabled {
-            grid_blocks.par_iter().for_each(|&block_index| {
-                if block_index >= blocks_len {
-                    return;
-                }
-                let support_indices = index_table.support_indices(block_index);
-                let block = unsafe { &mut *((blocks_ptr as *mut GridBlock).add(block_index)) };
-                let grid_ref = unsafe { &*(grid_ptr as *const GridHierarchy) };
-                p2g_pressure(
-                    particles,
-                    grid_ref,
-                    support_indices,
-                    block,
-                    block.dt_b,
-                    owner_block_drift_secs,
-                    params,
-                );
-            });
+            for color_blocks in &grid_color_phases {
+                color_blocks.par_iter().for_each(|&block_index| {
+                    if block_index >= blocks_len {
+                        return;
+                    }
+                    let support_indices = index_table.support_indices(block_index);
+                    let block = unsafe { &mut *((blocks_ptr as *mut GridBlock).add(block_index)) };
+                    let grid_ref = unsafe { &*(grid_ptr as *const GridHierarchy) };
+                    p2g_pressure(
+                        particles,
+                        grid_ref,
+                        support_indices,
+                        block,
+                        block.dt_b,
+                        owner_block_drift_secs,
+                        params,
+                    );
+                });
+            }
         } else {
             for &block_index in &grid_blocks {
                 if block_index >= blocks_len {
@@ -766,23 +776,25 @@ pub fn step_block_set_coupled(
         let blocks = grid.blocks_mut();
         let blocks_ptr = blocks.as_mut_ptr() as usize;
         if parallel_enabled {
-            grid_blocks.par_iter().for_each(|&block_index| {
-                if block_index >= blocks.len() {
-                    return;
-                }
-                let boundary_samples = boundary_samples_by_block
-                    .get(block_index)
-                    .and_then(|entry| entry.as_deref());
-                // SAFETY: block_index entries are deduplicated above, so each block is mutably borrowed once.
-                let block = unsafe { &mut *((blocks_ptr as *mut GridBlock).add(block_index)) };
-                grid_update(
-                    block,
-                    block.dt_b,
-                    params,
-                    boundary_samples,
-                    terrain_boundary_params,
-                );
-            });
+            for color_blocks in &grid_color_phases {
+                color_blocks.par_iter().for_each(|&block_index| {
+                    if block_index >= blocks.len() {
+                        return;
+                    }
+                    let boundary_samples = boundary_samples_by_block
+                        .get(block_index)
+                        .and_then(|entry| entry.as_deref());
+                    // SAFETY: same color blocks do not share boundary nodes and are mutably disjoint.
+                    let block = unsafe { &mut *((blocks_ptr as *mut GridBlock).add(block_index)) };
+                    grid_update(
+                        block,
+                        block.dt_b,
+                        params,
+                        boundary_samples,
+                        terrain_boundary_params,
+                    );
+                });
+            }
         } else {
             for &block_index in &grid_blocks {
                 let boundary_samples = boundary_samples_by_block
@@ -807,30 +819,33 @@ pub fn step_block_set_coupled(
 
     let mut staged_updates = Vec::new();
     {
-        let _span = tracing::info_span!("physics::mpm::g2p").entered();
+        let _span = tracing::info_span!("physics::mpm::g2p_collect").entered();
         let t0 = Instant::now();
         let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
         if parallel_enabled {
-            staged_updates = g2p_blocks
-                .par_iter()
-                .map(|&block_index| {
-                    let resident_indices = index_table.resident_indices(block_index);
-                    let Some(block) = grid.blocks().get(block_index) else {
-                        return Vec::new();
-                    };
-                    g2p_collect_owner_updates(
-                        particles,
-                        grid,
-                        resident_indices,
-                        block.h_b,
-                        block.dt_b,
-                        params,
-                    )
-                })
-                .reduce(Vec::new, |mut lhs, mut rhs| {
-                    lhs.append(&mut rhs);
-                    lhs
-                });
+            for color_blocks in &g2p_color_phases {
+                let mut color_updates = color_blocks
+                    .par_iter()
+                    .map(|&block_index| {
+                        let resident_indices = index_table.resident_indices(block_index);
+                        let Some(block) = grid.blocks().get(block_index) else {
+                            return Vec::new();
+                        };
+                        g2p_collect_owner_updates(
+                            particles,
+                            grid,
+                            resident_indices,
+                            block.h_b,
+                            block.dt_b,
+                            params,
+                        )
+                    })
+                    .reduce(Vec::new, |mut lhs, mut rhs| {
+                        lhs.append(&mut rhs);
+                        lhs
+                    });
+                staged_updates.append(&mut color_updates);
+            }
         } else {
             for &block_index in &g2p_blocks {
                 let resident_indices = index_table.resident_indices(block_index);
@@ -847,6 +862,13 @@ pub fn step_block_set_coupled(
                 ));
             }
         }
+        metrics.g2p_collect_wall_secs += t0.elapsed().as_secs_f64();
+        metrics.g2p_collect_cpu_secs += (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
+    }
+    {
+        let _span = tracing::info_span!("physics::mpm::g2p_sort_apply").entered();
+        let t0 = Instant::now();
+        let cpu0 = process_cpu_time_seconds().unwrap_or(0.0);
         staged_updates.sort_unstable_by_key(|update| update.particle_index);
         for update in &staged_updates {
             particles.v[update.particle_index] = update.velocity;
@@ -857,8 +879,9 @@ pub fn step_block_set_coupled(
                 metrics.max_particle_speed_mps.max(update.velocity.length());
             metrics.clamped_particle_count += update.clamped_count;
         }
-        metrics.g2p_wall_secs += t0.elapsed().as_secs_f64();
-        metrics.g2p_cpu_secs += (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
+        metrics.g2p_sort_apply_wall_secs += t0.elapsed().as_secs_f64();
+        metrics.g2p_sort_apply_cpu_secs +=
+            (process_cpu_time_seconds().unwrap_or(cpu0) - cpu0).max(0.0);
     }
     enqueue_outgoing_particles_for_blocks(
         particles,
@@ -933,6 +956,39 @@ pub fn step_block_set_coupled(
         metrics.boundary_penetrating_particle_ratio /= g2p_blocks.len() as f32;
     }
     metrics
+}
+
+fn block_indices_grouped_by_color(
+    grid: &GridHierarchy,
+    block_indices: &[usize],
+) -> Vec<Vec<usize>> {
+    let mut keyed = Vec::<(u16, usize)>::with_capacity(block_indices.len());
+    for &block_index in block_indices {
+        let Some(block) = grid.blocks().get(block_index) else {
+            continue;
+        };
+        keyed.push((block.color_class(), block_index));
+    }
+    keyed.sort_unstable_by_key(|&(color, block_index)| (color, block_index));
+    let mut phases = Vec::<Vec<usize>>::new();
+    for (color, block_index) in keyed {
+        let needs_new_phase = phases.last().is_none_or(|phase| {
+            let first_block = phase.first().copied().unwrap_or(block_index);
+            let first_color = grid
+                .blocks()
+                .get(first_block)
+                .map(GridBlock::color_class)
+                .unwrap_or(color);
+            first_color != color
+        });
+        if needs_new_phase {
+            phases.push(Vec::new());
+        }
+        if let Some(phase) = phases.last_mut() {
+            phase.push(block_index);
+        }
+    }
+    phases
 }
 
 pub fn step_single_rate_coupled(

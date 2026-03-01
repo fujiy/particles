@@ -207,8 +207,10 @@ pub(crate) fn step_simulation_once(
         let mut acc_p2g_pressure_cpu_secs = 0.0_f64;
         let mut acc_grid_update_secs = 0.0_f64;
         let mut acc_grid_update_cpu_secs = 0.0_f64;
-        let mut acc_g2p_secs = 0.0_f64;
-        let mut acc_g2p_cpu_secs = 0.0_f64;
+        let mut acc_g2p_collect_secs = 0.0_f64;
+        let mut acc_g2p_collect_cpu_secs = 0.0_f64;
+        let mut acc_g2p_sort_apply_secs = 0.0_f64;
+        let mut acc_g2p_sort_apply_cpu_secs = 0.0_f64;
         terrain_boundary_sampler.begin_step();
         while let Some(Reverse((tick, block_index))) = schedule.pop() {
             if tick >= frame_units {
@@ -328,8 +330,10 @@ pub(crate) fn step_simulation_once(
                 acc_p2g_pressure_cpu_secs += step_metrics.p2g_pressure_cpu_secs;
                 acc_grid_update_secs += step_metrics.grid_update_wall_secs;
                 acc_grid_update_cpu_secs += step_metrics.grid_update_cpu_secs;
-                acc_g2p_secs += step_metrics.g2p_wall_secs;
-                acc_g2p_cpu_secs += step_metrics.g2p_cpu_secs;
+                acc_g2p_collect_secs += step_metrics.g2p_collect_wall_secs;
+                acc_g2p_collect_cpu_secs += step_metrics.g2p_collect_cpu_secs;
+                acc_g2p_sort_apply_secs += step_metrics.g2p_sort_apply_wall_secs;
+                acc_g2p_sort_apply_cpu_secs += step_metrics.g2p_sort_apply_cpu_secs;
             }
 
             for (due_block, step_units) in applied_step_units {
@@ -419,9 +423,14 @@ pub(crate) fn step_simulation_once(
                 cpu_secs: acc_grid_update_cpu_secs,
             },
             MpmPhase {
-                name: "mpm::g2p",
-                wall_secs: acc_g2p_secs,
-                cpu_secs: acc_g2p_cpu_secs,
+                name: "mpm::g2p_collect",
+                wall_secs: acc_g2p_collect_secs,
+                cpu_secs: acc_g2p_collect_cpu_secs,
+            },
+            MpmPhase {
+                name: "mpm::g2p_sort_apply",
+                wall_secs: acc_g2p_sort_apply_secs,
+                cpu_secs: acc_g2p_sort_apply_cpu_secs,
             },
             MpmPhase {
                 name: "mpm::sync_continuum",

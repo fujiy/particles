@@ -16,6 +16,7 @@ use crate::physics::state::{
     ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationParallelSettings,
     SimulationState,
 };
+use crate::physics::world::grid::{GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use crate::physics::world::terrain::{
@@ -215,6 +216,7 @@ impl Plugin for InterfacePlugin {
                     update_fps_hud_stats,
                     update_simulation_hud,
                     update_step_profiler_panel,
+                    update_step_profiler_ideal_parallel,
                     update_step_profiler_tooltip,
                 )
                     .chain()
@@ -438,6 +440,9 @@ struct TestAssertList;
 struct StepProfilerMsText;
 
 #[derive(Component)]
+struct StepProfilerIdealParallelText;
+
+#[derive(Component)]
 struct StepProfilerBarTrack;
 
 #[derive(Component, Clone)]
@@ -470,8 +475,8 @@ use ui_systems::{
     update_save_load_slot_button_visuals, update_sim_parallel_button_label,
     update_sim_parallel_button_visuals, update_sim_play_pause_button_label,
     update_sim_play_pause_button_visuals, update_sim_step_button_visuals, update_simulation_hud,
-    update_step_profiler_panel, update_step_profiler_tooltip, update_test_assert_panel,
-    update_world_tool_button_visuals, update_world_tool_tooltip,
+    update_step_profiler_ideal_parallel, update_step_profiler_panel, update_step_profiler_tooltip,
+    update_test_assert_panel, update_world_tool_button_visuals, update_world_tool_tooltip,
 };
 
 use world_edit::handle_world_interactions;
