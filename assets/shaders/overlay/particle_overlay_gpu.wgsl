@@ -53,8 +53,6 @@ struct VertexOut {
     local_xy: vec2<f32>,
     @location(1)
     color: vec4<f32>,
-    @location(2)
-    is_background: f32,
 };
 
 fn quad_corner(vertex_index: u32) -> vec2<f32> {
@@ -68,9 +66,9 @@ fn quad_corner(vertex_index: u32) -> vec2<f32> {
 
 fn particle_color(material_id: u32) -> vec4<f32> {
     if material_id == 0u {
-        return vec4<f32>(0.10, 0.80, 0.95, 0.88);
+        return vec4<f32>(1.0, 1.0, 1.0, 0.92);
     }
-    return vec4<f32>(0.80, 0.65, 0.36, 0.88);
+    return vec4<f32>(1.0, 1.0, 1.0, 0.92);
 }
 
 @vertex
@@ -82,31 +80,17 @@ fn vs_main(
 
     var out: VertexOut;
     out.local_xy = corner;
-
-    // Always draw background tint as instance 0.
-    if instance_index == 0u {
-        out.clip_position = vec4<f32>(corner.x, corner.y, 0.0, 1.0);
-        out.color = vec4<f32>(0.22, 0.32, 0.46, 0.40);
-        out.is_background = 1.0;
-        return out;
-    }
-
-    let p = particles[instance_index - 1u];
+    let p = particles[instance_index];
     let r = max(params.h * 0.35, 0.01);
     let world_xy = p.x + corner * r;
 
     out.clip_position = view.clip_from_world * vec4<f32>(world_xy.x, world_xy.y, 0.0, 1.0);
     out.color = particle_color(p.material_id);
-    out.is_background = 0.0;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    if in.is_background > 0.5 {
-        return in.color;
-    }
-
     let d = length(in.local_xy);
     if d > 1.0 {
         discard;

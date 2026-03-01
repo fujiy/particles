@@ -15,11 +15,11 @@ impl FromWorld for MpmShaders {
     fn from_world(world: &mut World) -> Self {
         let asset_server = world.resource::<AssetServer>();
         Self {
-            types: asset_server.load("shaders/mpm_types.wgsl"),
-            clear: asset_server.load("shaders/mpm_clear.wgsl"),
-            p2g: asset_server.load("shaders/mpm_p2g.wgsl"),
-            grid_update: asset_server.load("shaders/mpm_grid_update.wgsl"),
-            g2p: asset_server.load("shaders/mpm_g2p.wgsl"),
+            types: asset_server.load("shaders/physics/mpm_types.wgsl"),
+            clear: asset_server.load("shaders/physics/mpm_clear.wgsl"),
+            p2g: asset_server.load("shaders/physics/mpm_p2g.wgsl"),
+            grid_update: asset_server.load("shaders/physics/mpm_grid_update.wgsl"),
+            g2p: asset_server.load("shaders/physics/mpm_g2p.wgsl"),
         }
     }
 }

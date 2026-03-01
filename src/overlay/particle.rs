@@ -4,8 +4,8 @@ use bevy::log::warn;
 use bevy::prelude::*;
 use bevy::render::render_graph::{NodeRunError, RenderGraphContext, RenderLabel, ViewNode};
 use bevy::render::render_resource::{
-    BindGroupEntries, BlendComponent, BlendFactor, BlendOperation, BlendState,
-    BindGroupLayoutDescriptor, BindGroupLayoutEntries, Buffer, BufferDescriptor, BufferUsages,
+    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent,
+    BlendFactor, BlendOperation, BlendState, Buffer, BufferDescriptor, BufferUsages,
     CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, MultisampleState,
     PipelineCache, PrimitiveState, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages,
     SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat, VertexState,
@@ -14,10 +14,10 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::view::{Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
 
-use crate::physics::gpu_mpm::gpu_resources::MpmGpuBuffers;
 use super::ParticleOverlayState;
+use crate::physics::gpu_mpm::gpu_resources::MpmGpuBuffers;
 
-const PARTICLE_OVERLAY_SHADER_PATH: &str = "shaders/particle_overlay_gpu.wgsl";
+const PARTICLE_OVERLAY_SHADER_PATH: &str = "shaders/overlay/particle_overlay_gpu.wgsl";
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub(super) struct ParticleOverlayGpuLabel;
@@ -107,7 +107,7 @@ pub(super) fn init_particle_overlay_gpu_pipeline(
         ),
     );
 
-    // Keep a fallback path so background tint always renders even without MPM buffers.
+    // Keep fallback buffers to avoid bind-group creation failures when MPM is not ready.
     let fallback_params_buf = render_device.create_buffer(&BufferDescriptor {
         label: Some("particle_overlay_fallback_params"),
         size: 80,
@@ -137,7 +137,8 @@ pub(super) fn prepare_particle_overlay_gpu_pipeline(
     views: Query<(Entity, &ViewTarget, Option<&Msaa>)>,
 ) {
     if views.is_empty() {
-        static NO_VIEW_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static NO_VIEW_WARNED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         if !NO_VIEW_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
             warn!("particle_overlay: no render views found during prepare");
         }
@@ -227,9 +228,7 @@ impl ViewNode for ParticleOverlayGpuNode {
         });
         render_pass.set_render_pipeline(pipeline);
         render_pass.set_bind_group(0, &bind_group, &[view_uniform_offset.offset]);
-        // Instance 0 = fullscreen translucent background.
-        // Instance 1..N = particles.
-        render_pass.draw(0..6, 0..particle_count.saturating_add(1));
+        render_pass.draw(0..6, 0..particle_count);
 
         Ok(())
     }

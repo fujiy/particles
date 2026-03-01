@@ -15,8 +15,8 @@ pub mod shaders;
 pub mod sync;
 
 use bevy::prelude::*;
-use bevy::render::graph::CameraDriverLabel;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::graph::CameraDriverLabel;
 use bevy::render::render_graph::{RenderGraph, RenderLabel};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Render, RenderApp, RenderSystems};

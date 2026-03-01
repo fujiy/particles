@@ -147,6 +147,7 @@ mod free_particles;
 mod object_sprites;
 mod tiles;
 mod water;
+mod water_dot_gpu;
 
 pub struct RenderPlugin;
 
@@ -246,6 +247,7 @@ pub use water::sync_water_dots_to_render;
 pub use free_particles::sync_free_particles_to_render;
 
 pub use object_sprites::sync_object_sprites_to_render;
+pub use water_dot_gpu::{WaterDotGpuLabel, WaterDotGpuPlugin};
 
 fn image_from_rgba_pixels(pixels: Vec<u8>) -> Image {
     let mut image = Image::new_fill(

@@ -20,8 +20,8 @@ use crate::physics::solver::params_types::SolverParams;
 use crate::physics::state::{ReplayState, SimulationState};
 use crate::physics::world::constants::CELL_SIZE_M;
 use crate::physics::world::continuum::ContinuumParticleWorld;
-use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::particle::ParticleMaterial;
+use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
 
 const SDF_QUERY_RADIUS_CELLS: i32 = 10;
@@ -153,7 +153,8 @@ pub fn prepare_terrain_upload(
             let idx = (ny * layout.dims.x + nx) as usize;
             let node = layout.origin + IVec2::new(nx as i32, ny as i32);
             let world_pos = Vec2::new(node.x as f32 * h, node.y as f32 * h);
-            if let Some((signed_distance, normal)) = terrain.sample_signed_distance_and_normal(world_pos)
+            if let Some((signed_distance, normal)) =
+                terrain.sample_signed_distance_and_normal(world_pos)
             {
                 sdf[idx] = signed_distance;
                 if normal != Vec2::ZERO {
@@ -195,8 +196,8 @@ pub fn prepare_gpu_params(
     let h = CELL_SIZE_M;
     let boundary = MpmTerrainBoundaryParams::default();
     // Keep GPU params in parity with CPU MPM setup in solver/step.rs.
-    let boundary_threshold_m = particle_radius_m(DEFAULT_MATERIAL_PARAMS)
-        * MPM_BOUNDARY_THRESHOLD_SCALE_DIAMETER;
+    let boundary_threshold_m =
+        particle_radius_m(DEFAULT_MATERIAL_PARAMS) * MPM_BOUNDARY_THRESHOLD_SCALE_DIAMETER;
 
     params_req.params = GpuMpmParams {
         dt: solver_params.fixed_dt,
@@ -265,7 +266,8 @@ pub fn prepare_gpu_run_state(
     let fixed_dt = solver_params.fixed_dt.max(1.0e-5);
     // Avoid runaway catch-up (spiral of death). If we can't keep up, simulation slows down.
     let max_catchup = fixed_dt * step_clock.max_substeps_per_frame as f32;
-    step_clock.accumulator_secs = (step_clock.accumulator_secs + time.delta_secs()).min(max_catchup);
+    step_clock.accumulator_secs =
+        (step_clock.accumulator_secs + time.delta_secs()).min(max_catchup);
 
     let mut substeps = (step_clock.accumulator_secs / fixed_dt).floor() as u32;
     if substeps > step_clock.max_substeps_per_frame {
@@ -277,7 +279,8 @@ pub fn prepare_gpu_run_state(
         return;
     }
 
-    step_clock.accumulator_secs = (step_clock.accumulator_secs - fixed_dt * substeps as f32).max(0.0);
+    step_clock.accumulator_secs =
+        (step_clock.accumulator_secs - fixed_dt * substeps as f32).max(0.0);
     run_req.enabled = true;
     run_req.substeps = substeps;
     if replay_state.enabled {

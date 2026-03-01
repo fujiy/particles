@@ -1,7 +1,7 @@
 use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::render_graph::RenderGraphExt;
+use bevy::render::render_graph::{RenderGraph, RenderGraphExt};
 use bevy::render::render_graph::ViewNodeRunner;
 use bevy::render::render_resource::SpecializedRenderPipelines;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
@@ -13,7 +13,7 @@ use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainWorld,
 };
-use crate::render::TerrainRenderDiagnostics;
+use crate::render::{TerrainRenderDiagnostics, WaterDotGpuLabel};
 
 const BUTTON_BG_OFF: Color = Color::srgba(0.17, 0.18, 0.22, 0.95);
 const BUTTON_BG_ON: Color = Color::srgba(0.16, 0.30, 0.46, 0.95);
@@ -112,6 +112,8 @@ impl Plugin for OverlayPlugin {
                     Node2d::EndMainPass,
                 ),
             );
+        let mut graph = render_app.world_mut().resource_mut::<RenderGraph>();
+        let _ = graph.try_add_node_edge(WaterDotGpuLabel, ParticleOverlayGpuLabel);
     }
 }
 

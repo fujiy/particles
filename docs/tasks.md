@@ -101,18 +101,35 @@
 
 ### [MPM-GPU-02] Water Drop表示のGPU完結化
 
-- Status: `Planned`
+- Status: `In Progress`
 - 背景:
   - 計算だけGPU化しても、毎フレームreadback描画では同期コストが残る。
 - スコープ:
-  - 先にデバッグ用円オーバーレイを整備して物理結果を検証し、その後GPUドット絵描画へ移行する。
+  - デバッグ用円オーバーレイは維持しつつ、ゲーム本流は常時表示のGPUドット絵描画へ移行する。
+  - `water_drop` でスクリーンショットを取得し、見た目の成立を自動検証できるループを整備する。
 - Subtasks:
-  - [ ] デバッグオーバーレイで粒子円表示を実装し、`water_drop` の挙動確認に使う。
-  - [ ] GPU粒子/密度バッファからドット絵テクスチャを生成する描画パスを実装する。
-  - [ ] フラグメントシェーダーを第一候補として実装し、必要ならcompute前処理を追加する。
+  - [x] デバッグオーバーレイで粒子円表示を実装し、`water_drop` の挙動確認に使う。
+  - [x] overlayトグル非依存で常時表示されるGPUドット絵の本流パスを実装する。
+  - [x] GPU粒子から独立したドット存在度グリッドへ splat + blur し、閾値でドット有無を決める前処理パスを実装する。
+  - [x] GPU粒子/密度バッファからドット絵描画するパスを実装する。
+  - [x] フラグメントシェーダーを第一候補として実装し、必要ならcompute前処理を追加する。
   - [ ] 表示品質（連続性、エイリアシング、tile境界、ちらつき）を確認する。
+  - [ ] 縮小時（描画ドット < 画面ピクセル）のAA品質を改善する（mipmap / 解析的AA）。
+  - [x] `water_drop` 自動実行でスクリーンショットを保存し、成果物で表示確認できるようにする。
+- 進捗:
+  - 2026-03-01: 本流描画として `WaterDotGpuPlugin` を追加。`Core2d` render graph に常時実行ノードを登録し、`MpmGpuBuffers.particle_buf` を直接参照して overlay 非依存で GPU ドット描画を実行。
+  - 2026-03-01: `assets/shaders/water_dot_gpu_mainline.wgsl` を追加。粒子中心を world dot grid にスナップし、GPU側パレットハッシュで色を選択するドット調フラグメント描画を実装。
+  - 2026-03-01: `PARTICLES_AUTOVERIFY_SCREENSHOT=1` の自動検証ループを追加。`water_drop` を自動ロードして一定フレーム後にスクリーンショット保存し、自動終了する仕組みを実装。
+  - 2026-03-01: `PARTICLES_AUTOVERIFY_SCREENSHOT=1 PARTICLES_AUTOVERIFY_SCENARIO=water_drop PARTICLES_AUTOVERIFY_SCREENSHOT_OUT=artifacts/water_drop_gpu_render.png PARTICLES_AUTOVERIFY_SCREENSHOT_WARMUP_FRAMES=240 cargo run -q` を実行し、成果物 `artifacts/water_drop_gpu_render.png` で本流GPU描画を確認。
+  - 2026-03-01: 本流ドット描画を再設計。`WaterDotPreprocessNode`（compute）で `dot density grid` を `clear -> particle splat -> blur_x -> blur_y` し、`WaterDotGpuNode`（fragment）で閾値判定＋決定論的パレット選択して描画する構成へ移行。
+  - 2026-03-01: `PARTICLES_AUTOVERIFY_SCREENSHOT_CAMERA_SCALE` を追加し、スクリーンショット自動検証でカメラ拡大状態を再現可能にした。
+  - 2026-03-01: `PARTICLES_AUTOVERIFY_SCREENSHOT_CAMERA_CENTER_X/Y` を追加し、拡大時でも注視領域（液体位置）を固定して撮影できるようにした。
+  - 2026-03-01: `PARTICLES_AUTOVERIFY_SCREENSHOT=1 ... OUT=artifacts/water_drop_dot_default.png ...` で通常表示を撮影し、粒子単位ではなく連続した水塊として描画されることを確認。
+  - 2026-03-01: `PARTICLES_AUTOVERIFY_SCREENSHOT=1 ... OUT=artifacts/water_drop_dot_zoom.png ... CAMERA_SCALE=0.35 CAMERA_CENTER_X=0 CAMERA_CENTER_Y=-6` で拡大表示を撮影し、ドットパターンが視認できることを確認。
+  - 2026-03-01: シェーダー資産を責務別に再配置（`assets/shaders/physics|render|overlay`）。Rust側のロードパスも追従し、`physics` と `render/overlay` の分離を明確化。
 - 完了条件:
   - `water_drop` で「計算 + 描画」がGPU完結で実行できる。
+  - スクリーンショット成果物で本流GPU描画を確認できる。
 
 ### [MPM-WATER-02] 明示MLS-MPM水ソルバ（単一レート）実装
 

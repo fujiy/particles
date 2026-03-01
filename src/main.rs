@@ -2,23 +2,24 @@ use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::log::{BoxedLayer, LogPlugin};
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_inspector_egui::bevy_egui::EguiPlugin;
-use serde::Serialize;
-use std::fs;
-use std::path::Path;
 use particles::camera_controller::CameraControllerPlugin;
 use particles::interface::InterfacePlugin;
 use particles::overlay::OverlayPlugin;
 use particles::physics::PhysicsPlugin;
 use particles::physics::gpu_mpm::GpuMpmPlugin;
-use particles::physics::gpu_mpm::sync::apply_gpu_readback;
 use particles::physics::gpu_mpm::gpu_resources::MpmGpuControl;
+use particles::physics::gpu_mpm::sync::apply_gpu_readback;
 use particles::physics::scenario::{default_scenario_spec_by_name, evaluate_scenario_state};
 use particles::physics::state::{ReplayLoadScenarioRequest, ReplayState, SimulationState};
 use particles::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use particles::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use particles::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
-use particles::render::TerrainRenderDiagnostics;
+use particles::render::{TerrainRenderDiagnostics, WaterDotGpuPlugin};
+use serde::Serialize;
+use std::fs;
+use std::path::Path;
 
 fn tracy_layer(_app: &mut App) -> Option<BoxedLayer> {
     #[cfg(feature = "tracy")]
@@ -95,6 +96,73 @@ impl MpmAutoVerifyState {
             phase: 0,
             end_sample_wait_frames: 0,
             end_sample_wait_max: 120,
+        }
+    }
+}
+
+#[derive(Resource, Debug)]
+struct ScreenshotVerifyState {
+    enabled: bool,
+    scenario_name: String,
+    output_path: String,
+    warmup_frames: u32,
+    max_wait_after_capture_frames: u32,
+    scenario_requested: bool,
+    frame_counter: u32,
+    capture_requested: bool,
+    wait_after_capture_frames: u32,
+    camera_scale: Option<f32>,
+    camera_center: Option<Vec2>,
+    camera_scale_applied: bool,
+}
+
+impl ScreenshotVerifyState {
+    fn from_env() -> Self {
+        let enabled = env_bool("PARTICLES_AUTOVERIFY_SCREENSHOT");
+        let scenario_name = std::env::var("PARTICLES_AUTOVERIFY_SCENARIO")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "water_drop".to_string());
+        let output_path = std::env::var("PARTICLES_AUTOVERIFY_SCREENSHOT_OUT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "artifacts/water_drop_gpu_render.png".to_string());
+        let warmup_frames = std::env::var("PARTICLES_AUTOVERIFY_SCREENSHOT_WARMUP_FRAMES")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .unwrap_or(180);
+        let max_wait_after_capture_frames =
+            std::env::var("PARTICLES_AUTOVERIFY_SCREENSHOT_WAIT_FRAMES")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(180);
+        let camera_scale = std::env::var("PARTICLES_AUTOVERIFY_SCREENSHOT_CAMERA_SCALE")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .filter(|scale| scale.is_finite() && *scale > 0.0);
+        let camera_center_x = std::env::var("PARTICLES_AUTOVERIFY_SCREENSHOT_CAMERA_CENTER_X")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok());
+        let camera_center_y = std::env::var("PARTICLES_AUTOVERIFY_SCREENSHOT_CAMERA_CENTER_Y")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok());
+        let camera_center = match (camera_center_x, camera_center_y) {
+            (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some(Vec2::new(x, y)),
+            _ => None,
+        };
+        Self {
+            enabled,
+            scenario_name,
+            output_path,
+            warmup_frames,
+            max_wait_after_capture_frames,
+            scenario_requested: false,
+            frame_counter: 0,
+            capture_requested: false,
+            wait_after_capture_frames: 0,
+            camera_scale,
+            camera_center,
+            camera_scale_applied: false,
         }
     }
 }
@@ -269,13 +337,17 @@ fn run_mpm_autoverify(
         return;
     }
 
-    let end_mean_y = water_positions.iter().map(|p| p.y).sum::<f32>() / water_positions.len() as f32;
+    let end_mean_y =
+        water_positions.iter().map(|p| p.y).sum::<f32>() / water_positions.len() as f32;
     let mean_drop = state.start_mean_y - end_mean_y;
     let penetration_count = water_positions
         .iter()
         .filter(|&&pos| {
             let cell = world_to_cell(pos);
-            matches!(terrain_world.get_cell_or_generated(cell), TerrainCell::Solid { .. })
+            matches!(
+                terrain_world.get_cell_or_generated(cell),
+                TerrainCell::Solid { .. }
+            )
         })
         .count();
     let penetration_ratio = penetration_count as f32 / water_positions.len() as f32;
@@ -363,6 +435,80 @@ fn run_mpm_autoverify(
     });
 }
 
+fn run_screenshot_autoverify(
+    mut commands: Commands,
+    mut state: ResMut<ScreenshotVerifyState>,
+    mut sim_state: ResMut<SimulationState>,
+    mut scenario_writer: MessageWriter<ReplayLoadScenarioRequest>,
+    mut exit_writer: MessageWriter<bevy::app::AppExit>,
+    mut camera_query: Query<(&mut Projection, &mut Transform), With<Camera2d>>,
+) {
+    if !state.enabled {
+        return;
+    }
+
+    if !state.scenario_requested {
+        if let Some(parent) = Path::new(&state.output_path).parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = fs::remove_file(&state.output_path);
+        scenario_writer.write(ReplayLoadScenarioRequest {
+            scenario_name: state.scenario_name.clone(),
+        });
+        sim_state.running = true;
+        sim_state.step_once = false;
+        state.scenario_requested = true;
+        return;
+    }
+
+    if !state.capture_requested {
+        // Keep simulation advancing even if scenario load reset it to paused.
+        sim_state.running = true;
+        sim_state.step_once = false;
+        if !state.camera_scale_applied {
+            if let Ok((mut projection, mut transform)) = camera_query.single_mut() {
+                if let Some(scale) = state.camera_scale {
+                    if let Projection::Orthographic(ortho) = projection.as_mut() {
+                        ortho.scale = scale;
+                    }
+                }
+                if let Some(center) = state.camera_center {
+                    transform.translation.x = center.x;
+                    transform.translation.y = center.y;
+                }
+            }
+            state.camera_scale_applied = true;
+        }
+        state.frame_counter = state.frame_counter.saturating_add(1);
+        if state.frame_counter < state.warmup_frames {
+            return;
+        }
+        commands
+            .spawn(Screenshot::primary_window())
+            .observe(save_to_disk(state.output_path.clone()));
+        state.capture_requested = true;
+        state.wait_after_capture_frames = 0;
+        return;
+    }
+
+    state.wait_after_capture_frames = state.wait_after_capture_frames.saturating_add(1);
+    sim_state.running = true;
+    sim_state.step_once = false;
+    let ready = fs::metadata(&state.output_path)
+        .map(|meta| meta.len() > 0)
+        .unwrap_or(false);
+    if ready {
+        state.enabled = false;
+        exit_writer.write(bevy::app::AppExit::Success);
+        return;
+    }
+
+    if state.wait_after_capture_frames > state.max_wait_after_capture_frames {
+        state.enabled = false;
+        exit_writer.write(bevy::app::AppExit::from_code(7));
+    }
+}
+
 fn main() {
     let mpm_autoverify = env_bool("PARTICLES_AUTOVERIFY_MPM");
     let readback_interval_frames = std::env::var("PARTICLES_GPU_READBACK_INTERVAL_FRAMES")
@@ -394,16 +540,19 @@ fn main() {
             readback_interval_frames,
         })
         .insert_resource(MpmAutoVerifyState::from_env())
+        .insert_resource(ScreenshotVerifyState::from_env())
         .add_plugins(default_plugins)
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(EguiPlugin::default());
     app.add_plugins((
         PhysicsPlugin,
         GpuMpmPlugin,
+        WaterDotGpuPlugin,
         InterfacePlugin,
         OverlayPlugin,
         CameraControllerPlugin,
     ))
     .add_systems(Update, run_mpm_autoverify.after(apply_gpu_readback))
+    .add_systems(Update, run_screenshot_autoverify.after(run_mpm_autoverify))
     .run();
 }

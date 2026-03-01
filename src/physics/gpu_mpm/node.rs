@@ -108,8 +108,7 @@ impl Node for MpmComputeNode {
             );
             return Ok(());
         };
-        let Some(g2p_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.g2p_pipeline)
-        else {
+        let Some(g2p_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.g2p_pipeline) else {
             warn_missing_pipeline_once(
                 &G2P_PIPELINE_WARNED,
                 "g2p",
