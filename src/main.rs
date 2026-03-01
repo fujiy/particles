@@ -16,7 +16,7 @@ use particles::physics::state::{ReplayLoadScenarioRequest, ReplayState, Simulati
 use particles::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use particles::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use particles::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
-use particles::render::{TerrainRenderDiagnostics, WaterDotGpuPlugin};
+use particles::render::{TerrainDotGpuPlugin, TerrainRenderDiagnostics, WaterDotGpuPlugin};
 use serde::Serialize;
 use std::fs;
 use std::path::Path;
@@ -104,6 +104,7 @@ impl MpmAutoVerifyState {
 struct ScreenshotVerifyState {
     enabled: bool,
     scenario_name: String,
+    skip_scenario_load: bool,
     output_path: String,
     warmup_frames: u32,
     max_wait_after_capture_frames: u32,
@@ -123,6 +124,8 @@ impl ScreenshotVerifyState {
             .ok()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "water_drop".to_string());
+        let skip_scenario_load = scenario_name.eq_ignore_ascii_case("default_world")
+            || scenario_name.eq_ignore_ascii_case("none");
         let output_path = std::env::var("PARTICLES_AUTOVERIFY_SCREENSHOT_OUT")
             .ok()
             .filter(|s| !s.is_empty())
@@ -153,6 +156,7 @@ impl ScreenshotVerifyState {
         Self {
             enabled,
             scenario_name,
+            skip_scenario_load,
             output_path,
             warmup_frames,
             max_wait_after_capture_frames,
@@ -452,9 +456,11 @@ fn run_screenshot_autoverify(
             let _ = fs::create_dir_all(parent);
         }
         let _ = fs::remove_file(&state.output_path);
-        scenario_writer.write(ReplayLoadScenarioRequest {
-            scenario_name: state.scenario_name.clone(),
-        });
+        if !state.skip_scenario_load {
+            scenario_writer.write(ReplayLoadScenarioRequest {
+                scenario_name: state.scenario_name.clone(),
+            });
+        }
         sim_state.running = true;
         sim_state.step_once = false;
         state.scenario_requested = true;
@@ -547,6 +553,7 @@ fn main() {
     app.add_plugins((
         PhysicsPlugin,
         GpuMpmPlugin,
+        TerrainDotGpuPlugin,
         WaterDotGpuPlugin,
         InterfacePlugin,
         OverlayPlugin,

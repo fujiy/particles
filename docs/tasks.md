@@ -131,6 +131,39 @@
   - `water_drop` で「計算 + 描画」がGPU完結で実行できる。
   - スクリーンショット成果物で本流GPU描画を確認できる。
 
+### [MPM-GPU-03] 地形表示のGPU完結化（CPU生成→GPU描画）
+
+- Status: `In Progress`
+- 背景:
+  - 今後、地形と粒子へ統一的にライティング/反射を適用するためには、地形描画もGPU本流へ寄せる必要がある。
+  - 既存CPUタイル描画はデバッグしやすいが、描画経路が分離し将来拡張の足かせになる。
+- スコープ:
+  - 地形データ生成/更新はCPUで維持し、描画用の地形ドット化・表示はGPUで行う。
+  - 水ドット描画とは前処理を分離し、RenderGraphで `Terrain -> Water -> Overlay` の順序を固定する。
+  - `water_drop` で岩枠表示、`default world` で生成地形表示を成立させる。
+  - 目標達成後、旧CPU地形表示コードを削除する。
+- Subtasks:
+  - [x] 地形GPUアップロード用データ（solid/material）を定義し、CPU→GPU転送経路を実装する。
+  - [ ] 地形専用ドット前処理compute（地形側）を実装する。
+  - [x] 地形描画shaderを実装し、本流表示として常時描画する。
+  - [x] RenderGraph順序を `Terrain -> Water -> ParticleOverlay` へ固定する。
+  - [x] `water_drop` と `default world` のスクリーンショット検証ルートを整備する。
+  - [x] 旧CPU地形表示コードを削除する。
+- 進捗:
+  - 2026-03-02: `TerrainDotGpuPlugin` を追加。`TerrainWorld` から `solid/material` を `TerrainDotUploadRequest` へ詰め、ExtractResource経由で render world の storage buffer へ転送する経路を実装。
+  - 2026-03-02: `assets/shaders/render/terrain_dot_gpu.wgsl` を追加。地形セルを決定論的パレットでGPU描画し、常時表示の本流パスとして有効化。
+  - 2026-03-02: RenderGraph連結を `TerrainDotGpuLabel -> WaterDotGpuLabel -> ParticleOverlayGpuLabel` とし、地形→水→overlay の描画順を固定。
+  - 2026-03-02: `PARTICLES_AUTOVERIFY_SCENARIO=default_world` 相当の検証を行えるよう screenshot 自動検証に `default_world/none`（シナリオロードをスキップ）を追加。
+  - 2026-03-02: `PARTICLES_AUTOVERIFY_SCREENSHOT=1` で以下を取得し、表示成立を確認。
+    - `artifacts/water_drop_terrain_gpu.png`（岩枠表示）
+    - `artifacts/default_world_terrain_gpu.png`（生成地形表示）
+  - 2026-03-02: 旧CPU描画ルートを削除（`src/render/tiles.rs`, `src/render/palette.rs`, `src/render/constants.rs`, `src/render/water.rs`, `src/render/free_particles.rs`, `src/render/object_sprites.rs`）。
+  - 2026-03-02: 地形ドットの見た目改善として、地形描画解像度を `2x2` 相当から `8x8` ドット/セルへ引き上げ。
+- 完了条件:
+  - `water_drop` で岩枠がGPU地形描画として表示される。
+  - `default world` で生成地形がGPU描画として表示される。
+  - CPU地形表示コードが撤去される。
+
 ### [MPM-WATER-02] 明示MLS-MPM水ソルバ（単一レート）実装
 
 - Status: `In Progress`

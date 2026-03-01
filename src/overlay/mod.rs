@@ -1,8 +1,8 @@
 use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
-use bevy::render::render_graph::{RenderGraph, RenderGraphExt};
 use bevy::render::render_graph::ViewNodeRunner;
+use bevy::render::render_graph::{RenderGraph, RenderGraphExt};
 use bevy::render::render_resource::SpecializedRenderPipelines;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
