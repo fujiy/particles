@@ -12,10 +12,11 @@
 @group(0) @binding(3) var<storage, read> terrain_normal: array<vec2<f32>>;
 
 const MASS_EPSILON: f32 = 1e-8;
+const RECOVERY_SPEED_CAP: f32 = 1.2;
 
 // Terrain boundary: non-penetration + Coulomb stick/slip friction [Eqs.28-29, physics.md].
 // Triggers within a thin buffer zone (sdf < threshold) to preemptively block approach.
-fn apply_terrain_boundary(v: vec2<f32>, sdf: f32, normal: vec2<f32>, mu: f32, threshold: f32) -> vec2<f32> {
+fn apply_terrain_boundary(v: vec2<f32>, sdf: f32, normal: vec2<f32>, mu: f32, threshold: f32, dt: f32) -> vec2<f32> {
     if sdf >= threshold {
         return v;
     }
@@ -37,20 +38,33 @@ fn apply_terrain_boundary(v: vec2<f32>, sdf: f32, normal: vec2<f32>, mu: f32, th
     }
 
     // Eq.29: Coulomb stick/slip on tangential component.
-    // After normal correction, recompute normal speed (≥ 0 if we just corrected it).
     let vn_post = max(dot(out_v, cn), 0.0);
     let vt_vec = out_v - dot(out_v, cn) * cn;
     let vt_mag = length(vt_vec);
     let stick_limit = mu * vn_post;
     if vt_mag <= stick_limit {
-        // Stick: zero tangential.
         out_v -= vt_vec;
     } else if vt_mag > 1e-8 {
-        // Slip: scale tangential to friction cone boundary.
         out_v -= vt_vec * (1.0 - stick_limit / vt_mag);
     }
 
+    // Numerical recovery: if a node is already inside terrain, inject a bounded
+    // outward speed to reduce long-lived penetration.
+    if sdf < 0.0 {
+        let recovery_speed = min((-sdf) / max(dt, 1.0e-6), RECOVERY_SPEED_CAP);
+        out_v += cn * recovery_speed;
+    }
+
     return out_v;
+}
+
+fn granular_phi(idx: u32, params: MpmParams) -> f32 {
+    let mg = grid[idx].granular_mass;
+    return mg / max(params.rho_ref * params.h * params.h, 1.0e-8);
+}
+
+fn node_idx_from_xy(x: i32, y: i32, params: MpmParams) -> u32 {
+    return u32(y) * params.grid_width + u32(x);
 }
 
 @compute @workgroup_size(64)
@@ -86,34 +100,70 @@ fn grid_update(@builtin(global_invocation_id) gid: vec3<u32>) {
     let normal = terrain_normal[idx];
     let threshold = params.sdf_velocity_threshold_m;
     if mw > MASS_EPSILON {
-        vw = apply_terrain_boundary(vw, sdf, normal, params.boundary_friction_water, threshold);
+        vw = apply_terrain_boundary(vw, sdf, normal, params.boundary_friction_water, threshold, params.dt);
     }
     if mg > MASS_EPSILON {
-        vg = apply_terrain_boundary(vg, sdf, normal, params.boundary_friction_granular, threshold);
+        vg = apply_terrain_boundary(vg, sdf, normal, params.boundary_friction_granular, threshold, params.dt);
     }
 
-    // Water-granular momentum exchange (symmetric impulse update).
+    // Water-granular momentum exchange [Eqs.39-44, physics.md].
     if mw > MASS_EPSILON && mg > MASS_EPSILON {
-        let rel = vw - vg;
-        let rel_speed = length(rel);
-        if rel_speed > 1e-6 {
-            let n = rel / rel_speed;
-            let t = vec2<f32>(-n.y, n.x);
-            let rel_n = max(dot(rel, n), 0.0);
-            let rel_t = dot(rel, t);
-            let m_red = (mw * mg) / max(mw + mg, MASS_EPSILON);
+        let m_red = (mw * mg) / max(mw + mg, MASS_EPSILON);
 
-            let max_impulse = params.coupling_max_impulse_ratio * m_red * rel_speed;
-            let jn_raw = rel_n * m_red * params.coupling_normal_stiffness;
-            let jn = clamp(jn_raw, 0.0, max_impulse);
+        // 1) Symmetric drag [Eq.39].
+        let rel_before = vw - vg;
+        let eta = min(params.coupling_drag_gamma * params.dt, 1.0);
+        let j_drag = -eta * m_red * rel_before;
+        vw += j_drag / mw;
+        vg -= j_drag / mg;
 
-            let jt_raw = -rel_t * m_red * params.coupling_tangent_drag;
-            let jt_limit = params.coupling_friction * jn;
-            let jt = clamp(jt_raw, -jt_limit, jt_limit);
+        // 2) Interface normal from granular fill gradient [Eq.41].
+        let x = i32(idx % params.grid_width);
+        let y = i32(idx / params.grid_width);
+        let x_l = max(x - 1, 0);
+        let x_r = min(x + 1, i32(params.grid_width) - 1);
+        let y_d = max(y - 1, 0);
+        let y_u = min(y + 1, i32(params.grid_height) - 1);
 
-            let impulse = n * jn + t * jt;
-            vw -= impulse / mw;
-            vg += impulse / mg;
+        let phi_l = granular_phi(node_idx_from_xy(x_l, y, params), params);
+        let phi_r = granular_phi(node_idx_from_xy(x_r, y, params), params);
+        let phi_d = granular_phi(node_idx_from_xy(x, y_d, params), params);
+        let phi_u = granular_phi(node_idx_from_xy(x, y_u, params), params);
+
+        let grad_phi = vec2<f32>(
+            (phi_r - phi_l) / max(2.0 * params.h, 1.0e-6),
+            (phi_u - phi_d) / max(2.0 * params.h, 1.0e-6),
+        );
+        let grad_len = length(grad_phi);
+
+        if grad_len >= params.coupling_interface_min_grad {
+            let n = grad_phi / (grad_len + max(params.coupling_interface_normal_eps, 1.0e-9));
+            let rel = vw - vg;
+
+            // 3) Non-penetration in interface normal [Eq.43].
+            let rel_n = dot(rel, n);
+            var jn = vec2<f32>(0.0, 0.0);
+            if rel_n < 0.0 {
+                jn = -m_red * rel_n * n;
+            }
+
+            // 4) Tangential friction cone projection [Eq.44].
+            var jt = vec2<f32>(0.0, 0.0);
+            let rel_t = rel - rel_n * n;
+            let rel_t_mag = length(rel_t);
+            let jn_mag = length(jn);
+            if rel_t_mag > 1.0e-8 && jn_mag > 0.0 {
+                let stick_limit = params.coupling_friction * jn_mag / max(m_red, MASS_EPSILON);
+                if rel_t_mag <= stick_limit {
+                    jt = -m_red * rel_t;
+                } else {
+                    jt = -params.coupling_friction * jn_mag * (rel_t / rel_t_mag);
+                }
+            }
+
+            let impulse = jn + jt;
+            vw += impulse / mw;
+            vg -= impulse / mg;
         }
     }
 

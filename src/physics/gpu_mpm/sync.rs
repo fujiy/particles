@@ -12,10 +12,9 @@ use super::gpu_resources::{
 };
 use super::readback::GpuReadbackResult;
 use crate::params::ActivePhysicsParams;
-use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, particle_radius_m};
 use crate::physics::solver::mpm_water::{
-    MpmWaterParams, is_mpm_managed_particle,
-    rebuild_continuum_from_particle_world, sync_continuum_to_particle_world,
+    MpmWaterParams, is_mpm_managed_particle, rebuild_continuum_from_particle_world,
+    sync_continuum_to_particle_world,
 };
 use crate::physics::solver::params_types::SolverParams;
 use crate::physics::state::{ReplayState, SimulationState};
@@ -26,8 +25,8 @@ use crate::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
 
 const SDF_QUERY_RADIUS_CELLS: i32 = 10;
 const SDF_INF: f32 = 1.0e9;
-/// 粒子境界閾値スケール（粒子直径に対する比率）。バッファレイアウトに直結するため定数のまま。
-const MPM_BOUNDARY_THRESHOLD_SCALE_DIAMETER: f32 = 0.01;
+/// 境界速度補正のSDF閾値（h比）。地形侵入を抑えるため、粒径比ではなく格子幅基準で扱う。
+const MPM_BOUNDARY_THRESHOLD_SCALE_H: f32 = 0.5;
 
 /// Ensure GPU upload source (`ContinuumParticleWorld`) is seeded from `ParticleWorld`.
 ///
@@ -114,7 +113,7 @@ pub fn prepare_particle_upload(
                 continuum.v0[i],
                 continuum.f[i],
                 continuum.c[i],
-                continuum.jp[i],
+                continuum.v_vol[i],
                 continuum.material_id[i],
             )
         })
@@ -217,9 +216,7 @@ pub fn prepare_gpu_params(
         p.sand.cohesion_pa,
         p.sand.hardening,
     );
-    // Keep GPU params in parity with CPU MPM setup in solver/step.rs.
-    let boundary_threshold_m =
-        particle_radius_m(DEFAULT_MATERIAL_PARAMS) * MPM_BOUNDARY_THRESHOLD_SCALE_DIAMETER;
+    let boundary_threshold_m = h * MPM_BOUNDARY_THRESHOLD_SCALE_H;
 
     params_req.params = GpuMpmParams {
         dt: solver_params.fixed_dt,
@@ -251,10 +248,10 @@ pub fn prepare_gpu_params(
         dp_k_sand: sand.k,
         dp_hardening_sand: sand.hardening,
         granular_tensile_clamp: p.granular_tensile_clamp,
-        coupling_normal_stiffness: p.coupling.normal_stiffness,
-        coupling_tangent_drag: p.coupling.tangent_drag,
+        coupling_drag_gamma: p.coupling.drag_gamma,
         coupling_friction: p.coupling.friction,
-        coupling_max_impulse_ratio: p.coupling.max_impulse_ratio,
+        coupling_interface_min_grad: p.coupling.interface_min_grad,
+        coupling_interface_normal_eps: p.coupling.interface_normal_eps,
         alpha_apic_water: p.apic.water,
         alpha_apic_granular: p.apic.granular,
         _pad: [0; 1],
@@ -359,7 +356,7 @@ pub fn apply_gpu_readback(
             continuum.v[i] = Vec2::from_array(p.v);
             continuum.f[i] = Mat2::from_cols(Vec2::new(p.f[0], p.f[1]), Vec2::new(p.f[2], p.f[3]));
             continuum.c[i] = Mat2::from_cols(Vec2::new(p.c[0], p.c[1]), Vec2::new(p.c[2], p.c[3]));
-            continuum.jp[i] = p.jp.max(1e-6);
+            continuum.v_vol[i] = p.v_vol;
         }
     }
     // Reflect readback positions to ParticleWorld so particle overlay can render GPU data.
@@ -454,7 +451,7 @@ fn drucker_prager_params(
     let sin_phi = phi.sin();
     let cos_phi = phi.cos();
     let denom = (3.0 - sin_phi).max(1e-4);
-    let alpha = (2.0 * sin_phi) / (3.0_f32.sqrt() * denom);
+    let alpha = (2.0_f32 / 3.0_f32).sqrt() * (2.0 * sin_phi) / denom;
     let k = (6.0 * cohesion_pa.max(0.0) * cos_phi) / (3.0_f32.sqrt() * denom);
 
     GpuDruckerPragerParams {

@@ -147,6 +147,7 @@ pub fn cfl_violated(params: &MpmWaterParams, h_b: f32, max_particle_speed_mps: f
 pub fn continuum_phase_for_particle(material: ParticleMaterial) -> Option<ContinuumPhase> {
     match material {
         ParticleMaterial::WaterLiquid => Some(ContinuumPhase::Water),
+        ParticleMaterial::StoneGranular => Some(ContinuumPhase::GranularSoil),
         ParticleMaterial::SoilGranular => Some(ContinuumPhase::GranularSoil),
         ParticleMaterial::SandGranular => Some(ContinuumPhase::GranularSand),
         _ => None,
@@ -179,7 +180,7 @@ pub fn rebuild_continuum_from_particle_world(
             mass,
             mass.max(0.0) * inv_rho0,
             phase,
-            1.0,
+            0.0,
         );
     }
     continuum.len()
@@ -1777,11 +1778,12 @@ mod tests {
             &mut continuum,
             &MpmWaterParams::default(),
         );
-        assert_eq!(count, 3);
-        assert_eq!(continuum.len(), 3);
+        assert_eq!(count, 4);
+        assert_eq!(continuum.len(), 4);
         assert_eq!(continuum.x[0], Vec2::new(0.0, 0.0));
         assert_eq!(continuum.x[1], Vec2::new(2.0, 0.0));
         assert_eq!(continuum.x[2], Vec2::new(3.0, 0.0));
+        assert_eq!(continuum.x[3], Vec2::new(4.0, 0.0));
     }
 
     #[test]
@@ -1814,14 +1816,21 @@ mod tests {
             Vec2::new(3.0, 4.0),
             1.0,
             0.001,
-            1.0,
+            0.0,
         );
         continuum.spawn_granular_sand_particle(
             Vec2::new(9.0, 10.0),
             Vec2::new(5.0, 6.0),
             1.0,
             0.001,
+            0.0,
+        );
+        continuum.spawn_granular_soil_particle(
+            Vec2::new(11.0, 12.0),
+            Vec2::new(7.0, 8.0),
             1.0,
+            0.001,
+            0.0,
         );
 
         assert!(sync_continuum_to_particle_world(&mut particles, &continuum));
@@ -1832,7 +1841,8 @@ mod tests {
         assert_eq!(particles.vel[2], Vec2::new(3.0, 4.0));
         assert_eq!(particles.pos[3], Vec2::new(9.0, 10.0));
         assert_eq!(particles.vel[3], Vec2::new(5.0, 6.0));
-        assert_eq!(particles.pos[4], Vec2::new(4.0, 0.0));
+        assert_eq!(particles.pos[4], Vec2::new(11.0, 12.0));
+        assert_eq!(particles.vel[4], Vec2::new(7.0, 8.0));
     }
 
     #[test]

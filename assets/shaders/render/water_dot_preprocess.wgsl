@@ -30,7 +30,7 @@ struct GpuParticle {
     c_01: f32,
     c_10: f32,
     c_11: f32,
-    jp: f32,
+    v_vol: f32,
     phase_id: u32,
     _pad0: u32,
     _pad1: u32,

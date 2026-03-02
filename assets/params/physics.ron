@@ -14,7 +14,7 @@
     // 変形勾配クランプ
     deformation: (
         // J = det(F) の下限. 許容: 0.01 – 1.0
-        j_min: 0.6,
+        j_min: 0.60,
         // J の上限. 許容: 1.0 – 10.0
         j_max: 1.4,
         // C マトリクスのノルム上限. 許容: 1.0 – 1000.0
@@ -26,7 +26,7 @@
         // 水. 1.0 = 完全 APIC, 0.0 = 完全 PIC. 許容: 0.0 – 1.0
         water: 0.99,
         // 粉体. 許容: 0.0 – 1.0
-        granular: 0.78,
+        granular: 0.5,
     ),
 
     // 地形境界 Coulomb 摩擦 [Eq.29, physics.md]
@@ -34,35 +34,35 @@
         // 水の摩擦係数 μ_b. 許容: 0.0 – 2.0
         water: 0.1,
         // 粉体の摩擦係数 μ_b. 許容: 0.0 – 2.0
-        granular: 0.6,
+        granular: 1.0,
     ),
 
     // Drucker-Prager 土壌パラメータ
     soil: (
         // ヤング率 E [Pa]. 許容: 1.0 – 1e8
-        youngs_modulus_pa: 800.0,
+        youngs_modulus_pa: 1000000.0,
         // ポアソン比 ν. 許容: 0.0 – 0.45
-        poisson_ratio: 0.28,
+        poisson_ratio: 0.4,
         // 内部摩擦角 φ [度]. 許容: 0.0 – 60.0
-        friction_deg: 36.0,
+        friction_deg: 58.0,
         // 凝着力 c [Pa]. 許容: 0.0 – 1e6
-        cohesion_pa: 0.0,
+        cohesion_pa: 400.0,
         // 硬化係数 h. 許容: 0.0 – 10.0
-        hardening: 0.0,
+        hardening: 1.0,
     ),
 
     // Drucker-Prager 砂パラメータ
     sand: (
         // ヤング率 E [Pa]. 許容: 1.0 – 1e8
-        youngs_modulus_pa: 700.0,
+        youngs_modulus_pa: 90000.0,
         // ポアソン比 ν. 許容: 0.0 – 0.45
         poisson_ratio: 0.25,
         // 内部摩擦角 φ [度]. 許容: 0.0 – 60.0
-        friction_deg: 34.0,
+        friction_deg: 55.0,
         // 凝着力 c [Pa]. 許容: 0.0 – 1e6
-        cohesion_pa: 0.0,
+        cohesion_pa: 120.0,
         // 硬化係数 h. 許容: 0.0 – 10.0
-        hardening: 0.0,
+        hardening: 0.5,
     ),
 
     // 粉体の引張クランプ [Pa]. 0.0 = 無効. 許容: 0.0 – 1e5
@@ -70,13 +70,13 @@
 
     // 水-粉体連成パラメータ
     coupling: (
-        // 法線方向スティフネス. 許容: 0.0 – 10.0
-        normal_stiffness: 0.55,
-        // 接線方向ドラッグ. 許容: 0.0 – 10.0
-        tangent_drag: 0.30,
+        // 対称ドラッグ率 γ [1/s]. 許容: 0.0 – 100.0
+        drag_gamma: 10.0,
         // 連成摩擦係数. 許容: 0.0 – 2.0
-        friction: 0.45,
-        // 最大インパルス比. 許容: 0.0 – 1.0
-        max_impulse_ratio: 0.50,
+        friction: 0.6,
+        // 界面法線を有効化する最小 |∇phi_g|. 許容: 0.0 – 1000.0
+        interface_min_grad: 0.001,
+        // 界面法線正規化の分母ε. 許容: 1e-9 – 1.0
+        interface_normal_eps: 0.5,
     ),
 )

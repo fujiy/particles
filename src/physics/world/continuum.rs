@@ -29,7 +29,8 @@ pub struct ContinuumParticleWorld {
     pub v0: Vec<f32>,
     pub f: Vec<Mat2>,
     pub c: Vec<Mat2>,
-    pub jp: Vec<f32>,
+    /// Plastic volume correction scalar (diff_log_J). Granular-only state, water keeps 0.0.
+    pub v_vol: Vec<f32>,
     pub material_id: Vec<u8>,
     pub owner_block_id: Vec<usize>,
 }
@@ -50,7 +51,7 @@ impl ContinuumParticleWorld {
         self.v0.clear();
         self.f.clear();
         self.c.clear();
-        self.jp.clear();
+        self.v_vol.clear();
         self.material_id.clear();
         self.owner_block_id.clear();
     }
@@ -62,7 +63,7 @@ impl ContinuumParticleWorld {
         mass: f32,
         rest_volume: f32,
         phase: ContinuumPhase,
-        jp: f32,
+        v_vol: f32,
     ) -> usize {
         let index = self.len();
         self.x.push(position);
@@ -71,7 +72,7 @@ impl ContinuumParticleWorld {
         self.v0.push(rest_volume);
         self.f.push(Mat2::IDENTITY);
         self.c.push(Mat2::ZERO);
-        self.jp.push(jp.max(1e-6));
+        self.v_vol.push(v_vol);
         self.material_id.push(phase.id());
         self.owner_block_id.push(0);
         index
@@ -90,7 +91,7 @@ impl ContinuumParticleWorld {
             mass,
             rest_volume,
             ContinuumPhase::Water,
-            1.0,
+            0.0,
         )
     }
 
@@ -100,7 +101,7 @@ impl ContinuumParticleWorld {
         velocity: Vec2,
         mass: f32,
         rest_volume: f32,
-        jp: f32,
+        v_vol: f32,
     ) -> usize {
         self.spawn_particle(
             position,
@@ -108,7 +109,7 @@ impl ContinuumParticleWorld {
             mass,
             rest_volume,
             ContinuumPhase::GranularSoil,
-            jp,
+            v_vol,
         )
     }
 
@@ -118,7 +119,7 @@ impl ContinuumParticleWorld {
         velocity: Vec2,
         mass: f32,
         rest_volume: f32,
-        jp: f32,
+        v_vol: f32,
     ) -> usize {
         self.spawn_particle(
             position,
@@ -126,7 +127,7 @@ impl ContinuumParticleWorld {
             mass,
             rest_volume,
             ContinuumPhase::GranularSand,
-            jp,
+            v_vol,
         )
     }
 }
@@ -153,6 +154,6 @@ mod tests {
         assert_eq!(world.material_id[0], MATERIAL_ID_WATER);
         assert_eq!(world.f[0], Mat2::IDENTITY);
         assert_eq!(world.c[0], Mat2::ZERO);
-        assert_eq!(world.jp[0], 1.0);
+        assert_eq!(world.v_vol[0], 0.0);
     }
 }

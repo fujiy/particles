@@ -3,7 +3,7 @@
 #define_import_path particles::mpm_types
 
 // Particle storage layout (one array of GpuParticle, 72 bytes each).
-// Matches Rust GpuParticle: x(8)+v(8)+mass(4)+v0(4)+f(16)+c(16)+jp(4)+phase_id(4)+pad(8)=72
+// Matches Rust GpuParticle: x(8)+v(8)+mass(4)+v0(4)+f(16)+c(16)+v_vol(4)+phase_id(4)+pad(8)=72
 struct GpuParticle {
     // position (m)
     x: vec2<f32>,
@@ -23,8 +23,8 @@ struct GpuParticle {
     c_b: f32,
     c_c: f32,
     c_d: f32,
-    // Plastic volume tracker (granular only, water keeps 1.0)
-    jp: f32,
+    // Plastic volume correction scalar diff_log_J [Eq.21, physics.md]
+    v_vol: f32,
     // phase id (0=water, 1=granular soil, 2=granular sand)
     phase_id: u32,
     // Water fill fraction φ_p [Eq.9, physics.md]. Written by G2P, read by P2G.
@@ -55,7 +55,7 @@ struct MpmParams {
     gx: f32,
     gy: f32,
     // reference density (kg/m^3)
-    density_ref: f32,
+    rho_ref: f32,
     // bulk modulus (Pa)
     bulk_modulus: f32,
     // grid cell size (m)
@@ -93,10 +93,10 @@ struct MpmParams {
     dp_hardening_sand: f32,
     // granular material / coupling params
     granular_tensile_clamp: f32,
-    coupling_normal_stiffness: f32,
-    coupling_tangent_drag: f32,
+    coupling_drag_gamma: f32,
     coupling_friction: f32,
-    coupling_max_impulse_ratio: f32,
+    coupling_interface_min_grad: f32,
+    coupling_interface_normal_eps: f32,
     // APIC<->PIC blend: 1.0=full APIC, 0.0=full PIC [Eq.32, physics.md]
     alpha_apic_water: f32,
     alpha_apic_granular: f32,

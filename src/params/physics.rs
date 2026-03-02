@@ -67,14 +67,14 @@ pub struct DruckerPragerParams {
 /// 水-粉体連成パラメータ
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CouplingParams {
-    /// 法線方向スティフネス. 許容: 0.0 – 10.0
-    pub normal_stiffness: f32,
-    /// 接線方向ドラッグ. 許容: 0.0 – 10.0
-    pub tangent_drag: f32,
+    /// 対称ドラッグ率 γ [1/s]. 許容: 0.0 – 100.0
+    pub drag_gamma: f32,
     /// 連成摩擦係数. 許容: 0.0 – 2.0
     pub friction: f32,
-    /// 最大インパルス比. 許容: 0.0 – 1.0
-    pub max_impulse_ratio: f32,
+    /// 界面法線計算を有効化する最小 |∇phi_g|. 許容: 0.0 – 1000.0
+    pub interface_min_grad: f32,
+    /// 界面法線正規化の分母ε. 許容: 1e-9 – 1.0
+    pub interface_normal_eps: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +110,7 @@ impl Default for PhysicsParams {
                 sound_speed_mps: 16.0,
             },
             deformation: DeformationClampParams {
-                j_min: 0.6,
+                j_min: 0.88,
                 j_max: 1.4,
                 c_max_norm: 80.0,
             },
@@ -120,28 +120,28 @@ impl Default for PhysicsParams {
             },
             boundary: BoundaryFrictionParams {
                 water: 0.3,
-                granular: 0.6,
+                granular: 1.6,
             },
             soil: DruckerPragerParams {
-                youngs_modulus_pa: 8.0e2,
+                youngs_modulus_pa: 2.0e4,
                 poisson_ratio: 0.28,
-                friction_deg: 36.0,
-                cohesion_pa: 0.0,
-                hardening: 0.0,
+                friction_deg: 52.0,
+                cohesion_pa: 400.0,
+                hardening: 1.0,
             },
             sand: DruckerPragerParams {
-                youngs_modulus_pa: 7.0e2,
+                youngs_modulus_pa: 1.8e4,
                 poisson_ratio: 0.25,
-                friction_deg: 34.0,
-                cohesion_pa: 0.0,
-                hardening: 0.0,
+                friction_deg: 48.0,
+                cohesion_pa: 120.0,
+                hardening: 0.5,
             },
             granular_tensile_clamp: 0.0,
             coupling: CouplingParams {
-                normal_stiffness: 0.55,
-                tangent_drag: 0.30,
+                drag_gamma: 1.0,
                 friction: 0.45,
-                max_impulse_ratio: 0.50,
+                interface_min_grad: 0.02,
+                interface_normal_eps: 1.0e-6,
             },
         }
     }
@@ -160,10 +160,20 @@ impl PhysicsParams {
             };
         }
         check!(self.water.rho0, "water.rho0", 100.0, 10_000.0);
-        check!(self.water.sound_speed_mps, "water.sound_speed_mps", 1.0, 1_000.0);
+        check!(
+            self.water.sound_speed_mps,
+            "water.sound_speed_mps",
+            1.0,
+            1_000.0
+        );
         check!(self.deformation.j_min, "deformation.j_min", 0.01, 1.0);
         check!(self.deformation.j_max, "deformation.j_max", 1.0, 10.0);
-        check!(self.deformation.c_max_norm, "deformation.c_max_norm", 1.0, 1_000.0);
+        check!(
+            self.deformation.c_max_norm,
+            "deformation.c_max_norm",
+            1.0,
+            1_000.0
+        );
         if self.deformation.j_min >= self.deformation.j_max {
             return Err(format!(
                 "deformation.j_min ({}) >= j_max ({})",
@@ -176,11 +186,26 @@ impl PhysicsParams {
         check!(self.boundary.granular, "boundary.granular", 0.0, 2.0);
         Self::validate_dp(&self.soil, "soil")?;
         Self::validate_dp(&self.sand, "sand")?;
-        check!(self.granular_tensile_clamp, "granular_tensile_clamp", 0.0, 1e5);
-        check!(self.coupling.normal_stiffness, "coupling.normal_stiffness", 0.0, 10.0);
-        check!(self.coupling.tangent_drag, "coupling.tangent_drag", 0.0, 10.0);
+        check!(
+            self.granular_tensile_clamp,
+            "granular_tensile_clamp",
+            0.0,
+            1e5
+        );
+        check!(self.coupling.drag_gamma, "coupling.drag_gamma", 0.0, 100.0);
         check!(self.coupling.friction, "coupling.friction", 0.0, 2.0);
-        check!(self.coupling.max_impulse_ratio, "coupling.max_impulse_ratio", 0.0, 1.0);
+        check!(
+            self.coupling.interface_min_grad,
+            "coupling.interface_min_grad",
+            0.0,
+            1000.0
+        );
+        check!(
+            self.coupling.interface_normal_eps,
+            "coupling.interface_normal_eps",
+            1e-9,
+            1.0
+        );
         Ok(())
     }
 

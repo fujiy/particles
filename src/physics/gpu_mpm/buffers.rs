@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 
 // ---------------------------------------------------------------------------
 // GPU-side particle layout (matches mpm_types.wgsl::GpuParticle, 72 bytes)
-// Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) jp(4) phase_id(4) _pad(8) = 72
+// Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) v_vol(4) phase_id(4) _pad(8) = 72
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -21,8 +21,8 @@ pub struct GpuParticle {
     pub f: [f32; 4],
     /// C column-major: [c00, c01, c10, c11]
     pub c: [f32; 4],
-    /// Plastic volume tracker (granular only, water keeps 1.0).
-    pub jp: f32,
+    /// Plastic volume correction scalar diff_log_J (granular only, water keeps 0.0).
+    pub v_vol: f32,
     /// Continuum phase id (0=water, 1=soil, 2=sand).
     pub phase_id: u32,
     /// Water fill fraction φ_p interpolated from grid (water only). Written by G2P, read by P2G.
@@ -40,7 +40,7 @@ impl GpuParticle {
         rest_volume: f32,
         f: Mat2,
         c: Mat2,
-        jp: f32,
+        v_vol: f32,
         phase_id: u8,
     ) -> Self {
         Self {
@@ -51,7 +51,7 @@ impl GpuParticle {
             // Mat2 in glam is column-major: col0 = (x_axis.x, x_axis.y), col1 = (y_axis.x, y_axis.y)
             f: [f.x_axis.x, f.x_axis.y, f.y_axis.x, f.y_axis.y],
             c: [c.x_axis.x, c.x_axis.y, c.y_axis.x, c.y_axis.y],
-            jp: jp.max(1e-6),
+            v_vol,
             phase_id: phase_id as u32,
             phi_p: 1.0,
             _pad_b: 0,
@@ -116,10 +116,13 @@ pub struct GpuMpmParams {
     pub dp_k_sand: f32,
     pub dp_hardening_sand: f32,
     pub granular_tensile_clamp: f32,
-    pub coupling_normal_stiffness: f32,
-    pub coupling_tangent_drag: f32,
+    /// Symmetric inter-phase drag gamma [Eq.39, physics.md]
+    pub coupling_drag_gamma: f32,
     pub coupling_friction: f32,
-    pub coupling_max_impulse_ratio: f32,
+    /// Minimum |∇phi_g| to enable interface normal/friction coupling [Eq.41, physics.md]
+    pub coupling_interface_min_grad: f32,
+    /// Epsilon for interface normal normalization denominator.
+    pub coupling_interface_normal_eps: f32,
     /// APIC↔PIC blend coefficient for water [Eq.32, physics.md]. 1.0=full APIC, 0.0=full PIC.
     pub alpha_apic_water: f32,
     /// APIC↔PIC blend coefficient for granular [Eq.32, physics.md].
@@ -161,10 +164,10 @@ impl Default for GpuMpmParams {
             dp_k_sand: 60.0,
             dp_hardening_sand: 1.0,
             granular_tensile_clamp: 0.0,
-            coupling_normal_stiffness: 0.75,
-            coupling_tangent_drag: 0.45,
+            coupling_drag_gamma: 3.5,
             coupling_friction: 0.6,
-            coupling_max_impulse_ratio: 0.85,
+            coupling_interface_min_grad: 0.02,
+            coupling_interface_normal_eps: 1.0e-6,
             alpha_apic_water: 0.95,
             alpha_apic_granular: 0.78,
             _pad: [0; 1],

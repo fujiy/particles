@@ -67,7 +67,7 @@ const STONE_GRANULAR_CELL_MASS: f32 = REST_DENSITY * CELL_SIZE_M * CELL_SIZE_M *
 const SOIL_SOLID_CELL_MASS: f32 = REST_DENSITY * CELL_SIZE_M * CELL_SIZE_M * 1.9;
 const SOIL_GRANULAR_CELL_MASS: f32 = REST_DENSITY * CELL_SIZE_M * CELL_SIZE_M * 1.5;
 const SAND_SOLID_CELL_MASS: f32 = REST_DENSITY * CELL_SIZE_M * CELL_SIZE_M * 1.7;
-const SAND_GRANULAR_CELL_MASS: f32 = REST_DENSITY * CELL_SIZE_M * CELL_SIZE_M * 1.3;
+const SAND_GRANULAR_CELL_MASS: f32 = REST_DENSITY * CELL_SIZE_M * CELL_SIZE_M * 2.6;
 
 const fn particle_radius_from_particles_per_cell(particles_per_cell: u32) -> f32 {
     particle_spacing_from_particles_per_cell(particles_per_cell) * 0.5
