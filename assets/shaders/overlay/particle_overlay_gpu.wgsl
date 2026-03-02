@@ -1,64 +1,7 @@
 #import bevy_render::view::View
+#import particles::mpm_types::{GpuParticle, MpmParams}
 
 @group(0) @binding(0) var<uniform> view: View;
-struct MpmParams {
-    dt: f32,
-    gx: f32,
-    gy: f32,
-    rho0: f32,
-    bulk_modulus: f32,
-    h: f32,
-    grid_origin_x: i32,
-    grid_origin_y: i32,
-    grid_width: u32,
-    grid_height: u32,
-    particle_count: u32,
-    j_min: f32,
-    j_max: f32,
-    c_max_norm: f32,
-    sdf_velocity_threshold_m: f32,
-    deep_push_gain_per_s: f32,
-    deep_push_speed_cap_mps: f32,
-    tangential_damping: f32,
-    dp_lambda_soil: f32,
-    dp_mu_soil: f32,
-    dp_alpha_soil: f32,
-    dp_k_soil: f32,
-    dp_hardening_soil: f32,
-    dp_lambda_sand: f32,
-    dp_mu_sand: f32,
-    dp_alpha_sand: f32,
-    dp_k_sand: f32,
-    dp_hardening_sand: f32,
-    granular_tensile_clamp: f32,
-    coupling_normal_stiffness: f32,
-    coupling_tangent_drag: f32,
-    coupling_friction: f32,
-    coupling_max_impulse_ratio: f32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
-}
-
-struct GpuParticle {
-    x: vec2<f32>,
-    v: vec2<f32>,
-    mass: f32,
-    v_0: f32,
-    f_00: f32,
-    f_01: f32,
-    f_10: f32,
-    f_11: f32,
-    c_00: f32,
-    c_01: f32,
-    c_10: f32,
-    c_11: f32,
-    jp: f32,
-    phase_id: u32,
-    _pad0: u32,
-    _pad1: u32,
-}
-
 @group(0) @binding(1) var<uniform> params: MpmParams;
 @group(0) @binding(2) var<storage, read> particles: array<GpuParticle>;
 
