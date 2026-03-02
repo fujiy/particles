@@ -7,19 +7,23 @@ use bevy_inspector_egui::bevy_egui::EguiPlugin;
 use particles::camera_controller::CameraControllerPlugin;
 use particles::interface::InterfacePlugin;
 use particles::overlay::OverlayPlugin;
-use particles::params::ParamsPlugin;
+use particles::params::{ActivePhysicsParams, ParamsPlugin};
 use particles::physics::PhysicsPlugin;
 use particles::physics::gpu_mpm::GpuMpmPlugin;
-use particles::physics::gpu_mpm::gpu_resources::MpmGpuControl;
+use particles::physics::gpu_mpm::gpu_resources::{MpmGpuControl, world_grid_layout};
 use particles::physics::gpu_mpm::sync::apply_gpu_readback;
 use particles::physics::scenario::{default_scenario_spec_by_name, evaluate_scenario_state};
 use particles::physics::solver::mpm_water::is_mpm_managed_particle;
 use particles::physics::state::{ReplayLoadScenarioRequest, ReplayState, SimulationState};
+use particles::physics::world::continuum::{
+    ContinuumParticleWorld, MATERIAL_ID_GRANULAR_SAND, MATERIAL_ID_GRANULAR_SOIL,
+};
 use particles::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use particles::physics::world::particle::{ParticleMaterial, ParticleWorld};
-use particles::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
+use particles::physics::world::terrain::{CELL_SIZE_M, TerrainCell, TerrainWorld, world_to_cell};
 use particles::render::{TerrainDotGpuPlugin, TerrainRenderDiagnostics, WaterDotGpuPlugin};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
@@ -302,7 +306,245 @@ struct MpmAutoVerifyReport {
     max_speed_actual: String,
     water_surface_expected: String,
     water_surface_actual: String,
+    grid_phi_water_max: f32,
+    grid_phi_water_p99: f32,
+    grid_phi_water_mean_nonzero: f32,
+    grid_phi_granular_max: f32,
+    grid_phi_granular_p99: f32,
+    grid_phi_granular_mean_nonzero: f32,
+    grid_phi_water_nonzero_nodes: usize,
+    grid_phi_granular_nonzero_nodes: usize,
+    granular_det_f_min: f32,
+    granular_det_f_max: f32,
+    granular_det_f_p99: f32,
+    granular_p_norm_max: f32,
+    granular_p_norm_p99: f32,
+    granular_v_vol_abs_max: f32,
+    granular_particle_count_diag: usize,
+    granular_invalid_f_count_diag: usize,
     failed_assertions: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct GridDensityStats {
+    water_phi_max: f32,
+    water_phi_p99: f32,
+    water_phi_mean_nonzero: f32,
+    granular_phi_max: f32,
+    granular_phi_p99: f32,
+    granular_phi_mean_nonzero: f32,
+    water_nonzero_nodes: usize,
+    granular_nonzero_nodes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct GranularElasticDiagnostics {
+    det_f_min: f32,
+    det_f_max: f32,
+    det_f_p99: f32,
+    p_norm_max: f32,
+    p_norm_p99: f32,
+    v_vol_abs_max: f32,
+    particle_count: usize,
+    invalid_f_count: usize,
+}
+
+fn lame_from_e_nu(e: f32, nu: f32) -> (f32, f32) {
+    let e = e.max(1.0);
+    let nu = nu.clamp(0.0, 0.45);
+    let mu = e / (2.0 * (1.0 + nu).max(1.0e-6));
+    let lambda = e * nu / ((1.0 + nu) * (1.0 - 2.0 * nu)).max(1.0e-6);
+    (lambda, mu)
+}
+
+fn p99_and_max(values: &[f32]) -> (f32, f32) {
+    if values.is_empty() {
+        return (0.0, 0.0);
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let max_v = *sorted.last().unwrap_or(&0.0);
+    let p99_idx = (((sorted.len() as f32) * 0.99).floor() as usize).min(sorted.len() - 1);
+    let p99_v = sorted[p99_idx];
+    (p99_v, max_v)
+}
+
+fn collect_granular_elastic_diagnostics(
+    continuum: &ContinuumParticleWorld,
+    active_physics_params: &ActivePhysicsParams,
+) -> GranularElasticDiagnostics {
+    let mut det_values = Vec::<f32>::new();
+    let mut p_norm_values = Vec::<f32>::new();
+    let mut v_vol_abs_max = 0.0f32;
+    let mut invalid_f_count = 0usize;
+
+    let (lambda_soil, mu_soil) = lame_from_e_nu(
+        active_physics_params.0.soil.youngs_modulus_pa,
+        active_physics_params.0.soil.poisson_ratio,
+    );
+    let (lambda_sand, mu_sand) = lame_from_e_nu(
+        active_physics_params.0.sand.youngs_modulus_pa,
+        active_physics_params.0.sand.poisson_ratio,
+    );
+
+    for ((f, &phase), &v_vol) in continuum
+        .f
+        .iter()
+        .zip(continuum.material_id.iter())
+        .zip(continuum.v_vol.iter())
+    {
+        let (lambda, mu) = match phase {
+            MATERIAL_ID_GRANULAR_SOIL => (lambda_soil, mu_soil),
+            MATERIAL_ID_GRANULAR_SAND => (lambda_sand, mu_sand),
+            _ => continue,
+        };
+        v_vol_abs_max = v_vol_abs_max.max(v_vol.abs());
+
+        let f00 = f.x_axis.x;
+        let f01 = f.x_axis.y;
+        let f10 = f.y_axis.x;
+        let f11 = f.y_axis.y;
+        let j = f00 * f11 - f01 * f10;
+        if !j.is_finite() || j <= 1.0e-8 {
+            invalid_f_count += 1;
+            continue;
+        }
+        det_values.push(j);
+
+        let inv_j = 1.0 / j;
+        let log_j = j.ln();
+        let invt00 = f11 * inv_j;
+        let invt01 = -f01 * inv_j;
+        let invt10 = -f10 * inv_j;
+        let invt11 = f00 * inv_j;
+        let p00 = mu * (f00 - invt00) + lambda * log_j * invt00;
+        let p01 = mu * (f01 - invt01) + lambda * log_j * invt01;
+        let p10 = mu * (f10 - invt10) + lambda * log_j * invt10;
+        let p11 = mu * (f11 - invt11) + lambda * log_j * invt11;
+        let p_norm = (p00 * p00 + p01 * p01 + p10 * p10 + p11 * p11).sqrt();
+        if p_norm.is_finite() {
+            p_norm_values.push(p_norm);
+        } else {
+            invalid_f_count += 1;
+        }
+    }
+
+    let det_f_min = det_values
+        .iter()
+        .copied()
+        .min_by(|a, b| a.total_cmp(b))
+        .unwrap_or(0.0);
+    let (_, det_f_max) = p99_and_max(&det_values);
+    let (det_f_p99, _) = p99_and_max(&det_values);
+    let (p_norm_p99, p_norm_max) = p99_and_max(&p_norm_values);
+
+    GranularElasticDiagnostics {
+        det_f_min,
+        det_f_max,
+        det_f_p99,
+        p_norm_max,
+        p_norm_p99,
+        v_vol_abs_max,
+        particle_count: det_values.len(),
+        invalid_f_count,
+    }
+}
+
+fn bspline_weight_1d(dist: f32) -> f32 {
+    let abs_d = dist.abs();
+    if abs_d < 0.5 {
+        0.75 - abs_d * abs_d
+    } else if abs_d < 1.5 {
+        let t = 1.5 - abs_d;
+        0.5 * t * t
+    } else {
+        0.0
+    }
+}
+
+fn phi_stats_from_mass_map(
+    mass_map: &HashMap<u32, f32>,
+    rho0: f32,
+    h: f32,
+) -> (f32, f32, f32, usize) {
+    let denom = (rho0 * h * h).max(1.0e-8);
+    let mut values: Vec<f32> = mass_map
+        .values()
+        .map(|&mass| mass / denom)
+        .filter(|&phi| phi.is_finite() && phi > 1.0e-8)
+        .collect();
+    if values.is_empty() {
+        return (0.0, 0.0, 0.0, 0);
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    let max_v = *values.last().unwrap_or(&0.0);
+    let p99_idx = (((values.len() as f32) * 0.99).floor() as usize).min(values.len() - 1);
+    let p99_v = values[p99_idx];
+    let mean_v = values.iter().sum::<f32>() / values.len() as f32;
+    (max_v, p99_v, mean_v, values.len())
+}
+
+fn collect_grid_density_stats(particles: &ParticleWorld, rho0: f32, h: f32) -> GridDensityStats {
+    let layout = world_grid_layout();
+    let inv_h = 1.0 / h.max(1.0e-6);
+    let mut water_mass = HashMap::<u32, f32>::new();
+    let mut granular_mass = HashMap::<u32, f32>::new();
+
+    for ((&pos, &mass), &mat) in particles
+        .positions()
+        .iter()
+        .zip(particles.masses().iter())
+        .zip(particles.materials().iter())
+    {
+        if !is_mpm_managed_particle(mat) {
+            continue;
+        }
+        let is_water = mat == ParticleMaterial::WaterLiquid;
+        let grid_pos = pos * inv_h;
+        let base = IVec2::new(
+            (grid_pos.x - 0.5).floor() as i32,
+            (grid_pos.y - 0.5).floor() as i32,
+        );
+        for oy in 0..3 {
+            for ox in 0..3 {
+                let node = base + IVec2::new(ox, oy);
+                let Some(node_idx) = layout.node_index(node) else {
+                    continue;
+                };
+                let rel = grid_pos - node.as_vec2();
+                let w = bspline_weight_1d(rel.x) * bspline_weight_1d(rel.y);
+                if w <= 0.0 {
+                    continue;
+                }
+                let dm = w * mass;
+                if is_water {
+                    *water_mass.entry(node_idx).or_insert(0.0) += dm;
+                } else {
+                    *granular_mass.entry(node_idx).or_insert(0.0) += dm;
+                }
+            }
+        }
+    }
+
+    let (water_phi_max, water_phi_p99, water_phi_mean_nonzero, water_nonzero_nodes) =
+        phi_stats_from_mass_map(&water_mass, rho0, h);
+    let (
+        granular_phi_max,
+        granular_phi_p99,
+        granular_phi_mean_nonzero,
+        granular_nonzero_nodes,
+    ) = phi_stats_from_mass_map(&granular_mass, rho0, h);
+
+    GridDensityStats {
+        water_phi_max,
+        water_phi_p99,
+        water_phi_mean_nonzero,
+        granular_phi_max,
+        granular_phi_p99,
+        granular_phi_mean_nonzero,
+        water_nonzero_nodes,
+        granular_nonzero_nodes,
+    }
 }
 
 fn env_bool(key: &str) -> bool {
@@ -395,6 +637,8 @@ fn run_mpm_autoverify(
     time: Res<Time>,
     replay_state: Res<ReplayState>,
     particle_world: Res<ParticleWorld>,
+    continuum_world: Res<ContinuumParticleWorld>,
+    active_physics_params: Res<ActivePhysicsParams>,
     terrain_world: Res<TerrainWorld>,
     object_world: Res<ObjectWorld>,
     object_field: Res<ObjectPhysicsField>,
@@ -450,6 +694,22 @@ fn run_mpm_autoverify(
                     max_speed_actual: String::new(),
                     water_surface_expected: String::new(),
                     water_surface_actual: String::new(),
+                    grid_phi_water_max: 0.0,
+                    grid_phi_water_p99: 0.0,
+                    grid_phi_water_mean_nonzero: 0.0,
+                    grid_phi_granular_max: 0.0,
+                    grid_phi_granular_p99: 0.0,
+                    grid_phi_granular_mean_nonzero: 0.0,
+                    grid_phi_water_nonzero_nodes: 0,
+                    grid_phi_granular_nonzero_nodes: 0,
+                    granular_det_f_min: 0.0,
+                    granular_det_f_max: 0.0,
+                    granular_det_f_p99: 0.0,
+                    granular_p_norm_max: 0.0,
+                    granular_p_norm_p99: 0.0,
+                    granular_v_vol_abs_max: 0.0,
+                    granular_particle_count_diag: 0,
+                    granular_invalid_f_count_diag: 0,
                     failed_assertions: Vec::new(),
                 };
                 write_report(&state.output_path, &report);
@@ -531,6 +791,22 @@ fn run_mpm_autoverify(
             max_speed_actual: String::new(),
             water_surface_expected: String::new(),
             water_surface_actual: String::new(),
+            grid_phi_water_max: 0.0,
+            grid_phi_water_p99: 0.0,
+            grid_phi_water_mean_nonzero: 0.0,
+            grid_phi_granular_max: 0.0,
+            grid_phi_granular_p99: 0.0,
+            grid_phi_granular_mean_nonzero: 0.0,
+            grid_phi_water_nonzero_nodes: 0,
+            grid_phi_granular_nonzero_nodes: 0,
+            granular_det_f_min: 0.0,
+            granular_det_f_max: 0.0,
+            granular_det_f_p99: 0.0,
+            granular_p_norm_max: 0.0,
+            granular_p_norm_p99: 0.0,
+            granular_v_vol_abs_max: 0.0,
+            granular_particle_count_diag: 0,
+            granular_invalid_f_count_diag: 0,
             failed_assertions: Vec::new(),
         };
         write_report(&state.output_path, &report);
@@ -573,6 +849,12 @@ fn run_mpm_autoverify(
     let penetration_ratio = penetration_count as f32 / tracked_positions.len() as f32;
     let avg_fps = state.wait_frames as f32 / state.elapsed_secs.max(1.0e-5);
     let simulated_steps = replay_state.current_step.saturating_sub(state.start_step) as u32;
+    let grid_density_stats = collect_grid_density_stats(
+        &particle_world,
+        active_physics_params.0.water.rho0,
+        CELL_SIZE_M,
+    );
+    let granular_diag = collect_granular_elastic_diagnostics(&continuum_world, &active_physics_params);
 
     let fps_ok = avg_fps >= state.min_avg_fps;
     let drop_ok = mean_drop >= state.min_mean_drop;
@@ -663,8 +945,36 @@ fn run_mpm_autoverify(
         max_speed_actual,
         water_surface_expected,
         water_surface_actual,
+        grid_phi_water_max: grid_density_stats.water_phi_max,
+        grid_phi_water_p99: grid_density_stats.water_phi_p99,
+        grid_phi_water_mean_nonzero: grid_density_stats.water_phi_mean_nonzero,
+        grid_phi_granular_max: grid_density_stats.granular_phi_max,
+        grid_phi_granular_p99: grid_density_stats.granular_phi_p99,
+        grid_phi_granular_mean_nonzero: grid_density_stats.granular_phi_mean_nonzero,
+        grid_phi_water_nonzero_nodes: grid_density_stats.water_nonzero_nodes,
+        grid_phi_granular_nonzero_nodes: grid_density_stats.granular_nonzero_nodes,
+        granular_det_f_min: granular_diag.det_f_min,
+        granular_det_f_max: granular_diag.det_f_max,
+        granular_det_f_p99: granular_diag.det_f_p99,
+        granular_p_norm_max: granular_diag.p_norm_max,
+        granular_p_norm_p99: granular_diag.p_norm_p99,
+        granular_v_vol_abs_max: granular_diag.v_vol_abs_max,
+        granular_particle_count_diag: granular_diag.particle_count,
+        granular_invalid_f_count_diag: granular_diag.invalid_f_count,
         failed_assertions,
     };
+    bevy::log::info!(
+        "[autoverify] scenario={} granular_diag: n={} invalid={} detF[min/p99/max]={:.5}/{:.5}/{:.5} |P|[p99/max]={:.2}/{:.2} v_vol_abs_max={:.4}",
+        state.scenario_name,
+        granular_diag.particle_count,
+        granular_diag.invalid_f_count,
+        granular_diag.det_f_min,
+        granular_diag.det_f_p99,
+        granular_diag.det_f_max,
+        granular_diag.p_norm_p99,
+        granular_diag.p_norm_max,
+        granular_diag.v_vol_abs_max
+    );
     write_report(&state.output_path, &report);
     gpu_control.readback_enabled = false;
     sim_state.step_once = false;
