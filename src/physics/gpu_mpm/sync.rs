@@ -11,6 +11,7 @@ use super::gpu_resources::{
     world_grid_layout,
 };
 use super::readback::GpuReadbackResult;
+use crate::params::ActivePhysicsParams;
 use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, particle_radius_m};
 use crate::physics::solver::mpm_water::{
     MpmWaterParams, is_mpm_managed_particle,
@@ -25,28 +26,8 @@ use crate::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
 
 const SDF_QUERY_RADIUS_CELLS: i32 = 10;
 const SDF_INF: f32 = 1.0e9;
-const MPM_TARGET_SOUND_SPEED_MPS: f32 = 16.0;
-const MPM_TARGET_RHO0: f32 = 1_000.0;
+/// 粒子境界閾値スケール（粒子直径に対する比率）。バッファレイアウトに直結するため定数のまま。
 const MPM_BOUNDARY_THRESHOLD_SCALE_DIAMETER: f32 = 0.01;
-/// Coulomb friction μ_b for water at terrain boundary [Eq.29, physics.md].
-const BOUNDARY_FRICTION_WATER: f32 = 0.3;
-/// Coulomb friction μ_b for granular at terrain boundary [Eq.29, physics.md].
-const BOUNDARY_FRICTION_GRANULAR: f32 = 0.6;
-const SOIL_YOUNGS_MODULUS_PA: f32 = 8.0e2;
-const SOIL_POISSON_RATIO: f32 = 0.28;
-const SOIL_FRICTION_DEG: f32 = 36.0;
-const SOIL_COHESION_PA: f32 = 0.0;
-const SOIL_HARDENING: f32 = 0.0;
-const SAND_YOUNGS_MODULUS_PA: f32 = 7.0e2;
-const SAND_POISSON_RATIO: f32 = 0.25;
-const SAND_FRICTION_DEG: f32 = 34.0;
-const SAND_COHESION_PA: f32 = 0.0;
-const SAND_HARDENING: f32 = 0.0;
-const GRANULAR_TENSION_CLAMP_PA: f32 = 0.0;
-const COUPLING_NORMAL_STIFFNESS: f32 = 0.55;
-const COUPLING_TANGENT_DRAG: f32 = 0.30;
-const COUPLING_FRICTION: f32 = 0.45;
-const COUPLING_MAX_IMPULSE_RATIO: f32 = 0.50;
 
 /// Ensure GPU upload source (`ContinuumParticleWorld`) is seeded from `ParticleWorld`.
 ///
@@ -208,10 +189,11 @@ pub fn prepare_terrain_upload(
     upload.upload_terrain = true;
 }
 
-/// System: update MpmGpuParamsRequest from SolverParams and simulation state.
+/// System: update MpmGpuParamsRequest from SolverParams, simulation state, and PhysicsParams asset.
 pub fn prepare_gpu_params(
     control: Res<MpmGpuControl>,
     solver_params: Res<SolverParams>,
+    active_params: Res<ActivePhysicsParams>,
     mut params_req: ResMut<MpmGpuParamsRequest>,
     continuum: Res<ContinuumParticleWorld>,
 ) {
@@ -220,19 +202,20 @@ pub fn prepare_gpu_params(
     }
     let layout = world_grid_layout();
     let h = CELL_SIZE_M;
+    let p = &active_params.0;
     let soil = drucker_prager_params(
-        SOIL_YOUNGS_MODULUS_PA,
-        SOIL_POISSON_RATIO,
-        SOIL_FRICTION_DEG,
-        SOIL_COHESION_PA,
-        SOIL_HARDENING,
+        p.soil.youngs_modulus_pa,
+        p.soil.poisson_ratio,
+        p.soil.friction_deg,
+        p.soil.cohesion_pa,
+        p.soil.hardening,
     );
     let sand = drucker_prager_params(
-        SAND_YOUNGS_MODULUS_PA,
-        SAND_POISSON_RATIO,
-        SAND_FRICTION_DEG,
-        SAND_COHESION_PA,
-        SAND_HARDENING,
+        p.sand.youngs_modulus_pa,
+        p.sand.poisson_ratio,
+        p.sand.friction_deg,
+        p.sand.cohesion_pa,
+        p.sand.hardening,
     );
     // Keep GPU params in parity with CPU MPM setup in solver/step.rs.
     let boundary_threshold_m =
@@ -242,20 +225,20 @@ pub fn prepare_gpu_params(
         dt: solver_params.fixed_dt,
         gx: 0.0,
         gy: -9.81,
-        rho0: MPM_TARGET_RHO0,
-        bulk_modulus: MPM_TARGET_RHO0 * MPM_TARGET_SOUND_SPEED_MPS * MPM_TARGET_SOUND_SPEED_MPS,
+        rho0: p.water.rho0,
+        bulk_modulus: p.water.rho0 * p.water.sound_speed_mps * p.water.sound_speed_mps,
         h,
         grid_origin_x: layout.origin.x,
         grid_origin_y: layout.origin.y,
         grid_width: layout.dims.x,
         grid_height: layout.dims.y,
         particle_count: continuum.len() as u32,
-        j_min: 0.6,
-        j_max: 1.4,
-        c_max_norm: 80.0,
+        j_min: p.deformation.j_min,
+        j_max: p.deformation.j_max,
+        c_max_norm: p.deformation.c_max_norm,
         sdf_velocity_threshold_m: boundary_threshold_m,
-        boundary_friction_water: BOUNDARY_FRICTION_WATER,
-        boundary_friction_granular: BOUNDARY_FRICTION_GRANULAR,
+        boundary_friction_water: p.boundary.water,
+        boundary_friction_granular: p.boundary.granular,
         _pad_friction: 0,
         dp_lambda_soil: soil.lambda,
         dp_mu_soil: soil.mu,
@@ -267,13 +250,13 @@ pub fn prepare_gpu_params(
         dp_alpha_sand: sand.alpha,
         dp_k_sand: sand.k,
         dp_hardening_sand: sand.hardening,
-        granular_tensile_clamp: GRANULAR_TENSION_CLAMP_PA,
-        coupling_normal_stiffness: COUPLING_NORMAL_STIFFNESS,
-        coupling_tangent_drag: COUPLING_TANGENT_DRAG,
-        coupling_friction: COUPLING_FRICTION,
-        coupling_max_impulse_ratio: COUPLING_MAX_IMPULSE_RATIO,
-        alpha_apic_water: 0.95,
-        alpha_apic_granular: 0.78,
+        granular_tensile_clamp: p.granular_tensile_clamp,
+        coupling_normal_stiffness: p.coupling.normal_stiffness,
+        coupling_tangent_drag: p.coupling.tangent_drag,
+        coupling_friction: p.coupling.friction,
+        coupling_max_impulse_ratio: p.coupling.max_impulse_ratio,
+        alpha_apic_water: p.apic.water,
+        alpha_apic_granular: p.apic.granular,
         _pad: [0; 1],
     };
 }
