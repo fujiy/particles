@@ -25,11 +25,12 @@ impl Default for MaterialParams {
 
 const REST_DENSITY: f32 = 1000.0;
 
-const WATER_LIQUID_PARTICLES_PER_CELL: u32 = 4;
+const PARTICLES_PER_CELL: u32 = 16;
+const WATER_LIQUID_PARTICLES_PER_CELL: u32 = PARTICLES_PER_CELL;
 const SOLID_PARTICLES_PER_CELL: u32 = 1;
-const STONE_GRANULAR_PARTICLES_PER_CELL: u32 = 4;
-const SOIL_GRANULAR_PARTICLES_PER_CELL: u32 = 4;
-const SAND_GRANULAR_PARTICLES_PER_CELL: u32 = 4;
+const STONE_GRANULAR_PARTICLES_PER_CELL: u32 = PARTICLES_PER_CELL;
+const SOIL_GRANULAR_PARTICLES_PER_CELL: u32 = PARTICLES_PER_CELL;
+const SAND_GRANULAR_PARTICLES_PER_CELL: u32 = PARTICLES_PER_CELL;
 
 const fn square_grid_particles_axis(particles_per_cell: u32) -> f32 {
     match particles_per_cell {
@@ -37,6 +38,7 @@ const fn square_grid_particles_axis(particles_per_cell: u32) -> f32 {
         4 => 2.0,
         9 => 3.0,
         16 => 4.0,
+        256 => 16.0,
         _ => 1.0,
     }
 }
