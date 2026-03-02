@@ -8,8 +8,9 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Buffer, BufferDescriptor, BufferUsages};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bytemuck::cast_slice;
+use std::mem::size_of;
 
-use super::buffers::{GpuGridLayout, GpuMpmParams, GpuParticle};
+use super::buffers::{GpuGridLayout, GpuGridNode, GpuMpmParams, GpuParticle};
 use crate::physics::world::constants::{
     CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };
@@ -40,13 +41,13 @@ pub struct MpmGpuBuffers {
     /// Layout of the single-resolution grid.
     pub layout: GpuGridLayout,
 
-    /// Params uniform buffer (80 bytes).
+    /// Params uniform buffer.
     pub params_buf: Buffer,
 
-    /// Particle buffer: MAX_PARTICLES * 72 bytes.
+    /// Particle buffer.
     pub particle_buf: Buffer,
 
-    /// Grid buffer: node_count * 16 bytes.
+    /// Grid buffer.
     pub grid_buf: Buffer,
 
     /// Terrain SDF buffer: node_count * 4 bytes (f32 per node).
@@ -72,21 +73,21 @@ impl MpmGpuBuffers {
 
         let params_buf = device.create_buffer(&BufferDescriptor {
             label: Some("mpm_params"),
-            size: 80,
+            size: size_of::<GpuMpmParams>() as u64,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let particle_buf = device.create_buffer(&BufferDescriptor {
             label: Some("mpm_particles"),
-            size: MAX_PARTICLES as u64 * 72,
+            size: MAX_PARTICLES as u64 * size_of::<GpuParticle>() as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 
         let grid_buf = device.create_buffer(&BufferDescriptor {
             label: Some("mpm_grid"),
-            size: node_count * 16,
+            size: node_count * size_of::<GpuGridNode>() as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -108,7 +109,7 @@ impl MpmGpuBuffers {
         // Readback buffer: one GpuParticle per max particle slot
         let readback_buf = device.create_buffer(&BufferDescriptor {
             label: Some("mpm_readback"),
-            size: MAX_PARTICLES as u64 * 72,
+            size: MAX_PARTICLES as u64 * size_of::<GpuParticle>() as u64,
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });

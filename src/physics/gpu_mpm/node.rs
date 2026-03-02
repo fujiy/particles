@@ -9,6 +9,7 @@ use bevy::render::render_resource::{
     BindGroupEntries, CachedPipelineState, ComputePassDescriptor, PipelineCache,
 };
 use bevy::render::renderer::RenderContext;
+use std::mem::size_of;
 
 use super::gpu_resources::MpmGpuBuffers;
 use super::gpu_resources::MpmGpuControl;
@@ -214,7 +215,7 @@ impl Node for MpmComputeNode {
 
         // Copy particle buffer to readback buffer each frame.
         // The copy size covers only the active particles.
-        if control.readback_enabled {
+        if control.readback_enabled && run_req.enabled && run_req.substeps > 0 {
             let can_copy = world
                 .get_resource::<GpuReadbackState>()
                 .map(|state| !state.mapped)
@@ -228,7 +229,8 @@ impl Node for MpmComputeNode {
             if frame % interval != 0 {
                 return Ok(());
             }
-            let particle_byte_size = particle_count as u64 * 72;
+            let particle_byte_size =
+                particle_count as u64 * size_of::<super::buffers::GpuParticle>() as u64;
             render_context.command_encoder().copy_buffer_to_buffer(
                 &buffers.particle_buf,
                 0,

@@ -113,9 +113,11 @@ struct WaterDotGpuResources {
     layout: DotGridLayout,
     params_buf: Buffer,
     fallback_particle_buf: Buffer,
-    density_atomic_buf: Buffer,
+    density_atomic_total_buf: Buffer,
+    density_atomic_granular_buf: Buffer,
     blur_tmp_buf: Buffer,
-    blurred_density_buf: Buffer,
+    blurred_density_total_buf: Buffer,
+    blurred_density_granular_buf: Buffer,
 }
 
 impl WaterDotGpuResources {
@@ -144,8 +146,10 @@ struct WaterDotPreprocessPipelines {
     layout: BindGroupLayout,
     clear_pipeline: CachedComputePipelineId,
     splat_pipeline: CachedComputePipelineId,
-    blur_x_pipeline: CachedComputePipelineId,
-    blur_y_pipeline: CachedComputePipelineId,
+    blur_x_total_pipeline: CachedComputePipelineId,
+    blur_y_total_pipeline: CachedComputePipelineId,
+    blur_x_granular_pipeline: CachedComputePipelineId,
+    blur_y_granular_pipeline: CachedComputePipelineId,
 }
 
 #[derive(Resource)]
@@ -234,8 +238,14 @@ fn init_water_dot_gpu_compute_resources(
         mapped_at_creation: false,
     });
 
-    let density_atomic_buf = render_device.create_buffer(&BufferDescriptor {
-        label: Some("water_dot_density_atomic"),
+    let density_atomic_total_buf = render_device.create_buffer(&BufferDescriptor {
+        label: Some("water_dot_density_atomic_total"),
+        size: dot_count * 4,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let density_atomic_granular_buf = render_device.create_buffer(&BufferDescriptor {
+        label: Some("water_dot_density_atomic_granular"),
         size: dot_count * 4,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
@@ -248,8 +258,14 @@ fn init_water_dot_gpu_compute_resources(
         mapped_at_creation: false,
     });
 
-    let blurred_density_buf = render_device.create_buffer(&BufferDescriptor {
-        label: Some("water_dot_blurred_density"),
+    let blurred_density_total_buf = render_device.create_buffer(&BufferDescriptor {
+        label: Some("water_dot_blurred_density_total"),
+        size: dot_count * 4,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let blurred_density_granular_buf = render_device.create_buffer(&BufferDescriptor {
+        label: Some("water_dot_blurred_density_granular"),
         size: dot_count * 4,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
@@ -259,9 +275,11 @@ fn init_water_dot_gpu_compute_resources(
         layout,
         params_buf,
         fallback_particle_buf,
-        density_atomic_buf,
+        density_atomic_total_buf,
+        density_atomic_granular_buf,
         blur_tmp_buf,
-        blurred_density_buf,
+        blurred_density_total_buf,
+        blurred_density_granular_buf,
     });
 
     let entries = BindGroupLayoutEntries::sequential(
@@ -269,6 +287,8 @@ fn init_water_dot_gpu_compute_resources(
         (
             uniform_buffer_sized(false, None),
             storage_buffer_read_only_sized(false, None),
+            storage_buffer_sized(false, None),
+            storage_buffer_sized(false, None),
             storage_buffer_sized(false, None),
             storage_buffer_sized(false, None),
             storage_buffer_sized(false, None),
@@ -301,8 +321,8 @@ fn init_water_dot_gpu_compute_resources(
         entry_point: Some("splat_particles".into()),
         zero_initialize_workgroup_memory: false,
     });
-    let blur_x_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_x".into()),
+    let blur_x_total_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("water_dot_blur_x_total".into()),
         layout: vec![BindGroupLayoutDescriptor::new(
             "water_dot_preprocess_layout",
             &*entries,
@@ -310,28 +330,56 @@ fn init_water_dot_gpu_compute_resources(
         push_constant_ranges: vec![],
         shader: shader.clone(),
         shader_defs: vec![],
-        entry_point: Some("blur_x".into()),
+        entry_point: Some("blur_x_total".into()),
         zero_initialize_workgroup_memory: false,
     });
-    let blur_y_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_y".into()),
+    let blur_y_total_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("water_dot_blur_y_total".into()),
         layout: vec![BindGroupLayoutDescriptor::new(
             "water_dot_preprocess_layout",
             &*entries,
         )],
         push_constant_ranges: vec![],
-        shader,
+        shader: shader.clone(),
         shader_defs: vec![],
-        entry_point: Some("blur_y".into()),
+        entry_point: Some("blur_y_total".into()),
         zero_initialize_workgroup_memory: false,
     });
+    let blur_x_granular_pipeline =
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("water_dot_blur_x_granular".into()),
+            layout: vec![BindGroupLayoutDescriptor::new(
+                "water_dot_preprocess_layout",
+                &*entries,
+            )],
+            push_constant_ranges: vec![],
+            shader: shader.clone(),
+            shader_defs: vec![],
+            entry_point: Some("blur_x_granular".into()),
+            zero_initialize_workgroup_memory: false,
+        });
+    let blur_y_granular_pipeline =
+        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("water_dot_blur_y_granular".into()),
+            layout: vec![BindGroupLayoutDescriptor::new(
+                "water_dot_preprocess_layout",
+                &*entries,
+            )],
+            push_constant_ranges: vec![],
+            shader,
+            shader_defs: vec![],
+            entry_point: Some("blur_y_granular".into()),
+            zero_initialize_workgroup_memory: false,
+        });
 
     commands.insert_resource(WaterDotPreprocessPipelines {
         layout,
         clear_pipeline,
         splat_pipeline,
-        blur_x_pipeline,
-        blur_y_pipeline,
+        blur_x_total_pipeline,
+        blur_y_total_pipeline,
+        blur_x_granular_pipeline,
+        blur_y_granular_pipeline,
     });
 }
 
@@ -343,6 +391,7 @@ fn init_water_dot_gpu_render_pipeline(mut commands: Commands, asset_server: Res<
             (
                 uniform_buffer::<ViewUniform>(true),
                 uniform_buffer_sized(false, core::num::NonZeroU64::new(64)),
+                storage_buffer_read_only_sized(false, None),
                 storage_buffer_read_only_sized(false, None),
             ),
         ),
@@ -424,9 +473,13 @@ impl Node for WaterDotPreprocessNode {
             std::sync::atomic::AtomicBool::new(false);
         static SPLAT_WARNED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
-        static BLUR_X_WARNED: std::sync::atomic::AtomicBool =
+        static BLUR_X_TOTAL_WARNED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
-        static BLUR_Y_WARNED: std::sync::atomic::AtomicBool =
+        static BLUR_Y_TOTAL_WARNED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        static BLUR_X_GRANULAR_WARNED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        static BLUR_Y_GRANULAR_WARNED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
 
         let Some(clear_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.clear_pipeline)
@@ -449,22 +502,46 @@ impl Node for WaterDotPreprocessNode {
             );
             return Ok(());
         };
-        let Some(blur_x_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.blur_x_pipeline)
+        let Some(blur_x_total_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipelines.blur_x_total_pipeline)
         else {
             warn_missing_compute_pipeline_once(
-                &BLUR_X_WARNED,
-                "blur_x",
-                pipelines.blur_x_pipeline,
+                &BLUR_X_TOTAL_WARNED,
+                "blur_x_total",
+                pipelines.blur_x_total_pipeline,
                 pipeline_cache,
             );
             return Ok(());
         };
-        let Some(blur_y_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.blur_y_pipeline)
+        let Some(blur_y_total_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipelines.blur_y_total_pipeline)
         else {
             warn_missing_compute_pipeline_once(
-                &BLUR_Y_WARNED,
-                "blur_y",
-                pipelines.blur_y_pipeline,
+                &BLUR_Y_TOTAL_WARNED,
+                "blur_y_total",
+                pipelines.blur_y_total_pipeline,
+                pipeline_cache,
+            );
+            return Ok(());
+        };
+        let Some(blur_x_granular_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipelines.blur_x_granular_pipeline)
+        else {
+            warn_missing_compute_pipeline_once(
+                &BLUR_X_GRANULAR_WARNED,
+                "blur_x_granular",
+                pipelines.blur_x_granular_pipeline,
+                pipeline_cache,
+            );
+            return Ok(());
+        };
+        let Some(blur_y_granular_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipelines.blur_y_granular_pipeline)
+        else {
+            warn_missing_compute_pipeline_once(
+                &BLUR_Y_GRANULAR_WARNED,
+                "blur_y_granular",
+                pipelines.blur_y_granular_pipeline,
                 pipeline_cache,
             );
             return Ok(());
@@ -482,9 +559,11 @@ impl Node for WaterDotPreprocessNode {
             &BindGroupEntries::sequential((
                 resources.params_buf.as_entire_binding(),
                 particle_binding,
-                resources.density_atomic_buf.as_entire_binding(),
+                resources.density_atomic_total_buf.as_entire_binding(),
+                resources.density_atomic_granular_buf.as_entire_binding(),
                 resources.blur_tmp_buf.as_entire_binding(),
-                resources.blurred_density_buf.as_entire_binding(),
+                resources.blurred_density_total_buf.as_entire_binding(),
+                resources.blurred_density_granular_buf.as_entire_binding(),
             )),
         );
 
@@ -516,20 +595,40 @@ impl Node for WaterDotPreprocessNode {
 
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_x"),
+                label: Some("water_dot_blur_x_total"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(blur_x_pipeline);
+            pass.set_pipeline(blur_x_total_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dot_workgroups, 1, 1);
         }
 
         {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_y"),
+                label: Some("water_dot_blur_y_total"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(blur_y_pipeline);
+            pass.set_pipeline(blur_y_total_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(dot_workgroups, 1, 1);
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("water_dot_blur_x_granular"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(blur_x_granular_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(dot_workgroups, 1, 1);
+        }
+
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("water_dot_blur_y_granular"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(blur_y_granular_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dot_workgroups, 1, 1);
         }
@@ -583,7 +682,8 @@ impl ViewNode for WaterDotGpuNode {
             &BindGroupEntries::sequential((
                 view_binding,
                 resources.params_buf.as_entire_binding(),
-                resources.blurred_density_buf.as_entire_binding(),
+                resources.blurred_density_total_buf.as_entire_binding(),
+                resources.blurred_density_granular_buf.as_entire_binding(),
             )),
         );
 

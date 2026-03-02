@@ -13,14 +13,13 @@ use super::gpu_resources::{
 use super::readback::GpuReadbackResult;
 use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, particle_radius_m};
 use crate::physics::solver::mpm_water::{
-    MpmTerrainBoundaryParams, MpmWaterParams, rebuild_continuum_from_particle_world,
-    sync_continuum_to_particle_world,
+    MpmWaterParams, is_mpm_managed_particle,
+    rebuild_continuum_from_particle_world, sync_continuum_to_particle_world,
 };
 use crate::physics::solver::params_types::SolverParams;
 use crate::physics::state::{ReplayState, SimulationState};
 use crate::physics::world::constants::CELL_SIZE_M;
 use crate::physics::world::continuum::ContinuumParticleWorld;
-use crate::physics::world::particle::ParticleMaterial;
 use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
 
@@ -29,8 +28,25 @@ const SDF_INF: f32 = 1.0e9;
 const MPM_TARGET_SOUND_SPEED_MPS: f32 = 16.0;
 const MPM_TARGET_RHO0: f32 = 1_000.0;
 const MPM_BOUNDARY_THRESHOLD_SCALE_DIAMETER: f32 = 0.01;
-const MPM_BOUNDARY_DEEP_PUSH_GAIN_PER_S: f32 = 0.1;
-const MPM_BOUNDARY_DEEP_PUSH_SPEED_CAP_MPS: f32 = 1.0;
+/// Coulomb friction μ_b for water at terrain boundary [Eq.29, physics.md].
+const BOUNDARY_FRICTION_WATER: f32 = 0.3;
+/// Coulomb friction μ_b for granular at terrain boundary [Eq.29, physics.md].
+const BOUNDARY_FRICTION_GRANULAR: f32 = 0.6;
+const SOIL_YOUNGS_MODULUS_PA: f32 = 8.0e2;
+const SOIL_POISSON_RATIO: f32 = 0.28;
+const SOIL_FRICTION_DEG: f32 = 36.0;
+const SOIL_COHESION_PA: f32 = 0.0;
+const SOIL_HARDENING: f32 = 0.0;
+const SAND_YOUNGS_MODULUS_PA: f32 = 7.0e2;
+const SAND_POISSON_RATIO: f32 = 0.25;
+const SAND_FRICTION_DEG: f32 = 34.0;
+const SAND_COHESION_PA: f32 = 0.0;
+const SAND_HARDENING: f32 = 0.0;
+const GRANULAR_TENSION_CLAMP_PA: f32 = 0.0;
+const COUPLING_NORMAL_STIFFNESS: f32 = 0.55;
+const COUPLING_TANGENT_DRAG: f32 = 0.30;
+const COUPLING_FRICTION: f32 = 0.45;
+const COUPLING_MAX_IMPULSE_RATIO: f32 = 0.50;
 
 /// Ensure GPU upload source (`ContinuumParticleWorld`) is seeded from `ParticleWorld`.
 ///
@@ -46,12 +62,12 @@ pub fn ensure_continuum_seed_from_particle_world(
         return;
     }
 
-    let water_count = particle_world
+    let mpm_count = particle_world
         .materials()
         .iter()
-        .filter(|&&mat| matches!(mat, ParticleMaterial::WaterLiquid))
+        .filter(|&&mat| is_mpm_managed_particle(mat))
         .count();
-    if water_count == 0 {
+    if mpm_count == 0 {
         if continuum.is_empty() {
             return;
         }
@@ -59,7 +75,7 @@ pub fn ensure_continuum_seed_from_particle_world(
         return;
     }
 
-    let needs_seed = continuum.len() != water_count
+    let needs_seed = continuum.len() != mpm_count
         || (continuum.is_empty() && particle_world.particle_count() > 0);
     if !needs_seed {
         return;
@@ -81,6 +97,7 @@ pub fn ensure_continuum_seed_from_particle_world(
 /// Called when particles are modified (spawn/clear). Marks full particle upload.
 pub fn prepare_particle_upload(
     control: Res<MpmGpuControl>,
+    particle_world: Res<ParticleWorld>,
     continuum: Res<ContinuumParticleWorld>,
     mut upload: ResMut<MpmGpuUploadRequest>,
     mut sim_state: ResMut<SimulationState>,
@@ -93,7 +110,15 @@ pub fn prepare_particle_upload(
         upload.particles.clear();
         return;
     }
-    sim_state.gpu_mpm_active = sim_state.mpm_enabled && !continuum.is_empty();
+    let mpm_count = particle_world_mpm_count(&particle_world);
+    let unmanaged_count = particle_world
+        .materials()
+        .iter()
+        .filter(|&&material| !is_mpm_managed_particle(material))
+        .count();
+    // Keep GPU MPM on a single-route path: either all dynamic particles are MPM-managed,
+    // or we stay on the legacy CPU particle step to avoid partially frozen worlds.
+    sim_state.gpu_mpm_active = sim_state.mpm_enabled && mpm_count > 0 && unmanaged_count == 0;
     // Ensure at least one upload after startup/scenario load even when change detection
     // is not observed in this system's frame.
     if !continuum.is_changed() && !upload.particles.is_empty() {
@@ -108,6 +133,7 @@ pub fn prepare_particle_upload(
                 continuum.v0[i],
                 continuum.f[i],
                 continuum.c[i],
+                continuum.jp[i],
                 continuum.material_id[i],
             )
         })
@@ -194,7 +220,20 @@ pub fn prepare_gpu_params(
     }
     let layout = world_grid_layout();
     let h = CELL_SIZE_M;
-    let boundary = MpmTerrainBoundaryParams::default();
+    let soil = drucker_prager_params(
+        SOIL_YOUNGS_MODULUS_PA,
+        SOIL_POISSON_RATIO,
+        SOIL_FRICTION_DEG,
+        SOIL_COHESION_PA,
+        SOIL_HARDENING,
+    );
+    let sand = drucker_prager_params(
+        SAND_YOUNGS_MODULUS_PA,
+        SAND_POISSON_RATIO,
+        SAND_FRICTION_DEG,
+        SAND_COHESION_PA,
+        SAND_HARDENING,
+    );
     // Keep GPU params in parity with CPU MPM setup in solver/step.rs.
     let boundary_threshold_m =
         particle_radius_m(DEFAULT_MATERIAL_PARAMS) * MPM_BOUNDARY_THRESHOLD_SCALE_DIAMETER;
@@ -215,10 +254,27 @@ pub fn prepare_gpu_params(
         j_max: 1.4,
         c_max_norm: 80.0,
         sdf_velocity_threshold_m: boundary_threshold_m,
-        deep_push_gain_per_s: MPM_BOUNDARY_DEEP_PUSH_GAIN_PER_S,
-        deep_push_speed_cap_mps: MPM_BOUNDARY_DEEP_PUSH_SPEED_CAP_MPS,
-        tangential_damping: boundary.tangential_damping,
-        _pad: [0; 2],
+        boundary_friction_water: BOUNDARY_FRICTION_WATER,
+        boundary_friction_granular: BOUNDARY_FRICTION_GRANULAR,
+        _pad_friction: 0,
+        dp_lambda_soil: soil.lambda,
+        dp_mu_soil: soil.mu,
+        dp_alpha_soil: soil.alpha,
+        dp_k_soil: soil.k,
+        dp_hardening_soil: soil.hardening,
+        dp_lambda_sand: sand.lambda,
+        dp_mu_sand: sand.mu,
+        dp_alpha_sand: sand.alpha,
+        dp_k_sand: sand.k,
+        dp_hardening_sand: sand.hardening,
+        granular_tensile_clamp: GRANULAR_TENSION_CLAMP_PA,
+        coupling_normal_stiffness: COUPLING_NORMAL_STIFFNESS,
+        coupling_tangent_drag: COUPLING_TANGENT_DRAG,
+        coupling_friction: COUPLING_FRICTION,
+        coupling_max_impulse_ratio: COUPLING_MAX_IMPULSE_RATIO,
+        alpha_apic_water: 0.95,
+        alpha_apic_granular: 0.78,
+        _pad: [0; 1],
     };
 }
 
@@ -320,6 +376,7 @@ pub fn apply_gpu_readback(
             continuum.v[i] = Vec2::from_array(p.v);
             continuum.f[i] = Mat2::from_cols(Vec2::new(p.f[0], p.f[1]), Vec2::new(p.f[2], p.f[3]));
             continuum.c[i] = Mat2::from_cols(Vec2::new(p.c[0], p.c[1]), Vec2::new(p.c[2], p.c[3]));
+            continuum.jp[i] = p.jp.max(1e-6);
         }
     }
     // Reflect readback positions to ParticleWorld so particle overlay can render GPU data.
@@ -379,4 +436,49 @@ fn sample_terrain_sdf_for_gpu(terrain: &TerrainWorld, world_pos: Vec2) -> f32 {
         best = SDF_QUERY_RADIUS_CELLS as f32 * h;
     }
     if inside { -best } else { best }
+}
+
+fn particle_world_mpm_count(particles: &ParticleWorld) -> usize {
+    particles
+        .materials()
+        .iter()
+        .filter(|&&material| is_mpm_managed_particle(material))
+        .count()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct GpuDruckerPragerParams {
+    lambda: f32,
+    mu: f32,
+    alpha: f32,
+    k: f32,
+    hardening: f32,
+}
+
+fn drucker_prager_params(
+    youngs_modulus: f32,
+    poisson_ratio: f32,
+    friction_deg: f32,
+    cohesion_pa: f32,
+    hardening: f32,
+) -> GpuDruckerPragerParams {
+    let e = youngs_modulus.max(1.0);
+    let nu = poisson_ratio.clamp(0.0, 0.45);
+    let mu = e / (2.0 * (1.0 + nu).max(1e-6));
+    let lambda = e * nu / ((1.0 + nu) * (1.0 - 2.0 * nu)).max(1e-6);
+
+    let phi = friction_deg.to_radians().clamp(0.0, 1.3);
+    let sin_phi = phi.sin();
+    let cos_phi = phi.cos();
+    let denom = (3.0 - sin_phi).max(1e-4);
+    let alpha = (2.0 * sin_phi) / (3.0_f32.sqrt() * denom);
+    let k = (6.0 * cohesion_pa.max(0.0) * cos_phi) / (3.0_f32.sqrt() * denom);
+
+    GpuDruckerPragerParams {
+        lambda,
+        mu,
+        alpha,
+        k,
+        hardening: hardening.max(0.0),
+    }
 }

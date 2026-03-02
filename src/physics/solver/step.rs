@@ -2,14 +2,16 @@ use std::time::Instant;
 
 use bevy::log::tracing;
 
-use super::mpm_water::{MpmWaterParams, rebuild_continuum_from_particle_world};
+use super::mpm_water::{
+    MpmWaterParams, is_mpm_managed_particle, rebuild_continuum_from_particle_world,
+};
 use super::terrain_boundary::TerrainBoundarySampler;
 use super::types::StepSimulationTiming;
 use crate::physics::profiler::process_cpu_time_seconds;
 use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::grid::{GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
-use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
+use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::TerrainWorld;
 
 pub(crate) fn step_simulation_once(
@@ -25,19 +27,19 @@ pub(crate) fn step_simulation_once(
     terrain_boundary_radius_m: f32,
 ) -> StepSimulationTiming {
     // CPU-side MPM has been removed. Keep continuum/grid bookkeeping consistent
-    // so GPU MPM upload sources do not retain stale data when water disappears.
-    let water_particle_count = particle_world
+    // so GPU MPM upload sources do not retain stale data when MPM-managed particles disappear.
+    let mpm_particle_count = particle_world
         .materials()
         .iter()
-        .filter(|&&m| matches!(m, ParticleMaterial::WaterLiquid))
+        .filter(|&&material| is_mpm_managed_particle(material))
         .count();
-    if water_particle_count == 0 {
+    if mpm_particle_count == 0 {
         continuum_world.clear();
         mpm_block_index_table.clear();
         for block in grid_hierarchy.blocks_mut() {
             block.clear_nodes();
         }
-    } else if continuum_world.len() != water_particle_count {
+    } else if continuum_world.len() != mpm_particle_count {
         let _ = rebuild_continuum_from_particle_world(
             particle_world,
             continuum_world,

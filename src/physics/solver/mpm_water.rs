@@ -6,7 +6,7 @@ use rayon::prelude::*;
 
 use super::terrain_boundary::{TerrainBoundarySample, TerrainBoundarySampler};
 use crate::physics::profiler::process_cpu_time_seconds;
-use crate::physics::world::continuum::ContinuumParticleWorld;
+use crate::physics::world::continuum::{ContinuumParticleWorld, ContinuumPhase};
 use crate::physics::world::grid::{GridBlock, GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::kernel::evaluate_quadratic_bspline_stencil_2d;
 use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
@@ -144,6 +144,19 @@ pub fn cfl_violated(params: &MpmWaterParams, h_b: f32, max_particle_speed_mps: f
     cfl_ratio(params, h_b, max_particle_speed_mps) > params.cfl_limit
 }
 
+pub fn continuum_phase_for_particle(material: ParticleMaterial) -> Option<ContinuumPhase> {
+    match material {
+        ParticleMaterial::WaterLiquid => Some(ContinuumPhase::Water),
+        ParticleMaterial::SoilGranular => Some(ContinuumPhase::GranularSoil),
+        ParticleMaterial::SandGranular => Some(ContinuumPhase::GranularSand),
+        _ => None,
+    }
+}
+
+pub fn is_mpm_managed_particle(material: ParticleMaterial) -> bool {
+    continuum_phase_for_particle(material).is_some()
+}
+
 pub fn rebuild_continuum_from_particle_world(
     particles: &ParticleWorld,
     continuum: &mut ContinuumParticleWorld,
@@ -157,10 +170,17 @@ pub fn rebuild_continuum_from_particle_world(
         .zip(particles.vel.iter())
         .zip(particles.masses().iter().zip(particles.materials().iter()))
     {
-        if !matches!(material, ParticleMaterial::WaterLiquid) {
+        let Some(phase) = continuum_phase_for_particle(material) else {
             continue;
-        }
-        continuum.spawn_water_particle(position, velocity, mass, mass.max(0.0) * inv_rho0);
+        };
+        continuum.spawn_particle(
+            position,
+            velocity,
+            mass,
+            mass.max(0.0) * inv_rho0,
+            phase,
+            1.0,
+        );
     }
     continuum.len()
 }
@@ -169,22 +189,16 @@ pub fn sync_continuum_to_particle_world(
     particles: &mut ParticleWorld,
     continuum: &ContinuumParticleWorld,
 ) -> bool {
-    let water_indices: Vec<usize> = particles
+    let mpm_indices: Vec<usize> = particles
         .materials()
         .iter()
         .enumerate()
-        .filter_map(|(i, &material)| {
-            if matches!(material, ParticleMaterial::WaterLiquid) {
-                Some(i)
-            } else {
-                None
-            }
-        })
+        .filter_map(|(i, &material)| is_mpm_managed_particle(material).then_some(i))
         .collect();
-    if water_indices.len() != continuum.len() {
+    if mpm_indices.len() != continuum.len() {
         return false;
     }
-    for (continuum_index, &particle_index) in water_indices.iter().enumerate() {
+    for (continuum_index, &particle_index) in mpm_indices.iter().enumerate() {
         particles.prev_pos[particle_index] = particles.pos[particle_index];
         particles.pos[particle_index] = continuum.x[continuum_index];
         particles.vel[particle_index] = continuum.v[continuum_index];
@@ -1483,7 +1497,7 @@ mod tests {
     };
     use crate::physics::solver::terrain_boundary::TerrainBoundarySampler;
     use crate::physics::world::constants::CELL_SIZE_M;
-    use crate::physics::world::continuum::ContinuumMaterial;
+    use crate::physics::world::continuum::ContinuumPhase;
     use crate::physics::world::grid::{GridBlock, MpmBlockIndexTable};
     use crate::physics::world::particle::ParticleWorld;
     use crate::physics::world::terrain::{TerrainCell, TerrainWorld, cell_to_world_center};
@@ -1503,14 +1517,16 @@ mod tests {
             Vec2::ZERO,
             1.0,
             1.0 / 1_000.0,
-            ContinuumMaterial::Water,
+            ContinuumPhase::Water,
+            1.0,
         );
         particles.spawn_particle(
             Vec2::new(0.45, 0.25),
             Vec2::ZERO,
             1.0,
             1.0 / 1_000.0,
-            ContinuumMaterial::Water,
+            ContinuumPhase::Water,
+            1.0,
         );
         (particles, grid)
     }
@@ -1537,21 +1553,24 @@ mod tests {
             Vec2::new(0.6, 0.0),
             1.0,
             1.0 / 1_000.0,
-            ContinuumMaterial::Water,
+            ContinuumPhase::Water,
+            1.0,
         );
         particles.spawn_particle(
             Vec2::new(0.05, 0.25),
             Vec2::new(-0.2, 0.0),
             1.0,
             1.0 / 1_000.0,
-            ContinuumMaterial::Water,
+            ContinuumPhase::Water,
+            1.0,
         );
         particles.spawn_particle(
             Vec2::new(0.45, 0.35),
             Vec2::new(0.1, -0.2),
             1.0,
             1.0 / 1_000.0,
-            ContinuumMaterial::Water,
+            ContinuumPhase::Water,
+            1.0,
         );
         (particles, grid)
     }
@@ -1580,7 +1599,8 @@ mod tests {
             Vec2::ZERO,
             1.0,
             1.0 / 1_000.0,
-            ContinuumMaterial::Water,
+            ContinuumPhase::Water,
+            1.0,
         );
         (particles, grid)
     }
@@ -1620,7 +1640,8 @@ mod tests {
                             Vec2::new(vx, 0.0),
                             particle_mass,
                             rest_volume,
-                            ContinuumMaterial::Water,
+                            ContinuumPhase::Water,
+                            1.0,
                         );
                     }
                 }
@@ -1729,7 +1750,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_continuum_filters_water_particles_only() {
+    fn rebuild_continuum_filters_to_mpm_managed_particles_only() {
         let mut particles = ParticleWorld::default();
         particles
             .restore_from_snapshot(
@@ -1737,12 +1758,16 @@ mod tests {
                     Vec2::new(0.0, 0.0),
                     Vec2::new(1.0, 0.0),
                     Vec2::new(2.0, 0.0),
+                    Vec2::new(3.0, 0.0),
+                    Vec2::new(4.0, 0.0),
                 ],
-                vec![Vec2::ZERO; 3],
+                vec![Vec2::ZERO; 5],
                 vec![
                     ParticleMaterial::WaterLiquid,
                     ParticleMaterial::StoneSolid,
-                    ParticleMaterial::WaterLiquid,
+                    ParticleMaterial::SoilGranular,
+                    ParticleMaterial::SandGranular,
+                    ParticleMaterial::StoneGranular,
                 ],
             )
             .unwrap();
@@ -1752,14 +1777,15 @@ mod tests {
             &mut continuum,
             &MpmWaterParams::default(),
         );
-        assert_eq!(count, 2);
-        assert_eq!(continuum.len(), 2);
+        assert_eq!(count, 3);
+        assert_eq!(continuum.len(), 3);
         assert_eq!(continuum.x[0], Vec2::new(0.0, 0.0));
         assert_eq!(continuum.x[1], Vec2::new(2.0, 0.0));
+        assert_eq!(continuum.x[2], Vec2::new(3.0, 0.0));
     }
 
     #[test]
-    fn sync_continuum_updates_only_water_particles() {
+    fn sync_continuum_updates_only_mpm_managed_particles() {
         let mut particles = ParticleWorld::default();
         particles
             .restore_from_snapshot(
@@ -1767,19 +1793,36 @@ mod tests {
                     Vec2::new(0.0, 0.0),
                     Vec2::new(1.0, 0.0),
                     Vec2::new(2.0, 0.0),
+                    Vec2::new(3.0, 0.0),
+                    Vec2::new(4.0, 0.0),
                 ],
-                vec![Vec2::ZERO; 3],
+                vec![Vec2::ZERO; 5],
                 vec![
                     ParticleMaterial::WaterLiquid,
                     ParticleMaterial::StoneSolid,
-                    ParticleMaterial::WaterLiquid,
+                    ParticleMaterial::SoilGranular,
+                    ParticleMaterial::SandGranular,
+                    ParticleMaterial::StoneGranular,
                 ],
             )
             .unwrap();
 
         let mut continuum = ContinuumParticleWorld::default();
         continuum.spawn_water_particle(Vec2::new(5.0, 6.0), Vec2::new(1.0, 2.0), 1.0, 0.001);
-        continuum.spawn_water_particle(Vec2::new(7.0, 8.0), Vec2::new(3.0, 4.0), 1.0, 0.001);
+        continuum.spawn_granular_soil_particle(
+            Vec2::new(7.0, 8.0),
+            Vec2::new(3.0, 4.0),
+            1.0,
+            0.001,
+            1.0,
+        );
+        continuum.spawn_granular_sand_particle(
+            Vec2::new(9.0, 10.0),
+            Vec2::new(5.0, 6.0),
+            1.0,
+            0.001,
+            1.0,
+        );
 
         assert!(sync_continuum_to_particle_world(&mut particles, &continuum));
         assert_eq!(particles.pos[0], Vec2::new(5.0, 6.0));
@@ -1787,6 +1830,9 @@ mod tests {
         assert_eq!(particles.pos[1], Vec2::new(1.0, 0.0));
         assert_eq!(particles.pos[2], Vec2::new(7.0, 8.0));
         assert_eq!(particles.vel[2], Vec2::new(3.0, 4.0));
+        assert_eq!(particles.pos[3], Vec2::new(9.0, 10.0));
+        assert_eq!(particles.vel[3], Vec2::new(5.0, 6.0));
+        assert_eq!(particles.pos[4], Vec2::new(4.0, 0.0));
     }
 
     #[test]

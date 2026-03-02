@@ -13,8 +13,12 @@ fn clear_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     if idx >= total {
         return;
     }
-    grid[idx].px = 0.0;
-    grid[idx].py = 0.0;
-    grid[idx].mass = 0.0;
-    grid[idx].pad = 0.0;
+    grid[idx].water_px = 0.0;
+    grid[idx].water_py = 0.0;
+    grid[idx].water_mass = 0.0;
+    grid[idx].water_pad = 0.0;
+    grid[idx].granular_px = 0.0;
+    grid[idx].granular_py = 0.0;
+    grid[idx].granular_mass = 0.0;
+    grid[idx].granular_pad = 0.0;
 }

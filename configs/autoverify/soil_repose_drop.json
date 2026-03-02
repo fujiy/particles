@@ -1,0 +1,14 @@
+{
+  "mpm": {
+    "enabled": true,
+    "scenario_name": "soil_repose_drop",
+    "output_path": "artifacts/autoverify/soil_repose_drop.json",
+    "sample_material": "soil_granular",
+    "run_frames": 720,
+    "run_steps": 1600,
+    "min_avg_fps": 20.0,
+    "max_penetration_ratio": 0.08,
+    "min_mean_drop": 0.0
+  },
+  "gpu_readback_interval_frames": 1
+}

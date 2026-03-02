@@ -21,7 +21,8 @@ struct WaterDotParams {
 
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<uniform> params: WaterDotParams;
-@group(0) @binding(2) var<storage, read> blurred_density: array<f32>;
+@group(0) @binding(2) var<storage, read> blurred_density_total: array<f32>;
+@group(0) @binding(3) var<storage, read> blurred_density_granular: array<f32>;
 
 struct VertexOut {
     @builtin(position)
@@ -47,10 +48,16 @@ fn in_bounds(x: i32, y: i32) -> bool {
     return x >= 0 && y >= 0 && u32(x) < params.width && u32(y) < params.height;
 }
 
-fn sample_density(dot_cell: vec2<i32>) -> f32 {
+fn sample_density_total(dot_cell: vec2<i32>) -> f32 {
     let x = clamp(dot_cell.x, 0, i32(params.width) - 1);
     let y = clamp(dot_cell.y, 0, i32(params.height) - 1);
-    return blurred_density[dot_index(x, y)];
+    return blurred_density_total[dot_index(x, y)];
+}
+
+fn sample_density_granular(dot_cell: vec2<i32>) -> f32 {
+    let x = clamp(dot_cell.x, 0, i32(params.width) - 1);
+    let y = clamp(dot_cell.y, 0, i32(params.height) - 1);
+    return blurred_density_granular[dot_index(x, y)];
 }
 
 fn srgb_channel_to_linear(x: f32) -> f32 {
@@ -94,6 +101,20 @@ fn water_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
     return srgb8_to_linear(vec3<f32>(78.0 / 255.0, 167.0 / 255.0, 238.0 / 255.0));
 }
 
+fn granular_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
+    let idx = deterministic_palette_index(x + 31, y - 17, seed ^ 0x59du);
+    if idx == 0u {
+        return srgb8_to_linear(vec3<f32>(112.0 / 255.0, 86.0 / 255.0, 61.0 / 255.0));
+    }
+    if idx == 1u {
+        return srgb8_to_linear(vec3<f32>(126.0 / 255.0, 97.0 / 255.0, 69.0 / 255.0));
+    }
+    if idx == 2u {
+        return srgb8_to_linear(vec3<f32>(144.0 / 255.0, 112.0 / 255.0, 79.0 / 255.0));
+    }
+    return srgb8_to_linear(vec3<f32>(163.0 / 255.0, 128.0 / 255.0, 92.0 / 255.0));
+}
+
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
     let corner = quad_corner(vertex_index);
@@ -116,10 +137,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
 
     // Sample density per dot-cell (nearest) so edge decision is dot-stable.
-    let density = sample_density(dot_cell);
-    if density < params.density_threshold {
+    let total_density = sample_density_total(dot_cell);
+    if total_density < params.density_threshold {
         discard;
     }
+    let granular_density = sample_density_granular(dot_cell);
 
     // Keep each dot shape (square) with hard edge to avoid dark seam lines.
     let local = fract(dot_pos) - vec2<f32>(0.5, 0.5);
@@ -128,6 +150,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let color = water_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
+    let water_color = water_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
+    let granular_color = granular_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
+    let granular_mix = clamp(granular_density / max(total_density, 1.0e-6), 0.0, 1.0);
+    let color = mix(water_color, granular_color, granular_mix);
     return vec4<f32>(color, 1.0);
 }

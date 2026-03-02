@@ -20,8 +20,24 @@ struct MpmParams {
     deep_push_gain_per_s: f32,
     deep_push_speed_cap_mps: f32,
     tangential_damping: f32,
+    dp_lambda_soil: f32,
+    dp_mu_soil: f32,
+    dp_alpha_soil: f32,
+    dp_k_soil: f32,
+    dp_hardening_soil: f32,
+    dp_lambda_sand: f32,
+    dp_mu_sand: f32,
+    dp_alpha_sand: f32,
+    dp_k_sand: f32,
+    dp_hardening_sand: f32,
+    granular_tensile_clamp: f32,
+    coupling_normal_stiffness: f32,
+    coupling_tangent_drag: f32,
+    coupling_friction: f32,
+    coupling_max_impulse_ratio: f32,
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
 }
 
 struct GpuParticle {
@@ -37,10 +53,10 @@ struct GpuParticle {
     c_01: f32,
     c_10: f32,
     c_11: f32,
-    material_id: u32,
+    jp: f32,
+    phase_id: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 }
 
 @group(0) @binding(1) var<uniform> params: MpmParams;
@@ -64,9 +80,15 @@ fn quad_corner(vertex_index: u32) -> vec2<f32> {
     return vec2<f32>(-1.0,  1.0);
 }
 
-fn particle_color(material_id: u32) -> vec4<f32> {
-    if material_id == 0u {
-        return vec4<f32>(1.0, 1.0, 1.0, 0.92);
+fn particle_color(phase_id: u32) -> vec4<f32> {
+    if phase_id == 0u {
+        return vec4<f32>(0.30, 0.63, 0.95, 0.92);
+    }
+    if phase_id == 1u {
+        return vec4<f32>(0.76, 0.56, 0.38, 0.94);
+    }
+    if phase_id == 2u {
+        return vec4<f32>(0.86, 0.77, 0.56, 0.94);
     }
     return vec4<f32>(1.0, 1.0, 1.0, 0.92);
 }
@@ -85,7 +107,7 @@ fn vs_main(
     let world_xy = p.x + corner * r;
 
     out.clip_position = view.clip_from_world * vec4<f32>(world_xy.x, world_xy.y, 0.0, 1.0);
-    out.color = particle_color(p.material_id);
+    out.color = particle_color(p.phase_id);
     return out;
 }
 

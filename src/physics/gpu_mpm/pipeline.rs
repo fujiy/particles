@@ -65,7 +65,7 @@ impl FromWorld for MpmComputePipelines {
             ShaderStages::COMPUTE,
             (
                 binding_types::uniform_buffer_sized(false, None),
-                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
             ),
         );

@@ -106,6 +106,24 @@ pub struct ScenarioThresholds {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct GranularReposeAssertionSpec {
+    pub material: ParticleMaterial,
+    pub active_after_seconds: f32,
+    pub min_angle_deg: f32,
+    pub max_angle_deg: f32,
+    pub min_base_span_cells: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MaterialInteractionAssertionSpec {
+    pub active_after_seconds: f32,
+    pub primary_material: ParticleMaterial,
+    pub secondary_material: ParticleMaterial,
+    pub min_contact_ratio: f32,
+    pub require_primary_below_secondary: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct WaterSurfaceAssertionSpec {
     pub active_after_seconds: f32,
     pub basin_min_x: i32,
@@ -133,6 +151,8 @@ pub struct ScenarioSpec {
     pub step_count: usize,
     pub thresholds: ScenarioThresholds,
     pub water_surface_assertion: Option<WaterSurfaceAssertionSpec>,
+    pub granular_repose_assertion: Option<GranularReposeAssertionSpec>,
+    pub material_interaction_assertion: Option<MaterialInteractionAssertionSpec>,
 }
 
 #[derive(Clone, Debug)]
@@ -181,6 +201,8 @@ pub struct ScenarioMetrics {
     pub terrain_penetration_rate: f32,
     pub object_penetration_rate: f32,
     pub combined_penetration_rate: f32,
+    pub granular_repose_angle_deg: Option<f32>,
+    pub material_interaction_contact_ratio: Option<f32>,
 }
 
 #[derive(Clone, Debug)]
@@ -313,6 +335,8 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 min_sleep_ratio: None,
             },
             water_surface_assertion: None,
+            granular_repose_assertion: None,
+            material_interaction_assertion: None,
         },
         ScenarioSpec {
             name: "water_drop".to_string(),
@@ -363,6 +387,8 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 basin_max_x: right_wall_min - 1,
                 margin_cells: 2,
             }),
+            granular_repose_assertion: None,
+            material_interaction_assertion: None,
         },
         // water_drop_spatial_lod: 空間LoDが有効なwater_dropシナリオ。
         //
@@ -429,6 +455,8 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 min_sleep_ratio: None,
             },
             water_surface_assertion: None,
+            granular_repose_assertion: None,
+            material_interaction_assertion: None,
         },
         ScenarioSpec {
             name: "terrain_contact_stability".to_string(),
@@ -478,6 +506,121 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 min_sleep_ratio: None,
             },
             water_surface_assertion: None,
+            granular_repose_assertion: None,
+            material_interaction_assertion: None,
+        },
+        ScenarioSpec {
+            name: "soil_repose_drop".to_string(),
+            reset_fixed_world: false,
+            mpm_force_single_block: false,
+            mpm_block_divisions: None,
+            mpm_level_map: Vec::new(),
+            loaded_chunk_min: Some(loaded_chunk_min),
+            loaded_chunk_max: Some(loaded_chunk_max),
+            terrain_fills: vec![
+                TerrainFillSpec {
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(world_max_cell, world_min_cell + wall_thickness - 1),
+                    ),
+                    material: TerrainMaterial::Stone,
+                },
+                TerrainFillSpec {
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(left_wall_max, world_max_cell),
+                    ),
+                    material: TerrainMaterial::Stone,
+                },
+                TerrainFillSpec {
+                    rect: CellRect::new(
+                        IVec2::new(right_wall_min, world_min_cell),
+                        IVec2::new(world_max_cell, world_max_cell),
+                    ),
+                    material: TerrainMaterial::Stone,
+                },
+            ],
+            free_particles: vec![ParticleSpawnSpec {
+                rect: CellRect::new(IVec2::new(-6, 8), IVec2::new(6, 24)),
+                material: ParticleMaterial::SoilGranular,
+                initial_velocity: Vec2::ZERO,
+            }],
+            objects: Vec::new(),
+            step_count: 900,
+            thresholds: ScenarioThresholds {
+                max_penetration_rate: Some(0.05),
+                max_max_speed_mps: Some(35.0),
+                min_sleep_ratio: None,
+            },
+            water_surface_assertion: None,
+            granular_repose_assertion: Some(GranularReposeAssertionSpec {
+                material: ParticleMaterial::SoilGranular,
+                active_after_seconds: 4.0,
+                min_angle_deg: 18.0,
+                max_angle_deg: 58.0,
+                min_base_span_cells: 4,
+            }),
+            material_interaction_assertion: None,
+        },
+        ScenarioSpec {
+            name: "sand_water_interaction_drop".to_string(),
+            reset_fixed_world: false,
+            mpm_force_single_block: false,
+            mpm_block_divisions: None,
+            mpm_level_map: Vec::new(),
+            loaded_chunk_min: Some(loaded_chunk_min),
+            loaded_chunk_max: Some(loaded_chunk_max),
+            terrain_fills: vec![
+                TerrainFillSpec {
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(world_max_cell, world_min_cell + wall_thickness - 1),
+                    ),
+                    material: TerrainMaterial::Stone,
+                },
+                TerrainFillSpec {
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, world_min_cell),
+                        IVec2::new(left_wall_max, world_max_cell),
+                    ),
+                    material: TerrainMaterial::Stone,
+                },
+                TerrainFillSpec {
+                    rect: CellRect::new(
+                        IVec2::new(right_wall_min, world_min_cell),
+                        IVec2::new(world_max_cell, world_max_cell),
+                    ),
+                    material: TerrainMaterial::Stone,
+                },
+            ],
+            free_particles: vec![
+                ParticleSpawnSpec {
+                    rect: CellRect::new(IVec2::new(-8, 10), IVec2::new(8, 20)),
+                    material: ParticleMaterial::WaterLiquid,
+                    initial_velocity: Vec2::ZERO,
+                },
+                ParticleSpawnSpec {
+                    rect: CellRect::new(IVec2::new(-6, 22), IVec2::new(6, 30)),
+                    material: ParticleMaterial::SandGranular,
+                    initial_velocity: Vec2::ZERO,
+                },
+            ],
+            objects: Vec::new(),
+            step_count: 900,
+            thresholds: ScenarioThresholds {
+                max_penetration_rate: Some(0.06),
+                max_max_speed_mps: Some(40.0),
+                min_sleep_ratio: None,
+            },
+            water_surface_assertion: None,
+            granular_repose_assertion: None,
+            material_interaction_assertion: Some(MaterialInteractionAssertionSpec {
+                active_after_seconds: 4.0,
+                primary_material: ParticleMaterial::SandGranular,
+                secondary_material: ParticleMaterial::WaterLiquid,
+                min_contact_ratio: 0.05,
+                require_primary_below_secondary: true,
+            }),
         },
         // block_coloring_experiment:
         // - 空間LoDのblock彩色実験専用
@@ -505,6 +648,8 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 min_sleep_ratio: None,
             },
             water_surface_assertion: None,
+            granular_repose_assertion: None,
+            material_interaction_assertion: None,
         },
     ]
 }
@@ -831,6 +976,12 @@ fn compute_metrics(
 
     let particle_denominator = particle_count.max(1) as f32;
     let combined_penetration_count = terrain_penetration_count.max(object_penetration_count);
+    let granular_repose_angle_deg = spec
+        .granular_repose_assertion
+        .and_then(|cfg| granular_repose_angle_deg(particles, cfg.material));
+    let material_interaction_contact_ratio = spec.material_interaction_assertion.map(|cfg| {
+        material_contact_ratio_cells(particles, cfg.primary_material, cfg.secondary_material)
+    });
 
     ScenarioMetrics {
         scenario: spec.name.clone(),
@@ -842,6 +993,161 @@ fn compute_metrics(
         terrain_penetration_rate: terrain_penetration_count as f32 / particle_denominator,
         object_penetration_rate: object_penetration_count as f32 / particle_denominator,
         combined_penetration_rate: combined_penetration_count as f32 / particle_denominator,
+        granular_repose_angle_deg,
+        material_interaction_contact_ratio,
+    }
+}
+
+fn granular_repose_angle_deg(particles: &ParticleWorld, material: ParticleMaterial) -> Option<f32> {
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    for (&pos, &mat) in particles
+        .positions()
+        .iter()
+        .zip(particles.materials().iter())
+    {
+        if mat == material {
+            xs.push(pos.x);
+            ys.push(pos.y);
+        }
+    }
+    if xs.len() < 8 {
+        return None;
+    }
+    let x_min = xs.iter().copied().fold(f32::INFINITY, f32::min);
+    let x_max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let y_min = ys.iter().copied().fold(f32::INFINITY, f32::min);
+    let y_max = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    if !(x_min.is_finite() && x_max.is_finite() && y_min.is_finite() && y_max.is_finite()) {
+        return None;
+    }
+    let height = (y_max - y_min).max(1e-6);
+    let base_band_y = y_min + height * 0.20;
+    let apex_index = ys
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.total_cmp(b))
+        .map(|(i, _)| i)?;
+    let apex = Vec2::new(xs[apex_index], ys[apex_index]);
+
+    let mut left_base: Option<Vec2> = None;
+    let mut right_base: Option<Vec2> = None;
+    for (&x, &y) in xs.iter().zip(ys.iter()) {
+        if y > base_band_y {
+            continue;
+        }
+        let candidate = Vec2::new(x, y);
+        let replace_left = left_base.map(|v| candidate.x < v.x).unwrap_or(true);
+        if replace_left {
+            left_base = Some(candidate);
+        }
+        let replace_right = right_base.map(|v| candidate.x > v.x).unwrap_or(true);
+        if replace_right {
+            right_base = Some(candidate);
+        }
+    }
+    let left = left_base?;
+    let right = right_base?;
+    let left_dx = (apex.x - left.x).abs().max(1e-6);
+    let right_dx = (right.x - apex.x).abs().max(1e-6);
+    let left_dy = (apex.y - left.y).max(0.0);
+    let right_dy = (apex.y - right.y).max(0.0);
+    let left_angle = left_dy.atan2(left_dx).to_degrees();
+    let right_angle = right_dy.atan2(right_dx).to_degrees();
+    Some(0.5 * (left_angle + right_angle))
+}
+
+fn granular_repose_base_span_cells(
+    particles: &ParticleWorld,
+    material: ParticleMaterial,
+) -> Option<i32> {
+    let mut x_min = f32::INFINITY;
+    let mut x_max = f32::NEG_INFINITY;
+    let mut seen = false;
+    for (&pos, &mat) in particles
+        .positions()
+        .iter()
+        .zip(particles.materials().iter())
+    {
+        if mat != material {
+            continue;
+        }
+        x_min = x_min.min(pos.x);
+        x_max = x_max.max(pos.x);
+        seen = true;
+    }
+    if !seen {
+        return None;
+    }
+    Some(((x_max - x_min) / CELL_SIZE_M).round() as i32)
+}
+
+fn material_centroid_y(particles: &ParticleWorld, material: ParticleMaterial) -> Option<f32> {
+    let mut sum = 0.0f32;
+    let mut count = 0usize;
+    for (&pos, &mat) in particles
+        .positions()
+        .iter()
+        .zip(particles.materials().iter())
+    {
+        if mat == material {
+            sum += pos.y;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    Some(sum / count as f32)
+}
+
+fn material_contact_ratio_cells(
+    particles: &ParticleWorld,
+    primary: ParticleMaterial,
+    secondary: ParticleMaterial,
+) -> f32 {
+    let mut secondary_cells = std::collections::HashSet::<IVec2>::new();
+    for (&pos, &mat) in particles
+        .positions()
+        .iter()
+        .zip(particles.materials().iter())
+    {
+        if mat == secondary {
+            secondary_cells.insert(world_to_cell(pos));
+        }
+    }
+    let mut primary_count = 0usize;
+    let mut contact_count = 0usize;
+    for (&pos, &mat) in particles
+        .positions()
+        .iter()
+        .zip(particles.materials().iter())
+    {
+        if mat != primary {
+            continue;
+        }
+        primary_count += 1;
+        let cell = world_to_cell(pos);
+        let mut touching = false;
+        for oy in -1..=1 {
+            for ox in -1..=1 {
+                if secondary_cells.contains(&(cell + IVec2::new(ox, oy))) {
+                    touching = true;
+                    break;
+                }
+            }
+            if touching {
+                break;
+            }
+        }
+        if touching {
+            contact_count += 1;
+        }
+    }
+    if primary_count == 0 {
+        0.0
+    } else {
+        contact_count as f32 / primary_count as f32
     }
 }
 
@@ -942,6 +1248,78 @@ fn evaluate_assertions_with_context(
             active,
             condition: format!("step >= {}", active_after_steps),
         });
+    }
+    if let Some(repose) = spec.granular_repose_assertion {
+        let active_after_steps =
+            (repose.active_after_seconds / DEFAULT_SOLVER_PARAMS.fixed_dt).ceil() as usize;
+        let active = step_count >= active_after_steps;
+        let angle_deg = granular_repose_angle_deg(particles, repose.material);
+        let base_span_cells = granular_repose_base_span_cells(particles, repose.material);
+        let angle_ok = angle_deg
+            .map(|deg| deg >= repose.min_angle_deg && deg <= repose.max_angle_deg)
+            .unwrap_or(false);
+        let span_ok = base_span_cells
+            .map(|span| span >= repose.min_base_span_cells)
+            .unwrap_or(false);
+        rows.push(ScenarioAssertionResult {
+            label: "granular_repose_angle_deg".to_string(),
+            expected: format!("[{:.2}, {:.2}]", repose.min_angle_deg, repose.max_angle_deg),
+            actual: angle_deg
+                .map(|value| format!("{value:.3}"))
+                .unwrap_or_else(|| "none".to_string()),
+            ok: angle_ok,
+            active,
+            condition: format!("step >= {}", active_after_steps),
+        });
+        rows.push(ScenarioAssertionResult {
+            label: "granular_repose_base_span_cells".to_string(),
+            expected: format!(">= {}", repose.min_base_span_cells),
+            actual: base_span_cells
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "none".to_string()),
+            ok: span_ok,
+            active,
+            condition: format!("step >= {}", active_after_steps),
+        });
+    }
+    if let Some(interaction) = spec.material_interaction_assertion {
+        let active_after_steps =
+            (interaction.active_after_seconds / DEFAULT_SOLVER_PARAMS.fixed_dt).ceil() as usize;
+        let active = step_count >= active_after_steps;
+        let contact_ratio = material_contact_ratio_cells(
+            particles,
+            interaction.primary_material,
+            interaction.secondary_material,
+        );
+        rows.push(ScenarioAssertionResult {
+            label: "material_interaction_contact_ratio".to_string(),
+            expected: format!(">= {:.4}", interaction.min_contact_ratio),
+            actual: format!("{contact_ratio:.4}"),
+            ok: contact_ratio >= interaction.min_contact_ratio,
+            active,
+            condition: format!("step >= {}", active_after_steps),
+        });
+        if interaction.require_primary_below_secondary {
+            let primary_y = material_centroid_y(particles, interaction.primary_material);
+            let secondary_y = material_centroid_y(particles, interaction.secondary_material);
+            let order_ok = primary_y
+                .zip(secondary_y)
+                .map(|(p, s)| p < s)
+                .unwrap_or(false);
+            rows.push(ScenarioAssertionResult {
+                label: "material_interaction_centroid_order".to_string(),
+                expected: "primary_y < secondary_y".to_string(),
+                actual: match (primary_y, secondary_y) {
+                    (Some(primary), Some(secondary)) => {
+                        format!("primary={primary:.4}, secondary={secondary:.4}")
+                    }
+                    _ => "missing".to_string(),
+                },
+                ok: order_ok,
+                active,
+                condition: format!("step >= {}", active_after_steps),
+            });
+        }
     }
     rows
 }

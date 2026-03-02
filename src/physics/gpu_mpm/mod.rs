@@ -20,6 +20,7 @@ use bevy::render::graph::CameraDriverLabel;
 use bevy::render::render_graph::{RenderGraph, RenderLabel};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Render, RenderApp, RenderSystems};
+use std::mem::size_of;
 
 use self::gpu_resources::{
     MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock,
@@ -163,7 +164,7 @@ fn readback_particles(
             .load(std::sync::atomic::Ordering::Acquire);
         if ready {
             let particle_count = state.pending_count as usize;
-            let byte_size = particle_count as u64 * 72;
+            let byte_size = particle_count as u64 * size_of::<buffers::GpuParticle>() as u64;
             let slice = buffers.readback_buf.slice(..byte_size);
             let data = slice.get_mapped_range();
             let particles: Vec<buffers::GpuParticle> = bytemuck::cast_slice(&data[..])
@@ -190,7 +191,7 @@ fn readback_particles(
         return;
     }
     let particle_count = buffers.particle_count;
-    let byte_size = particle_count as u64 * 72;
+    let byte_size = particle_count as u64 * size_of::<buffers::GpuParticle>() as u64;
     let slice = buffers.readback_buf.slice(..byte_size);
 
     let flag = state.mapped_ready.clone();

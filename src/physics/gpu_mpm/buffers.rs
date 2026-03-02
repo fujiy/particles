@@ -7,7 +7,7 @@ use bytemuck::{Pod, Zeroable};
 
 // ---------------------------------------------------------------------------
 // GPU-side particle layout (matches mpm_types.wgsl::GpuParticle, 72 bytes)
-// Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) material_id(4) _pad(12) = 72
+// Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) jp(4) phase_id(4) _pad(8) = 72
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -21,8 +21,13 @@ pub struct GpuParticle {
     pub f: [f32; 4],
     /// C column-major: [c00, c01, c10, c11]
     pub c: [f32; 4],
-    pub material_id: u32,
-    pub _pad: [u32; 3],
+    /// Plastic volume tracker (granular only, water keeps 1.0).
+    pub jp: f32,
+    /// Continuum phase id (0=water, 1=soil, 2=sand).
+    pub phase_id: u32,
+    /// Water fill fraction φ_p interpolated from grid (water only). Written by G2P, read by P2G.
+    pub phi_p: f32,
+    pub _pad_b: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<GpuParticle>() == 72);
@@ -35,7 +40,8 @@ impl GpuParticle {
         rest_volume: f32,
         f: Mat2,
         c: Mat2,
-        material_id: u8,
+        jp: f32,
+        phase_id: u8,
     ) -> Self {
         Self {
             x: pos.to_array(),
@@ -45,29 +51,35 @@ impl GpuParticle {
             // Mat2 in glam is column-major: col0 = (x_axis.x, x_axis.y), col1 = (y_axis.x, y_axis.y)
             f: [f.x_axis.x, f.x_axis.y, f.y_axis.x, f.y_axis.y],
             c: [c.x_axis.x, c.x_axis.y, c.y_axis.x, c.y_axis.y],
-            material_id: material_id as u32,
-            _pad: [0; 3],
+            jp: jp.max(1e-6),
+            phase_id: phase_id as u32,
+            phi_p: 1.0,
+            _pad_b: 0,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// GPU-side grid node (matches mpm_types.wgsl::GpuGridNode, 16 bytes)
+// GPU-side grid node (matches mpm_types.wgsl::GpuGridNode, 32 bytes)
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct GpuGridNode {
-    pub px: f32,
-    pub py: f32,
-    pub mass: f32,
-    pub _pad: f32,
+    pub water_px: f32,
+    pub water_py: f32,
+    pub water_mass: f32,
+    pub water_pad: f32,
+    pub granular_px: f32,
+    pub granular_py: f32,
+    pub granular_mass: f32,
+    pub granular_pad: f32,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuGridNode>() == 16);
+const _: () = assert!(std::mem::size_of::<GpuGridNode>() == 32);
 
 // ---------------------------------------------------------------------------
-// Simulation parameters uniform (matches mpm_types.wgsl::MpmParams, 80 bytes)
+// Simulation parameters uniform (matches mpm_types.wgsl::MpmParams, 144 bytes)
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -88,13 +100,34 @@ pub struct GpuMpmParams {
     pub j_max: f32,
     pub c_max_norm: f32,
     pub sdf_velocity_threshold_m: f32,
-    pub deep_push_gain_per_s: f32,
-    pub deep_push_speed_cap_mps: f32,
-    pub tangential_damping: f32,
-    pub _pad: [u32; 2],
+    /// Coulomb friction coefficient μ_b for water at terrain boundary.
+    pub boundary_friction_water: f32,
+    /// Coulomb friction coefficient μ_b for granular at terrain boundary.
+    pub boundary_friction_granular: f32,
+    pub _pad_friction: u32,
+    pub dp_lambda_soil: f32,
+    pub dp_mu_soil: f32,
+    pub dp_alpha_soil: f32,
+    pub dp_k_soil: f32,
+    pub dp_hardening_soil: f32,
+    pub dp_lambda_sand: f32,
+    pub dp_mu_sand: f32,
+    pub dp_alpha_sand: f32,
+    pub dp_k_sand: f32,
+    pub dp_hardening_sand: f32,
+    pub granular_tensile_clamp: f32,
+    pub coupling_normal_stiffness: f32,
+    pub coupling_tangent_drag: f32,
+    pub coupling_friction: f32,
+    pub coupling_max_impulse_ratio: f32,
+    /// APIC↔PIC blend coefficient for water [Eq.32, physics.md]. 1.0=full APIC, 0.0=full PIC.
+    pub alpha_apic_water: f32,
+    /// APIC↔PIC blend coefficient for granular [Eq.32, physics.md].
+    pub alpha_apic_granular: f32,
+    pub _pad: [u32; 1],
 }
 
-const _: () = assert!(std::mem::size_of::<GpuMpmParams>() == 80);
+const _: () = assert!(std::mem::size_of::<GpuMpmParams>() == 144);
 
 impl Default for GpuMpmParams {
     fn default() -> Self {
@@ -114,10 +147,27 @@ impl Default for GpuMpmParams {
             j_max: 1.4,
             c_max_norm: 80.0,
             sdf_velocity_threshold_m: 0.01,
-            deep_push_gain_per_s: 0.1,
-            deep_push_speed_cap_mps: 1.0,
-            tangential_damping: 0.05,
-            _pad: [0; 2],
+            boundary_friction_water: 0.3,
+            boundary_friction_granular: 0.6,
+            _pad_friction: 0,
+            dp_lambda_soil: 2.0e4,
+            dp_mu_soil: 1.2e4,
+            dp_alpha_soil: 0.2,
+            dp_k_soil: 200.0,
+            dp_hardening_soil: 1.5,
+            dp_lambda_sand: 1.8e4,
+            dp_mu_sand: 1.0e4,
+            dp_alpha_sand: 0.25,
+            dp_k_sand: 60.0,
+            dp_hardening_sand: 1.0,
+            granular_tensile_clamp: 0.0,
+            coupling_normal_stiffness: 0.75,
+            coupling_tangent_drag: 0.45,
+            coupling_friction: 0.6,
+            coupling_max_impulse_ratio: 0.85,
+            alpha_apic_water: 0.95,
+            alpha_apic_granular: 0.78,
+            _pad: [0; 1],
         }
     }
 }

@@ -42,6 +42,8 @@
 - When sandbox execution cannot validate the target behavior (especially GPU/rendering), use escalated execution and run the app directly.
 - Prefer repeatable automated loops (auto-load scenario, fixed frame count, artifact export, auto-exit) so Codex can verify results without manual user observation each time.
 - Report verification outcomes based on the generated artifacts.
+- For repeated auto-verification runs, do not rely on changing environment variables per command.
+  - Prefer `cargo run -- --autoverify-config <path>` and pass per-run options via config file.
 
 ## Test Change Approval Rule
 - Unit tests:

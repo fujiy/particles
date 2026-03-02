@@ -1,0 +1,12 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "sand_water_interaction_drop",
+    "output_path": "artifacts/autoverify/sand_water_interaction_drop.png",
+    "warmup_frames": 360,
+    "max_wait_after_capture_frames": 240,
+    "camera_scale": 0.45,
+    "camera_center_x": 0.0,
+    "camera_center_y": -6.0
+  }
+}

@@ -1,16 +1,22 @@
 use bevy::prelude::*;
 
 pub const MATERIAL_ID_WATER: u8 = 0;
+pub const MATERIAL_ID_GRANULAR_SOIL: u8 = 1;
+pub const MATERIAL_ID_GRANULAR_SAND: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ContinuumMaterial {
+pub enum ContinuumPhase {
     Water,
+    GranularSoil,
+    GranularSand,
 }
 
-impl ContinuumMaterial {
+impl ContinuumPhase {
     pub const fn id(self) -> u8 {
         match self {
             Self::Water => MATERIAL_ID_WATER,
+            Self::GranularSoil => MATERIAL_ID_GRANULAR_SOIL,
+            Self::GranularSand => MATERIAL_ID_GRANULAR_SAND,
         }
     }
 }
@@ -23,6 +29,7 @@ pub struct ContinuumParticleWorld {
     pub v0: Vec<f32>,
     pub f: Vec<Mat2>,
     pub c: Vec<Mat2>,
+    pub jp: Vec<f32>,
     pub material_id: Vec<u8>,
     pub owner_block_id: Vec<usize>,
 }
@@ -43,6 +50,7 @@ impl ContinuumParticleWorld {
         self.v0.clear();
         self.f.clear();
         self.c.clear();
+        self.jp.clear();
         self.material_id.clear();
         self.owner_block_id.clear();
     }
@@ -53,7 +61,8 @@ impl ContinuumParticleWorld {
         velocity: Vec2,
         mass: f32,
         rest_volume: f32,
-        material: ContinuumMaterial,
+        phase: ContinuumPhase,
+        jp: f32,
     ) -> usize {
         let index = self.len();
         self.x.push(position);
@@ -62,7 +71,8 @@ impl ContinuumParticleWorld {
         self.v0.push(rest_volume);
         self.f.push(Mat2::IDENTITY);
         self.c.push(Mat2::ZERO);
-        self.material_id.push(material.id());
+        self.jp.push(jp.max(1e-6));
+        self.material_id.push(phase.id());
         self.owner_block_id.push(0);
         index
     }
@@ -79,7 +89,44 @@ impl ContinuumParticleWorld {
             velocity,
             mass,
             rest_volume,
-            ContinuumMaterial::Water,
+            ContinuumPhase::Water,
+            1.0,
+        )
+    }
+
+    pub fn spawn_granular_soil_particle(
+        &mut self,
+        position: Vec2,
+        velocity: Vec2,
+        mass: f32,
+        rest_volume: f32,
+        jp: f32,
+    ) -> usize {
+        self.spawn_particle(
+            position,
+            velocity,
+            mass,
+            rest_volume,
+            ContinuumPhase::GranularSoil,
+            jp,
+        )
+    }
+
+    pub fn spawn_granular_sand_particle(
+        &mut self,
+        position: Vec2,
+        velocity: Vec2,
+        mass: f32,
+        rest_volume: f32,
+        jp: f32,
+    ) -> usize {
+        self.spawn_particle(
+            position,
+            velocity,
+            mass,
+            rest_volume,
+            ContinuumPhase::GranularSand,
+            jp,
         )
     }
 }
@@ -106,5 +153,6 @@ mod tests {
         assert_eq!(world.material_id[0], MATERIAL_ID_WATER);
         assert_eq!(world.f[0], Mat2::IDENTITY);
         assert_eq!(world.c[0], Mat2::ZERO);
+        assert_eq!(world.jp[0], 1.0);
     }
 }

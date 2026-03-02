@@ -30,17 +30,21 @@ struct GpuParticle {
     c_01: f32,
     c_10: f32,
     c_11: f32,
-    material_id: u32,
+    jp: f32,
+    phase_id: u32,
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
 }
+
+const PHASE_WATER: u32 = 0u;
 
 @group(0) @binding(0) var<uniform> params: WaterDotParams;
 @group(0) @binding(1) var<storage, read> particles: array<GpuParticle>;
-@group(0) @binding(2) var<storage, read_write> density_atomic: array<atomic<u32>>;
-@group(0) @binding(3) var<storage, read_write> blur_tmp: array<f32>;
-@group(0) @binding(4) var<storage, read_write> blurred_density: array<f32>;
+@group(0) @binding(2) var<storage, read_write> density_atomic_total: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> density_atomic_granular: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> blur_tmp: array<f32>;
+@group(0) @binding(5) var<storage, read_write> blurred_density_total: array<f32>;
+@group(0) @binding(6) var<storage, read_write> blurred_density_granular: array<f32>;
 
 fn dot_index(x: i32, y: i32) -> u32 {
     return u32(y) * params.width + u32(x);
@@ -64,9 +68,11 @@ fn clear_density(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    atomicStore(&density_atomic[idx], 0u);
+    atomicStore(&density_atomic_total[idx], 0u);
+    atomicStore(&density_atomic_granular[idx], 0u);
     blur_tmp[idx] = 0.0;
-    blurred_density[idx] = 0.0;
+    blurred_density_total[idx] = 0.0;
+    blurred_density_granular[idx] = 0.0;
 }
 
 @compute @workgroup_size(64)
@@ -77,10 +83,6 @@ fn splat_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let p = particles[particle_index];
-    if p.material_id != 0u {
-        return;
-    }
-
     let dot_pos = (p.x - vec2<f32>(params.origin_x, params.origin_y)) / params.dot_size_m;
     let dot_area = max(params.dot_size_m * params.dot_size_m, 1.0e-6);
     // Convert rest area to equivalent dot count and keep a floor so sparse regions
@@ -131,13 +133,17 @@ fn splat_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
             if atomic_units == 0u {
                 continue;
             }
-            atomicAdd(&density_atomic[dot_index(x, y)], atomic_units);
+            let idx = dot_index(x, y);
+            atomicAdd(&density_atomic_total[idx], atomic_units);
+            if p.phase_id != PHASE_WATER {
+                atomicAdd(&density_atomic_granular[idx], atomic_units);
+            }
         }
     }
 }
 
 @compute @workgroup_size(64)
-fn blur_x(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn blur_x_total(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     let total = params.width * params.height;
     if idx >= total {
@@ -154,7 +160,8 @@ fn blur_x(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var k = -radius; k <= radius; k = k + 1) {
         let sx = clamp(x + k, 0, i32(params.width) - 1);
         let w = gaussian_weight(f32(abs(k)), params.blur_sigma_dots);
-        let sample = f32(atomicLoad(&density_atomic[dot_index(sx, y)])) / params.atomic_scale;
+        let sample =
+            f32(atomicLoad(&density_atomic_total[dot_index(sx, y)])) / params.atomic_scale;
         density_sum = density_sum + sample * w;
         weight_sum = weight_sum + w;
     }
@@ -163,7 +170,7 @@ fn blur_x(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 @compute @workgroup_size(64)
-fn blur_y(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn blur_y_total(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     let total = params.width * params.height;
     if idx >= total {
@@ -185,5 +192,58 @@ fn blur_y(@builtin(global_invocation_id) gid: vec3<u32>) {
         weight_sum = weight_sum + w;
     }
 
-    blurred_density[idx] = density_sum / max(weight_sum, 1.0e-6);
+    blurred_density_total[idx] = density_sum / max(weight_sum, 1.0e-6);
+}
+
+@compute @workgroup_size(64)
+fn blur_x_granular(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let total = params.width * params.height;
+    if idx >= total {
+        return;
+    }
+
+    let x = i32(idx % params.width);
+    let y = i32(idx / params.width);
+
+    let radius = i32(params.blur_radius_dots);
+    var density_sum = 0.0;
+    var weight_sum = 0.0;
+
+    for (var k = -radius; k <= radius; k = k + 1) {
+        let sx = clamp(x + k, 0, i32(params.width) - 1);
+        let w = gaussian_weight(f32(abs(k)), params.blur_sigma_dots);
+        let sample =
+            f32(atomicLoad(&density_atomic_granular[dot_index(sx, y)])) / params.atomic_scale;
+        density_sum = density_sum + sample * w;
+        weight_sum = weight_sum + w;
+    }
+
+    blur_tmp[idx] = density_sum / max(weight_sum, 1.0e-6);
+}
+
+@compute @workgroup_size(64)
+fn blur_y_granular(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    let total = params.width * params.height;
+    if idx >= total {
+        return;
+    }
+
+    let x = i32(idx % params.width);
+    let y = i32(idx / params.width);
+
+    let radius = i32(params.blur_radius_dots);
+    var density_sum = 0.0;
+    var weight_sum = 0.0;
+
+    for (var k = -radius; k <= radius; k = k + 1) {
+        let sy = clamp(y + k, 0, i32(params.height) - 1);
+        let w = gaussian_weight(f32(abs(k)), params.blur_sigma_dots);
+        let sample = blur_tmp[dot_index(x, sy)];
+        density_sum = density_sum + sample * w;
+        weight_sum = weight_sum + w;
+    }
+
+    blurred_density_granular[idx] = density_sum / max(weight_sum, 1.0e-6);
 }

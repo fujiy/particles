@@ -3,7 +3,7 @@
 #define_import_path particles::mpm_types
 
 // Particle storage layout (one array of GpuParticle, 72 bytes each).
-// Matches Rust GpuParticle: x(8)+v(8)+mass(4)+v0(4)+f(16)+c(16)+material_id(4)+pad(12)=72
+// Matches Rust GpuParticle: x(8)+v(8)+mass(4)+v0(4)+f(16)+c(16)+jp(4)+phase_id(4)+pad(8)=72
 struct GpuParticle {
     // position (m)
     x: vec2<f32>,
@@ -23,23 +23,28 @@ struct GpuParticle {
     c_b: f32,
     c_c: f32,
     c_d: f32,
-    // material id (0 = water)
-    material_id: u32,
+    // Plastic volume tracker (granular only, water keeps 1.0)
+    jp: f32,
+    // phase id (0=water, 1=granular soil, 2=granular sand)
+    phase_id: u32,
+    // Water fill fraction φ_p [Eq.9, physics.md]. Written by G2P, read by P2G.
+    phi_p: f32,
     // padding to 72 bytes
-    pad_a: u32,
     pad_b: u32,
-    pad_c: u32,
 }
 
 // Grid node layout.
 struct GpuGridNode {
-    // momentum (kg*m/s)
-    px: f32,
-    py: f32,
-    // mass (kg)
-    mass: f32,
-    // padding
-    pad: f32,
+    // Water phase momentum / mass
+    water_px: f32,
+    water_py: f32,
+    water_mass: f32,
+    water_pad: f32,
+    // Granular phase momentum / mass
+    granular_px: f32,
+    granular_py: f32,
+    granular_mass: f32,
+    granular_pad: f32,
 }
 
 // Simulation parameters (uniform).
@@ -70,12 +75,41 @@ struct MpmParams {
     c_max_norm: f32,
     // terrain boundary params
     sdf_velocity_threshold_m: f32,
-    deep_push_gain_per_s: f32,
-    deep_push_speed_cap_mps: f32,
-    tangential_damping: f32,
+    // Coulomb friction coefficient μ_b per material [Eq.29, physics.md]
+    boundary_friction_water: f32,
+    boundary_friction_granular: f32,
+    pad_friction: u32,
+    // Drucker-Prager parameters (soil)
+    dp_lambda_soil: f32,
+    dp_mu_soil: f32,
+    dp_alpha_soil: f32,
+    dp_k_soil: f32,
+    dp_hardening_soil: f32,
+    // Drucker-Prager parameters (sand)
+    dp_lambda_sand: f32,
+    dp_mu_sand: f32,
+    dp_alpha_sand: f32,
+    dp_k_sand: f32,
+    dp_hardening_sand: f32,
+    // granular material / coupling params
+    granular_tensile_clamp: f32,
+    coupling_normal_stiffness: f32,
+    coupling_tangent_drag: f32,
+    coupling_friction: f32,
+    coupling_max_impulse_ratio: f32,
+    // APIC<->PIC blend: 1.0=full APIC, 0.0=full PIC [Eq.32, physics.md]
+    alpha_apic_water: f32,
+    alpha_apic_granular: f32,
     // padding
     pad_a: u32,
-    pad_b: u32,
+}
+
+const PHASE_WATER: u32 = 0u;
+const PHASE_GRANULAR_SOIL: u32 = 1u;
+const PHASE_GRANULAR_SAND: u32 = 2u;
+
+fn phase_is_granular(phase_id: u32) -> bool {
+    return phase_id == PHASE_GRANULAR_SOIL || phase_id == PHASE_GRANULAR_SAND;
 }
 
 // Quadratic B-spline kernel weight and gradient for 1D distance.

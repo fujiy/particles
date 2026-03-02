@@ -219,6 +219,22 @@
   - `overlay`
 - 連続体の実行経路はGPUに一本化する。
 
+### 9.1 パラメータ資産管理
+
+- 実行時調整対象のパラメータは Bevy Asset として `assets/params/` 配下で管理する。
+- ファイル構成は責務単位で固定し、以下の5ファイルを正本とする。
+  - `assets/params/physics.ron`
+  - `assets/params/render.ron`
+  - `assets/params/overlay.ron`
+  - `assets/params/material.ron`
+  - `assets/params/generation.ron`
+- Rust/WGSL で使うパラメータは「Asset -> 検証/クランプ済み Resource -> GPU uniform/storage」の順で反映する。
+- WGSL は asset を直接参照しない。shader から参照する値は必ず Rust 側で解決した uniform/storage 経由で渡す。
+- hot reload は Bevy の標準 asset 更新通知を使用し、`Modified` 発生時に再検証して反映する。
+- 不正値を検出した場合は新値を採用せず、直前の有効値を維持してログを出す。
+- 実行中に変更しない定数（バッファサイズ、レイアウト、セルサイズ、workgroupサイズなど最適化/整合性に直結する値）は asset 管理対象外とする。
+- 各 `.ron` ファイルでは、全パラメータに用途・単位・許容範囲をコメントで明記する。コメントのない項目は追加しない。
+
 ## 10. セーブ/ロードと世界生成
 
 ### 10.1 セーブ/ロード

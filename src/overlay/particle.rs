@@ -13,8 +13,10 @@ use bevy::render::render_resource::{
 };
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::view::{Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
+use std::mem::size_of;
 
 use super::ParticleOverlayState;
+use crate::physics::gpu_mpm::buffers::{GpuMpmParams, GpuParticle};
 use crate::physics::gpu_mpm::gpu_resources::MpmGpuBuffers;
 
 const PARTICLE_OVERLAY_SHADER_PATH: &str = "shaders/overlay/particle_overlay_gpu.wgsl";
@@ -101,7 +103,10 @@ pub(super) fn init_particle_overlay_gpu_pipeline(
             ShaderStages::VERTEX_FRAGMENT,
             (
                 uniform_buffer::<ViewUniform>(true),
-                uniform_buffer_sized(false, core::num::NonZeroU64::new(80)),
+                uniform_buffer_sized(
+                    false,
+                    core::num::NonZeroU64::new(size_of::<GpuMpmParams>() as u64),
+                ),
                 storage_buffer_read_only_sized(false, None),
             ),
         ),
@@ -110,13 +115,13 @@ pub(super) fn init_particle_overlay_gpu_pipeline(
     // Keep fallback buffers to avoid bind-group creation failures when MPM is not ready.
     let fallback_params_buf = render_device.create_buffer(&BufferDescriptor {
         label: Some("particle_overlay_fallback_params"),
-        size: 80,
+        size: size_of::<GpuMpmParams>() as u64,
         usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
     let fallback_particle_buf = render_device.create_buffer(&BufferDescriptor {
         label: Some("particle_overlay_fallback_particles"),
-        size: 72,
+        size: size_of::<GpuParticle>() as u64,
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
