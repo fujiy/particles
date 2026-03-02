@@ -7,6 +7,7 @@ use bevy_inspector_egui::bevy_egui::EguiPlugin;
 use particles::camera_controller::CameraControllerPlugin;
 use particles::interface::InterfacePlugin;
 use particles::overlay::OverlayPlugin;
+use particles::params::ParamsPlugin;
 use particles::physics::PhysicsPlugin;
 use particles::physics::gpu_mpm::GpuMpmPlugin;
 use particles::physics::gpu_mpm::gpu_resources::MpmGpuControl;
@@ -799,6 +800,7 @@ fn main() {
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(EguiPlugin::default());
     app.add_plugins((
+        ParamsPlugin,
         PhysicsPlugin,
         GpuMpmPlugin,
         TerrainDotGpuPlugin,
