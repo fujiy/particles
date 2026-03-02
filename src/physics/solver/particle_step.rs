@@ -3,7 +3,6 @@ use std::time::Instant;
 use bevy::log::tracing;
 
 use crate::physics::profiler::process_cpu_time_seconds;
-use crate::physics::solver::granular;
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::helpers::is_granular_particle;
 use crate::physics::world::particle::{ParticleStepBreakdown, ParticleWorld};
@@ -152,11 +151,6 @@ pub(super) fn step_single_substep(
     phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
     {
         let _span = tracing::info_span!("physics::granular_solver").entered();
-        let reaction_impulses =
-            granular::solve_contacts(particles, terrain, object_field, object_world, dt_sub);
-        for (object_id, impulse) in reaction_impulses {
-            object_world.accumulate_reaction_impulse(object_id, impulse);
-        }
     }
     breakdown.granular_solver_secs += phase_wall_start.elapsed().as_secs_f64();
     let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);
@@ -204,7 +198,6 @@ pub(super) fn step_single_substep(
     phase_cpu_start = process_cpu_time_seconds().unwrap_or(phase_cpu_end);
     {
         let _span = tracing::info_span!("physics::granular_restitution").entered();
-        granular::apply_restitution(particles, dt_sub);
     }
     breakdown.granular_restitution_secs += phase_wall_start.elapsed().as_secs_f64();
     let phase_cpu_end = process_cpu_time_seconds().unwrap_or(phase_cpu_start);

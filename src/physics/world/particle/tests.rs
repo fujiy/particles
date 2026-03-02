@@ -1,6 +1,5 @@
 use super::*;
 use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, terrain_boundary_radius_m};
-use crate::physics::solver::granular;
 use crate::physics::solver::params_defaults::DEFAULT_SOLVER_PARAMS;
 use crate::physics::world::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA};
 use crate::physics::world::terrain::{
@@ -730,75 +729,6 @@ fn single_cell_object_is_auto_fractured_on_postprocess() {
             .iter()
             .any(|&m| matches!(m, ParticleMaterial::SandGranular)),
         "single-cell object should be converted to granular particles"
-    );
-}
-
-#[test]
-fn granular_solver_does_not_modify_water_only_particles() {
-    let mut particles = ParticleWorld::default();
-    clear_particles(&mut particles);
-    particles.pos.push(Vec2::new(-0.1, 1.0));
-    particles.prev_pos.push(Vec2::new(-0.1, 1.0));
-    particles.vel.push(Vec2::new(0.0, -1.0));
-    particles
-        .mass
-        .push(particle_properties(ParticleMaterial::WaterLiquid).mass);
-    particles.material.push(ParticleMaterial::WaterLiquid);
-    particles.resize_work_buffers();
-
-    let before_pos = particles.pos.clone();
-    let before_vel = particles.vel.clone();
-    let terrain = TerrainWorld::default();
-    let object_field = ObjectPhysicsField::default();
-    let object_world = ObjectWorld::default();
-
-    let reaction = granular::solve_contacts(
-        &mut particles,
-        &terrain,
-        &object_field,
-        &object_world,
-        FIXED_DT / SUBSTEPS as f32,
-    );
-
-    assert!(reaction.is_empty());
-    assert_eq!(particles.pos, before_pos);
-    assert_eq!(particles.vel, before_vel);
-}
-
-#[test]
-fn granular_solver_pushes_particle_out_of_terrain() {
-    let mut terrain = TerrainWorld::default();
-    terrain.reset_fixed_world();
-    terrain.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
-
-    let mut particles = ParticleWorld::default();
-    clear_particles(&mut particles);
-    let indices = particles.spawn_material_particles_from_cells(
-        &[IVec2::new(0, 1)],
-        ParticleMaterial::SandGranular,
-        Vec2::new(0.0, -2.0),
-    );
-    let index = indices[0];
-    particles.pos[index] = Vec2::new(0.0, 0.01);
-    particles.prev_pos[index] = particles.pos[index];
-    particles.vel[index] = Vec2::new(0.0, -2.0);
-    particles.resize_work_buffers();
-
-    let object_field = ObjectPhysicsField::default();
-    let object_world = ObjectWorld::default();
-    let before_y = particles.pos[index].y;
-
-    let _ = granular::solve_contacts(
-        &mut particles,
-        &terrain,
-        &object_field,
-        &object_world,
-        FIXED_DT / SUBSTEPS as f32,
-    );
-
-    assert!(
-        particles.pos[index].y >= before_y,
-        "expected granular XPBD contact to resolve terrain penetration"
     );
 }
 

@@ -265,8 +265,31 @@ mod object_solver;
 #[path = "../../solver/particle_step.rs"]
 mod particle_step_solver;
 
-use crate::physics::solver::granular::ComputeDeltaThreadScratch;
 use helpers::*;
+
+#[derive(Default)]
+struct ComputeDeltaThreadScratch {
+    object_contacts: Vec<ObjectId>,
+    reaction_impulses: HashMap<ObjectId, Vec2>,
+}
+
+impl ComputeDeltaThreadScratch {
+    fn merge_from(&mut self, other: Self) {
+        for (object_id, impulse) in other.reaction_impulses {
+            *self
+                .reaction_impulses
+                .entry(object_id)
+                .or_insert(Vec2::ZERO) += impulse;
+        }
+    }
+
+    fn accumulate_impulse(&mut self, object_id: ObjectId, impulse: Vec2) {
+        *self
+            .reaction_impulses
+            .entry(object_id)
+            .or_insert(Vec2::ZERO) += impulse;
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 struct TerrainFractureSeed {
