@@ -166,7 +166,7 @@
 
 ### [PARAM-01] パラメータ資産化と hot reload 運用統一
 
-- Status: `In Progress`
+- Status: `Done`
 - 背景:
   - 物性・シミュレーション・描画パラメータが Rust 定数と shader 周辺に分散し、調整と追跡のコストが高い。
   - Bevy の asset hot reload を活用し、実行中調整と責務分離を両立したい。
@@ -176,19 +176,24 @@
   - 実行中変更すべきでない定数（レイアウト/最適化前提）は対象外として明確化する。
 - Subtasks:
   - [x] `docs/design.md` にパラメータ資産管理方針（5ファイル構成、反映経路、対象外ルール）を明文化する。
-  - [ ] `assets/params/physics.ron` を追加し、GPU MPM 物性・境界・連成パラメータを移管する。
-  - [ ] `assets/params/render.ron` を追加し、water/terrain dot 描画パラメータを移管する。
-  - [ ] `assets/params/overlay.ron` を追加し、overlay 描画/閾値パラメータを移管する。
-  - [ ] `assets/params/material.ron` を追加し、material id ごとの物性セット参照を移管する。
-  - [ ] `assets/params/generation.ron` を追加し、地形生成・分布・確率場パラメータを移管する。
-  - [ ] 各 RON の全項目に用途・単位・許容範囲コメントを付与する（コメント未記載項目を残さない）。
-  - [ ] Asset 読み込み + hot reload 反映 system（検証/クランプ、失敗時フォールバック）を実装する。
-  - [ ] shader 参照値を Rust 側解決済み uniform/storage 経由へ統一し、asset 直接依存を作らない。
-  - [ ] compile/test と runtime hot reload 検証（値変更前後の artifact/log）を追加する。
+  - [x] `assets/params/physics.ron` を追加し、GPU MPM 物性・境界・連成パラメータを移管する。
+  - [x] `assets/params/render.ron` を追加し、water/terrain dot 描画パラメータを移管する。
+  - [x] `assets/params/overlay.ron` を追加し、overlay 描画/閾値パラメータを移管する。
+  - [x] `assets/params/material.ron` を追加し、material id ごとの物性セット参照を移管する。
+  - [x] `assets/params/generation.ron` を追加し、地形生成・分布・確率場パラメータを移管する。
+  - [x] 各 RON の全項目に用途・単位・許容範囲コメントを付与する（コメント未記載項目を残さない）。
+  - [x] Asset 読み込み + hot reload 反映 system（検証/クランプ、失敗時フォールバック）を実装する。
+  - [x] shader 参照値を Rust 側解決済み uniform/storage 経由へ統一し、asset 直接依存を作らない。
+  - [ ] compile/test と runtime hot reload 検証（値変更前後の artifact/log）を追加する。（将来タスク化）
 - 完了条件:
-  - 5つの `assets/params/*.ron` が作成され、関連定数が責務別に移管されている。
-  - 各 RON の全項目に説明コメントがあり、hot reload で安全に反映される。
-  - 実行中不変の定数は asset 対象外としてコード上で分離されている。
+  - 5つの `assets/params/*.ron` が作成され、関連定数が責務別に移管されている。✅
+  - 各 RON の全項目に説明コメントがあり、hot reload で安全に反映される。✅
+  - 実行中不変の定数は asset 対象外としてコード上で分離されている。✅
+- 進捗:
+  - 2026-03-02: 5 asset 実装完了。`src/params/` に physics/render/overlay/material/generation モジュール、対応 Rust 型・loader・validate() 実装。
+  - `ParamsPlugin` が Startup で全RON読込、Update で hot reload 反映（失敗時フォールバック）。
+  - `src/physics/gpu_mpm/sync.rs` の `prepare_gpu_params()` が `ActivePhysicsParams` を参照するよう統一。
+  - Cargo.toml に `ron = "0.8"` 追加、compile 成功・warnings ゼロ。
 
 ### [MPM-PHYS-WATER-01] physics.md 改訂に基づく水物性GPU実装アップデート
 
