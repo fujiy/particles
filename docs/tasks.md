@@ -164,6 +164,53 @@
   - `default world` で生成地形がGPU描画として表示される。
   - CPU地形表示コードが撤去される。
 
+### [PARAM-01] パラメータ資産化と hot reload 運用統一
+
+- Status: `In Progress`
+- 背景:
+  - 物性・シミュレーション・描画パラメータが Rust 定数と shader 周辺に分散し、調整と追跡のコストが高い。
+  - Bevy の asset hot reload を活用し、実行中調整と責務分離を両立したい。
+- スコープ:
+  - 実行時調整対象パラメータを `assets/params/` 配下の RON 資産へ集約する。
+  - `physics / render / overlay / material / generation` の5資産を定義し、Rust/WGSL 参照を統一する。
+  - 実行中変更すべきでない定数（レイアウト/最適化前提）は対象外として明確化する。
+- Subtasks:
+  - [x] `docs/design.md` にパラメータ資産管理方針（5ファイル構成、反映経路、対象外ルール）を明文化する。
+  - [ ] `assets/params/physics.ron` を追加し、GPU MPM 物性・境界・連成パラメータを移管する。
+  - [ ] `assets/params/render.ron` を追加し、water/terrain dot 描画パラメータを移管する。
+  - [ ] `assets/params/overlay.ron` を追加し、overlay 描画/閾値パラメータを移管する。
+  - [ ] `assets/params/material.ron` を追加し、material id ごとの物性セット参照を移管する。
+  - [ ] `assets/params/generation.ron` を追加し、地形生成・分布・確率場パラメータを移管する。
+  - [ ] 各 RON の全項目に用途・単位・許容範囲コメントを付与する（コメント未記載項目を残さない）。
+  - [ ] Asset 読み込み + hot reload 反映 system（検証/クランプ、失敗時フォールバック）を実装する。
+  - [ ] shader 参照値を Rust 側解決済み uniform/storage 経由へ統一し、asset 直接依存を作らない。
+  - [ ] compile/test と runtime hot reload 検証（値変更前後の artifact/log）を追加する。
+- 完了条件:
+  - 5つの `assets/params/*.ron` が作成され、関連定数が責務別に移管されている。
+  - 各 RON の全項目に説明コメントがあり、hot reload で安全に反映される。
+  - 実行中不変の定数は asset 対象外としてコード上で分離されている。
+
+### [MPM-PHYS-WATER-01] physics.md 改訂に基づく水物性GPU実装アップデート
+
+- Status: `Done`
+- 背景:
+  - `physics.md` 改訂（2026-03-02）により、水の構成則・境界摩擦・APIC↔PICブレンドの仕様が更新された。
+  - GPU shaderの実装（`mpm_p2g.wgsl`, `mpm_g2p.wgsl`, `mpm_grid_update.wgsl`）が旧仕様のままであり、整合化が必要。
+- スコープ:
+  - 水の物性に関するGPU実装を `physics.md` v2仕様に合わせて更新する。
+  - 粉体（granular）実装への変更は含まない（別Work Unitで対応予定）。
+- Subtasks:
+  - [x] **[EOS修正]** `mpm_p2g.wgsl` の水圧力算出を `K * max(1-J, 0)` から `K * (1/J - 1)` (Eq.7) に変更する。
+  - [x] **[F等方化]** `mpm_g2p.wgsl` のG2P後処理で、水粒子の変形勾配を `F = sqrt(J) * I` (Eq.35) に等方化する。
+  - [x] **[Coulomb摩擦]** `mpm_grid_update.wgsl` の地形境界を Coulomb stick/slip (Eqs.28-29) へ変更。`MpmParams` に `boundary_friction_water / boundary_friction_granular` を追加し `tangential_damping / deep_push_*` を撤去。
+  - [x] **[APIC↔PICパラメータ化]** `mpm_g2p.wgsl` のCマトリクス減衰を `MpmParams.alpha_apic_water / alpha_apic_granular` へ変更 (Eq.32)。
+  - [x] **[充填率に基づく負圧制御]** G2Pで `φ_p` を収集 (`GpuParticle.phi_p`)、P2Gで `smoothstep(0.1, 0.8, φ_p)` による負圧減衰を実装 (Eqs.8-11)。
+  - [x] `PARTICLES_AUTOVERIFY_MPM=1` で全指標通過を確認（penetration=0, drop=8.44m, max_speed=2.63 m/s）。
+- 進捗:
+  - 2026-03-02: 全5サブタスク実装・自動検証通過。ベースライン比: max_speed 4.54→2.63 m/s（等方化により安定化）、penetration=0維持。
+- 完了条件:
+  - 5つのsubタスクが完了し、`water_drop` 自動検証で NaN/発散なし・地形侵入率0・落下確認が成立する。
+
 ### [MPM-WATER-02] 明示MLS-MPM水ソルバ（単一レート）実装
 
 - Status: `In Progress`
@@ -433,7 +480,7 @@
 
 ### [MPM-DEFER-01] 粉体（Granular）連成の後段化
 
-- Status: `Planned`
+- Status: `In Progress`
 - 背景:
   - 粉体（土/砂）は XPBD 併存ではなく、MLS-MPM に統合する方針へ確定した。
   - 水と粉体を同一グリッドで扱い、構成則のみを分離することで実装複雑度と保守コストを抑える。
@@ -444,12 +491,23 @@
   - 二相連成（間隙水圧、有効応力、飽和度進化）は対象外に固定する。
 - Subtasks:
   - [x] 設計方針を確定する（Drucker-Prager採用、非液状化、XPBD併存不採用）。（Design session: 2026-03-01）
-  - [ ] 粉体 material phase（`GranularSoil`, `GranularSand`）と粒子状態拡張（`Jp` 等）を設計する。
-  - [ ] GPU カーネルに粉体応力更新（trial stress + return mapping）を実装する。
-  - [ ] 水-粉体交換量（法線・接線）をノード段で実装し、対称運動量更新を保証する。
+  - [x] 粉体 material phase（`GranularSoil`, `GranularSand`）と粒子状態拡張（`Jp` 等）を設計する。
+  - [x] GPU カーネルに粉体応力更新（trial stress + return mapping）を実装する。
+  - [x] 水-粉体交換量（法線・接線）をノード段で実装し、対称運動量更新を保証する。
   - [ ] 既存XPBD粉体ステップを本番経路から外し、混在ケースでMLS-MPM単一路へ統一する。
   - [ ] 受け入れシナリオを追加する（乾燥沈降、斜面流下、水+粉体混在）。
   - [ ] 評価メトリクスを追加する（質量誤差、交換インパルス収支、侵入率、`Jp` 範囲）。
+- Progress:
+  - 2026-03-02: `ContinuumParticleWorld` を水専用から `Water/GranularSoil/GranularSand` へ拡張し、`Jp` を粒子状態へ追加。
+  - 2026-03-02: GPU MPM shader (`mpm_p2g/grid_update/g2p`) を二相（水/粉体）ノード更新へ拡張し、Drucker-Prager系の return mapping とノード交換量（法線+接線）を実装。
+  - 2026-03-02: `ParticleWorld -> Continuum -> GPU -> ParticleWorld` 同期対象を水+土砂粉体へ拡張し、mixed（水+土砂粉体）で粉体が停止しない実行経路へ更新。
+  - 2026-03-02: `cargo check` / `cargo test --lib` を実行し全通過。GPUランタイムは `artifacts/mpm_autoverify_defer01.json` を出力（現行autoverify閾値では `drop_ok=false` で fail）。
+  - 2026-03-02: 粒子オーバーレイGPUのバッファレイアウトを新MPM粒子定義（`phase_id`/`Jp`/144-byte params）へ追随させ、粉体が表示されない回帰を修正。
+  - 2026-03-02: 受け入れシナリオを追加（`soil_repose_drop`, `sand_water_interaction_drop`）。`cargo test --test physics_scenarios -- --nocapture` で閾値判定を通過。
+  - 2026-03-02: `cargo run -- --autoverify-config configs/autoverify/soil_repose_drop.json` と `.../sand_water_interaction_drop.json` でGPU自動検証を実行し、`artifacts/autoverify/*.json` の pass を確認。
+  - 2026-03-02: 本流ドット描画を phase-aware 化（総密度+粒状密度の2チャネル）し、`water_dot_preprocess` の旧 `material_id` 依存を廃止。水と土砂がメイン描画で可視化されることを `artifacts/autoverify/*_drop.png` で確認。
+  - 2026-03-02: autoverify に `run_steps`（固定ステップ基準）を追加し、`configs/autoverify/soil_repose_drop.json` / `sand_water_interaction_drop.json` へ適用。フレームレート依存の過走行を防止。
+  - 2026-03-02: 粒状相の内部力符号と材料パラメータ（摩擦角/剛性/境界押し戻し）を再調整し、`soil_repose_drop` / `sand_water_interaction_drop` の autoverify を再実行して pass を確認。
 - 完了条件:
   - 土/砂粉体が MLS-MPM（Drucker-Prager）で安定更新される。
   - 水+粉体混在シナリオで非液状化前提の連成が成立し、運動量収支と侵入率が閾値内に収まる。
