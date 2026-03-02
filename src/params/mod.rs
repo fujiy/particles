@@ -6,6 +6,7 @@
 // 5 ファイル構成:
 //   physics.ron    — GPU MPM 物性・境界・連成
 //   render.ron     — 水ドット・地形ドット描画
+//   palette.ron    — 水ドット材質パレット
 //   overlay.ron    — SDF・グリッドオーバーレイ閾値
 //   material.ron   — 材料種ごとの摩擦・反発・破壊閾値
 //   generation.ron — 地形生成・ノイズ・分布
@@ -13,15 +14,18 @@
 pub mod generation;
 pub mod material;
 pub mod overlay;
+pub mod palette;
 pub mod physics;
 pub mod render;
 
 use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
+use bevy::render::extract_resource::ExtractResource;
 
 use generation::{GenerationParams, GenerationParamsLoader};
 use material::{MaterialAssetParams, MaterialAssetParamsLoader};
 use overlay::{OverlayParams, OverlayParamsLoader};
+use palette::{PaletteParams, PaletteParamsLoader};
 use physics::{PhysicsParams, PhysicsParamsLoader};
 use render::{RenderParams, RenderParamsLoader};
 
@@ -31,6 +35,7 @@ use render::{RenderParams, RenderParamsLoader};
 
 #[derive(Resource, Default)] pub struct PhysicsParamsHandle(pub Handle<PhysicsParams>);
 #[derive(Resource, Default)] pub struct RenderParamsHandle(pub Handle<RenderParams>);
+#[derive(Resource, Default)] pub struct PaletteParamsHandle(pub Handle<PaletteParams>);
 #[derive(Resource, Default)] pub struct OverlayParamsHandle(pub Handle<OverlayParams>);
 #[derive(Resource, Default)] pub struct MaterialAssetParamsHandle(pub Handle<MaterialAssetParams>);
 #[derive(Resource, Default)] pub struct GenerationParamsHandle(pub Handle<GenerationParams>);
@@ -41,12 +46,14 @@ use render::{RenderParams, RenderParamsLoader};
 
 #[derive(Resource)] pub struct ActivePhysicsParams(pub PhysicsParams);
 #[derive(Resource)] pub struct ActiveRenderParams(pub RenderParams);
+#[derive(Resource, Clone, ExtractResource)] pub struct ActivePaletteParams(pub PaletteParams);
 #[derive(Resource)] pub struct ActiveOverlayParams(pub OverlayParams);
 #[derive(Resource)] pub struct ActiveMaterialAssetParams(pub MaterialAssetParams);
 #[derive(Resource)] pub struct ActiveGenerationParams(pub GenerationParams);
 
 impl Default for ActivePhysicsParams       { fn default() -> Self { Self(PhysicsParams::default()) } }
 impl Default for ActiveRenderParams        { fn default() -> Self { Self(RenderParams::default()) } }
+impl Default for ActivePaletteParams       { fn default() -> Self { Self(PaletteParams::default()) } }
 impl Default for ActiveOverlayParams       { fn default() -> Self { Self(OverlayParams::default()) } }
 impl Default for ActiveMaterialAssetParams { fn default() -> Self { Self(MaterialAssetParams::default()) } }
 impl Default for ActiveGenerationParams    { fn default() -> Self { Self(GenerationParams::default()) } }
@@ -62,21 +69,25 @@ impl Plugin for ParamsPlugin {
         app
             .init_asset::<PhysicsParams>()
             .init_asset::<RenderParams>()
+            .init_asset::<PaletteParams>()
             .init_asset::<OverlayParams>()
             .init_asset::<MaterialAssetParams>()
             .init_asset::<GenerationParams>()
             .register_asset_loader(PhysicsParamsLoader)
             .register_asset_loader(RenderParamsLoader)
+            .register_asset_loader(PaletteParamsLoader)
             .register_asset_loader(OverlayParamsLoader)
             .register_asset_loader(MaterialAssetParamsLoader)
             .register_asset_loader(GenerationParamsLoader)
             .init_resource::<PhysicsParamsHandle>()
             .init_resource::<RenderParamsHandle>()
+            .init_resource::<PaletteParamsHandle>()
             .init_resource::<OverlayParamsHandle>()
             .init_resource::<MaterialAssetParamsHandle>()
             .init_resource::<GenerationParamsHandle>()
             .init_resource::<ActivePhysicsParams>()
             .init_resource::<ActiveRenderParams>()
+            .init_resource::<ActivePaletteParams>()
             .init_resource::<ActiveOverlayParams>()
             .init_resource::<ActiveMaterialAssetParams>()
             .init_resource::<ActiveGenerationParams>()
@@ -84,6 +95,7 @@ impl Plugin for ParamsPlugin {
             .add_systems(Update, (
                 hot_reload_physics,
                 hot_reload_render,
+                hot_reload_palette,
                 hot_reload_overlay,
                 hot_reload_material,
                 hot_reload_generation,
@@ -99,12 +111,14 @@ fn load_all_params(
     asset_server: Res<AssetServer>,
     mut physics_h:    ResMut<PhysicsParamsHandle>,
     mut render_h:     ResMut<RenderParamsHandle>,
+    mut palette_h:    ResMut<PaletteParamsHandle>,
     mut overlay_h:    ResMut<OverlayParamsHandle>,
     mut material_h:   ResMut<MaterialAssetParamsHandle>,
     mut generation_h: ResMut<GenerationParamsHandle>,
 ) {
     physics_h.0    = asset_server.load("params/physics.ron");
     render_h.0     = asset_server.load("params/render.ron");
+    palette_h.0    = asset_server.load("params/palette.ron");
     overlay_h.0    = asset_server.load("params/overlay.ron");
     material_h.0   = asset_server.load("params/material.ron");
     generation_h.0 = asset_server.load("params/generation.ron");
@@ -130,6 +144,15 @@ fn hot_reload_render(
     mut events: MessageReader<AssetEvent<RenderParams>>,
 ) {
     apply_if_valid(&handle.0, &assets, &mut active.0, &mut events, "render.ron");
+}
+
+fn hot_reload_palette(
+    handle: Res<PaletteParamsHandle>,
+    assets: Res<Assets<PaletteParams>>,
+    mut active: ResMut<ActivePaletteParams>,
+    mut events: MessageReader<AssetEvent<PaletteParams>>,
+) {
+    apply_if_valid(&handle.0, &assets, &mut active.0, &mut events, "palette.ron");
 }
 
 fn hot_reload_overlay(
@@ -169,6 +192,7 @@ trait Validatable: Clone {
 
 impl Validatable for PhysicsParams       { fn validate(&self) -> Result<(), String> { self.validate() } }
 impl Validatable for RenderParams        { fn validate(&self) -> Result<(), String> { self.validate() } }
+impl Validatable for PaletteParams       { fn validate(&self) -> Result<(), String> { self.validate() } }
 impl Validatable for OverlayParams       { fn validate(&self) -> Result<(), String> { self.validate() } }
 impl Validatable for MaterialAssetParams { fn validate(&self) -> Result<(), String> { self.validate() } }
 impl Validatable for GenerationParams    { fn validate(&self) -> Result<(), String> { self.validate() } }

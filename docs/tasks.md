@@ -125,6 +125,8 @@
   - [x] GPU粒子から独立したドット存在度グリッドへ splat + blur し、閾値でドット有無を決める前処理パスを実装する。
   - [x] GPU粒子/密度バッファからドット絵描画するパスを実装する。
   - [x] フラグメントシェーダーを第一候補として実装し、必要ならcompute前処理を追加する。
+  - [x] 異種粒子混在セルで平均色を使わず、材質パレットからドット単位で相をランダム選択する描画へ変更する。
+  - [x] 材質別カラーパレット定義を shader ハードコードから `assets/params/palette.ron` へ移管し、hot reload 可能にする。
   - [ ] 表示品質（連続性、エイリアシング、tile境界、ちらつき）を確認する。
   - [ ] 縮小時（描画ドット < 画面ピクセル）のAA品質を改善する（mipmap / 解析的AA）。
   - [x] `water_drop` 自動実行でスクリーンショットを保存し、成果物で表示確認できるようにする。
@@ -139,6 +141,8 @@
   - 2026-03-01: `PARTICLES_AUTOVERIFY_SCREENSHOT=1 ... OUT=artifacts/water_drop_dot_default.png ...` で通常表示を撮影し、粒子単位ではなく連続した水塊として描画されることを確認。
   - 2026-03-01: `PARTICLES_AUTOVERIFY_SCREENSHOT=1 ... OUT=artifacts/water_drop_dot_zoom.png ... CAMERA_SCALE=0.35 CAMERA_CENTER_X=0 CAMERA_CENTER_Y=-6` で拡大表示を撮影し、ドットパターンが視認できることを確認。
   - 2026-03-01: シェーダー資産を責務別に再配置（`assets/shaders/physics|render|overlay`）。Rust側のロードパスも追従し、`physics` と `render/overlay` の分離を明確化。
+  - 2026-03-03: 混在ドットの色決定を「密度加重ランダム相選択 + 相ごとの4色パレット選択」へ更新。平均色 `mix` を廃止し、水/土/砂の離散的なドット表現へ変更。
+  - 2026-03-03: 材質パレットを `assets/params/palette.ron` に移管し、`src/params/palette.rs` + `ParamsPlugin` hot reload + `WaterDotGpu` の uniform 連携を実装。`configs/autoverify/sand_water_interaction_drop_screenshot.json` で表示確認。
 - 完了条件:
   - `water_drop` で「計算 + 描画」がGPU完結で実行できる。
   - スクリーンショット成果物で本流GPU描画を確認できる。
@@ -518,6 +522,7 @@
     - `cargo test --lib` ✅（100 passed）
     - `cargo test --test physics_scenarios -- --nocapture` ✅
   - 2026-03-02: 粒子 overlay 非表示回帰を修正。`particle_overlay_gpu.wgsl` のローカル `GpuParticle/MpmParams` 定義を廃止し `mpm_types.wgsl` を import して GPU バッファレイアウトと単一化。`configs/autoverify/soil_repose_drop_screenshot.json` 実行で `artifacts/autoverify/soil_repose_drop.png` に overlay 粒子描画を確認。
+  - 2026-03-03: 粉体の圧縮挙動調整として `physics.ron` の `water.sound_speed_mps=32.0`, `coupling.drag_gamma=100.0`, `coupling.friction=1.0` を更新し、同時に粒子解像度を `src/physics/material/defaults.rs` の `PARTICLES_PER_CELL=16` へ統一（`water/soil/sand/stone granular`）。
   - 2026-03-02: 土砂落下で「底面で過圧縮 -> 横噴出」する回帰に対応。
     - `mpm_g2p.wgsl` の DP 射影後で極小 `det(F)` のみ等方フォールバックするガードを追加（通常応答は維持）。
     - `mpm_grid_update.wgsl` の地形侵入回復速度注入を再調整（方式は維持しつつ cap を `3.0 -> 1.2`）。
@@ -589,3 +594,4 @@
 - LoD境界フラックス交換（同期点、補間、対称更新）の実装詳細を確定する。
 - 水の圧力モデル（`J` ベース / EOS ベース）の採用条件とパラメータ範囲を確定する。
 - 地形境界SDF供給の「未改変=生成関数、改変=差分LoDキャッシュ」運用を実装側で固定する。
+- `PARAM-01` のパラメータ資産数が実装では6ファイル（`palette.ron` 追加）へ増えているため、`docs/design.md` の記述（5ファイル前提）を次回Design sessionで更新する。

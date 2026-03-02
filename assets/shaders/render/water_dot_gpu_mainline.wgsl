@@ -19,10 +19,18 @@ struct WaterDotParams {
     _pad3: u32,
 }
 
+struct WaterDotPalette {
+    water: array<vec4<f32>, 4>,
+    soil: array<vec4<f32>, 4>,
+    sand: array<vec4<f32>, 4>,
+}
+
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<uniform> params: WaterDotParams;
-@group(0) @binding(2) var<storage, read> blurred_density_total: array<f32>;
-@group(0) @binding(3) var<storage, read> blurred_density_granular: array<f32>;
+@group(0) @binding(2) var<storage, read> blurred_density_water: array<f32>;
+@group(0) @binding(3) var<storage, read> blurred_density_soil: array<f32>;
+@group(0) @binding(4) var<storage, read> blurred_density_sand: array<f32>;
+@group(0) @binding(5) var<uniform> palette: WaterDotPalette;
 
 struct VertexOut {
     @builtin(position)
@@ -48,31 +56,22 @@ fn in_bounds(x: i32, y: i32) -> bool {
     return x >= 0 && y >= 0 && u32(x) < params.width && u32(y) < params.height;
 }
 
-fn sample_density_total(dot_cell: vec2<i32>) -> f32 {
+fn sample_density_water(dot_cell: vec2<i32>) -> f32 {
     let x = clamp(dot_cell.x, 0, i32(params.width) - 1);
     let y = clamp(dot_cell.y, 0, i32(params.height) - 1);
-    return blurred_density_total[dot_index(x, y)];
+    return blurred_density_water[dot_index(x, y)];
 }
 
-fn sample_density_granular(dot_cell: vec2<i32>) -> f32 {
+fn sample_density_soil(dot_cell: vec2<i32>) -> f32 {
     let x = clamp(dot_cell.x, 0, i32(params.width) - 1);
     let y = clamp(dot_cell.y, 0, i32(params.height) - 1);
-    return blurred_density_granular[dot_index(x, y)];
+    return blurred_density_soil[dot_index(x, y)];
 }
 
-fn srgb_channel_to_linear(x: f32) -> f32 {
-    if x <= 0.04045 {
-        return x / 12.92;
-    }
-    return pow((x + 0.055) / 1.055, 2.4);
-}
-
-fn srgb8_to_linear(rgb: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        srgb_channel_to_linear(rgb.x),
-        srgb_channel_to_linear(rgb.y),
-        srgb_channel_to_linear(rgb.z),
-    );
+fn sample_density_sand(dot_cell: vec2<i32>) -> f32 {
+    let x = clamp(dot_cell.x, 0, i32(params.width) - 1);
+    let y = clamp(dot_cell.y, 0, i32(params.height) - 1);
+    return blurred_density_sand[dot_index(x, y)];
 }
 
 fn deterministic_palette_index(x: i32, y: i32, seed: u32) -> u32 {
@@ -87,32 +86,52 @@ fn deterministic_palette_index(x: i32, y: i32, seed: u32) -> u32 {
     return state & 0x3u;
 }
 
-fn water_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
-    let idx = deterministic_palette_index(x, y, seed);
-    if idx == 0u {
-        return srgb8_to_linear(vec3<f32>(42.0 / 255.0, 120.0 / 255.0, 202.0 / 255.0));
-    }
-    if idx == 1u {
-        return srgb8_to_linear(vec3<f32>(52.0 / 255.0, 136.0 / 255.0, 218.0 / 255.0));
-    }
-    if idx == 2u {
-        return srgb8_to_linear(vec3<f32>(65.0 / 255.0, 152.0 / 255.0, 228.0 / 255.0));
-    }
-    return srgb8_to_linear(vec3<f32>(78.0 / 255.0, 167.0 / 255.0, 238.0 / 255.0));
+fn deterministic_rand01(x: i32, y: i32, seed: u32) -> f32 {
+    var state = (u32(x) * 0x9e3779b9u);
+    state = state ^ (u32(y) * 0x85ebca6bu);
+    state = state ^ seed;
+    state = state ^ (state >> 15u);
+    state = state * 0x2c1b3c6du;
+    state = state ^ (state >> 12u);
+    state = state * 0x297a2d39u;
+    state = state ^ (state >> 15u);
+    return f32(state & 0x00ffffffu) / 16777215.0;
 }
 
-fn granular_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
+fn water_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
+    let idx = deterministic_palette_index(x, y, seed);
+    return palette.water[idx].rgb;
+}
+
+fn soil_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
     let idx = deterministic_palette_index(x + 31, y - 17, seed ^ 0x59du);
-    if idx == 0u {
-        return srgb8_to_linear(vec3<f32>(112.0 / 255.0, 86.0 / 255.0, 61.0 / 255.0));
+    return palette.soil[idx].rgb;
+}
+
+fn sand_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
+    let idx = deterministic_palette_index(x - 19, y + 23, seed ^ 0x7f4au);
+    return palette.sand[idx].rgb;
+}
+
+fn choose_phase(
+    water_density: f32,
+    soil_density: f32,
+    sand_density: f32,
+    x: i32,
+    y: i32,
+    seed: u32,
+) -> u32 {
+    let sum_density = max(water_density + soil_density + sand_density, 1.0e-6);
+    let r = deterministic_rand01(x, y, seed ^ 0x13a7u);
+    let water_ratio = water_density / sum_density;
+    let soil_ratio = soil_density / sum_density;
+    if r < water_ratio {
+        return 0u;
     }
-    if idx == 1u {
-        return srgb8_to_linear(vec3<f32>(126.0 / 255.0, 97.0 / 255.0, 69.0 / 255.0));
+    if r < water_ratio + soil_ratio {
+        return 1u;
     }
-    if idx == 2u {
-        return srgb8_to_linear(vec3<f32>(144.0 / 255.0, 112.0 / 255.0, 79.0 / 255.0));
-    }
-    return srgb8_to_linear(vec3<f32>(163.0 / 255.0, 128.0 / 255.0, 92.0 / 255.0));
+    return 2u;
 }
 
 @vertex
@@ -137,11 +156,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
 
     // Sample density per dot-cell (nearest) so edge decision is dot-stable.
-    let total_density = sample_density_total(dot_cell);
+    let water_density = sample_density_water(dot_cell);
+    let soil_density = sample_density_soil(dot_cell);
+    let sand_density = sample_density_sand(dot_cell);
+    let total_density = water_density + soil_density + sand_density;
     if total_density < params.density_threshold {
         discard;
     }
-    let granular_density = sample_density_granular(dot_cell);
 
     // Keep each dot shape (square) with hard edge to avoid dark seam lines.
     let local = fract(dot_pos) - vec2<f32>(0.5, 0.5);
@@ -150,9 +171,19 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         discard;
     }
 
-    let water_color = water_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
-    let granular_color = granular_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
-    let granular_mix = clamp(granular_density / max(total_density, 1.0e-6), 0.0, 1.0);
-    let color = mix(water_color, granular_color, granular_mix);
+    let phase = choose_phase(
+        water_density,
+        soil_density,
+        sand_density,
+        dot_cell.x,
+        dot_cell.y,
+        params.palette_seed,
+    );
+    var color = water_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
+    if phase == 1u {
+        color = soil_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
+    } else if phase == 2u {
+        color = sand_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
+    }
     return vec4<f32>(color, 1.0);
 }
