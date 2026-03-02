@@ -19,21 +19,10 @@ const PHI_MAX: f32 = 0.80;
 @group(0) @binding(2) var<storage, read_write> grid_atomic: array<atomic<u32>>;
 
 const GRID_NODE_STRIDE_U32: u32 = 8u;
-const GRANULAR_STRESS_ABS_MAX: f32 = 1.0e4;
 
-struct DpParams {
+struct ElasticParams {
     lambda: f32,
     mu: f32,
-    alpha: f32,
-    k: f32,
-    hardening: f32,
-}
-
-struct GranularStressResult {
-    sigma_xx: f32,
-    sigma_xy: f32,
-    sigma_yy: f32,
-    jp_new: f32,
 }
 
 fn atomic_add_lane(lane: u32, val: f32) {
@@ -60,86 +49,11 @@ fn atomic_add_phase(node_idx: u32, phase_id: u32, dp: vec2<f32>, dm: f32) {
     }
 }
 
-fn dp_params_for_phase(phase_id: u32, params: MpmParams) -> DpParams {
+fn elastic_params_for_phase(phase_id: u32, params: MpmParams) -> ElasticParams {
     if phase_id == PHASE_GRANULAR_SOIL {
-        return DpParams(
-            params.dp_lambda_soil,
-            params.dp_mu_soil,
-            params.dp_alpha_soil,
-            params.dp_k_soil,
-            params.dp_hardening_soil,
-        );
+        return ElasticParams(params.dp_lambda_soil, params.dp_mu_soil);
     }
-    return DpParams(
-        params.dp_lambda_sand,
-        params.dp_mu_sand,
-        params.dp_alpha_sand,
-        params.dp_k_sand,
-        params.dp_hardening_sand,
-    );
-}
-
-fn granular_stress_return_mapping(
-    f00: f32,
-    f01: f32,
-    f10: f32,
-    f11: f32,
-    jp: f32,
-    params: MpmParams,
-    dp: DpParams,
-) -> GranularStressResult {
-    // Small-strain surrogate from deformation gradient.
-    let eps_xx = f00 - 1.0;
-    let eps_yy = f11 - 1.0;
-    let eps_xy = 0.5 * (f01 + f10);
-
-    let tr = eps_xx + eps_yy;
-    let dev_xx = eps_xx - 0.5 * tr;
-    let dev_yy = eps_yy - 0.5 * tr;
-    let dev_xy = eps_xy;
-
-    var sigma_xx = 2.0 * dp.mu * dev_xx + dp.lambda * tr;
-    var sigma_yy = 2.0 * dp.mu * dev_yy + dp.lambda * tr;
-    var sigma_xy = 2.0 * dp.mu * dev_xy;
-    var jp_new = jp;
-
-    var mean = 0.5 * (sigma_xx + sigma_yy);
-    var sxx = sigma_xx - mean;
-    var syy = sigma_yy - mean;
-    var sxy = sigma_xy;
-
-    let pressure_comp = max(-mean, 0.0);
-    let s_norm = sqrt(max(sxx * sxx + syy * syy + 2.0 * sxy * sxy, 0.0));
-    let k_eff = dp.k * (1.0 + dp.hardening * max(1.0 - jp, 0.0));
-    let yield_f = s_norm + dp.alpha * pressure_comp - k_eff;
-    if yield_f > 0.0 {
-        let denom =
-            2.0 * dp.mu + dp.lambda * dp.alpha * dp.alpha + dp.hardening + 1e-6;
-        let delta_gamma = clamp(yield_f / denom, 0.0, 0.06);
-        let shrink = max(0.0, 1.0 - (2.0 * dp.mu * delta_gamma) / (s_norm + 1e-6));
-        sxx *= shrink;
-        syy *= shrink;
-        sxy *= shrink;
-        let p_new = max(0.0, pressure_comp - dp.lambda * dp.alpha * delta_gamma);
-        sigma_xx = sxx - p_new;
-        sigma_yy = syy - p_new;
-        sigma_xy = sxy;
-        jp_new = clamp(jp * exp(-delta_gamma * dp.hardening), 0.7, 1.6);
-    }
-
-    // Granular phase has no tensile capacity in v1.
-    mean = 0.5 * (sigma_xx + sigma_yy);
-    let max_mean = -max(params.granular_tensile_clamp, 0.0);
-    if mean > max_mean {
-        let correction = mean - max_mean;
-        sigma_xx -= correction;
-        sigma_yy -= correction;
-    }
-    sigma_xx = clamp(sigma_xx, -GRANULAR_STRESS_ABS_MAX, GRANULAR_STRESS_ABS_MAX);
-    sigma_xy = clamp(sigma_xy, -GRANULAR_STRESS_ABS_MAX, GRANULAR_STRESS_ABS_MAX);
-    sigma_yy = clamp(sigma_yy, -GRANULAR_STRESS_ABS_MAX, GRANULAR_STRESS_ABS_MAX);
-
-    return GranularStressResult(sigma_xx, sigma_xy, sigma_yy, jp_new);
+    return ElasticParams(params.dp_lambda_sand, params.dp_mu_sand);
 }
 
 @compute @workgroup_size(64)
@@ -170,44 +84,52 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // J = det(F)
     let j = mat2_det(f00, f01, f10, f11);
-    // Clamp J for stability
     let j_clamped = clamp(j, params.j_min, params.j_max);
 
     let phase_id = p.phase_id;
     let is_granular = phase_is_granular(phase_id);
+
     // EOS: p = K * (1/J - 1)  [Eq.7, physics.md]
     var pressure = params.bulk_modulus * (1.0 / j_clamped - 1.0);
     // Tension suppression via fill fraction [Eq.11, physics.md]:
     // negative pressure is smoothly damped by s(φ) = smoothstep(PHI_MIN, PHI_MAX, φ_p).
     if !is_granular && pressure < 0.0 {
-        let phi_p = p.phi_p;
-        let s = smoothstep(PHI_MIN, PHI_MAX, phi_p);
+        let s = smoothstep(PHI_MIN, PHI_MAX, p.phi_p);
         pressure *= s;
     }
-    var granular_sigma_xx = 0.0;
-    var granular_sigma_xy = 0.0;
-    var granular_sigma_yy = 0.0;
-    var jp_out = p.jp;
-    if is_granular {
-        let dp = dp_params_for_phase(phase_id, params);
-        let mapped = granular_stress_return_mapping(
-            f00,
-            f01,
-            f10,
-            f11,
-            p.jp,
-            params,
-            dp,
-        );
-        granular_sigma_xx = mapped.sigma_xx;
-        granular_sigma_xy = mapped.sigma_xy;
-        granular_sigma_yy = mapped.sigma_yy;
-        jp_out = mapped.jp_new;
-    } else {
-        jp_out = 1.0;
-    }
 
+    // Water internal force uses V * p * grad where V = V0 * J.
     let vj = v0p * j_clamped;
+
+    // Granular internal force uses Eq.24 with Neo-Hookean P [Eq.13].
+    var a00 = 0.0;
+    var a01 = 0.0;
+    var a10 = 0.0;
+    var a11 = 0.0;
+    if is_granular {
+        let elastic = elastic_params_for_phase(phase_id, params);
+        let j_safe = max(j, 1.0e-6);
+        let inv_j = 1.0 / j_safe;
+        let log_j = log(j_safe);
+
+        // F^{-T}
+        let invt00 = f11 * inv_j;
+        let invt01 = -f10 * inv_j;
+        let invt10 = -f01 * inv_j;
+        let invt11 = f00 * inv_j;
+
+        // P = mu(F - F^{-T}) + lambda * ln(J) * F^{-T}
+        let p00 = elastic.mu * (f00 - invt00) + elastic.lambda * log_j * invt00;
+        let p01 = elastic.mu * (f01 - invt01) + elastic.lambda * log_j * invt01;
+        let p10 = elastic.mu * (f10 - invt10) + elastic.lambda * log_j * invt10;
+        let p11 = elastic.mu * (f11 - invt11) + elastic.lambda * log_j * invt11;
+
+        // A = P * F^T (row-major A entries)
+        a00 = p00 * f00 + p10 * f10;
+        a01 = p00 * f01 + p10 * f11;
+        a10 = p01 * f00 + p11 * f10;
+        a11 = p01 * f01 + p11 * f11;
+    }
 
     // Quadratic B-spline stencil: base node
     let grid_pos = xp * inv_h;
@@ -240,14 +162,16 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
                 vp.y + c01 * dx.x + c11 * dx.y,
             );
 
-            // Internal force: -V * sigma * grad
+            // Internal force contribution (without dt): Eq.24.
+            // Here `grad` is ∇_{x_p} w_ip (particle-position gradient), so the sign is
+            // opposite to the usual ∇_{x_i} w_ip form used in the equation text.
             var stress_force = vec2<f32>(vj * pressure * grad.x, vj * pressure * grad.y);
             if is_granular {
-                let sigma_grad = vec2<f32>(
-                    granular_sigma_xx * grad.x + granular_sigma_xy * grad.y,
-                    granular_sigma_xy * grad.x + granular_sigma_yy * grad.y,
+                let a_grad = vec2<f32>(
+                    a00 * grad.x + a01 * grad.y,
+                    a10 * grad.x + a11 * grad.y,
                 );
-                stress_force = vj * sigma_grad;
+                stress_force = -v0p * a_grad;
             }
 
             // Total momentum contribution
@@ -260,6 +184,4 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
             atomic_add_phase(nidx, phase_id, dp, dm);
         }
     }
-
-    particles[pid].jp = jp_out;
 }

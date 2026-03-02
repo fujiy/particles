@@ -1,0 +1,12 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "soil_repose_drop",
+    "output_path": "artifacts/autoverify/soil_repose_drop_long_late.png",
+    "warmup_frames": 1760,
+    "max_wait_after_capture_frames": 300,
+    "camera_scale": 0.45,
+    "camera_center_x": 0.0,
+    "camera_center_y": -6.0
+  }
+}

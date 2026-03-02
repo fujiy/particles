@@ -473,6 +473,97 @@
 
 
 
+### [MPM-PHYS-GRANULAR-01] physics.md 改訂に基づく粉体GPU実装ギャップ解消
+
+- Status: `In Progress`
+- 背景:
+  - `physics.md` 改訂（2026-03-02）で、粉体は「SVD + log-strain 射影（Eqs.14-21）」と「G2P後の塑性射影（Eq.34後）」を前提に定義された。
+  - 現在のGPU実装は暫定の small-strain DP return mapping であり、仕様との不一致が複数残っている。
+  - mixed（水+粉体）連成も、界面法線と衝突判定の定義が `physics.md`（Eqs.37-44）と一致していない。
+- スコープ:
+  - 粉体構成則と水-粉体連成を `physics.md` v2 の式へ一致させる。
+  - 粉体粒子状態・パラメータ資産・検証メトリクスを `physics.md` の受け入れ基準へ合わせる。
+- Subtasks:
+  - [x] **[状態量整合]** 粉体状態を `jp` ベースから `v_vol(diff_log_J)` を主状態とする構成へ置換し、GPUバッファ/Rust同期を更新する。
+  - [x] **[DP射影位置修正]** `mpm_g2p.wgsl` で Eq.34 後に 2x2 SVD + log-strain DP射影（Eqs.14-20）を実装し、Eq.21 で `v_vol` を更新する。
+  - [x] **[応力評価修正]** `mpm_p2g.wgsl` の small-strain 応力計算を撤去し、DP射影後 `F` に対する compressible Neo-Hookean（Eq.13）から内部力を評価する。
+  - [x] **[連成則修正]** `mpm_grid_update.wgsl` の水-粉体交換を Eq.39-44 ベースへ再実装する（`∇φ_g` 法線、接近時のみ法線インパルス、接線摩擦円錐、対称運動量更新）。
+  - [x] **[パラメータ更新]** `PhysicsParams` / `MpmParams` を新連成則・射影に必要なパラメータへ更新し、旧 `normal_stiffness/tangent_drag/max_impulse_ratio` 依存を撤去する。
+  - [x] **[単一路統一]** `StoneGranular` を含む granular 粒子の本番経路を MLS-MPM 単一路に統一し、GPU無効フォールバック条件を明示化する。
+  - [ ] **[検証拡張]** autoverify/シナリオに `v_vol` ドリフト、相間インパルス収支、mixed 侵入率の指標を追加し、artifactで判定可能にする。
+- 進捗:
+  - 2026-03-02: 差分レビュー実施。主な不一致点を確認。
+    - `mpm_p2g.wgsl` は small-strain 前提の暫定DP return mapping（`granular_stress_return_mapping`）を使用しており、`physics.md` の SVD + log-strain 射影と不一致。
+    - `mpm_g2p.wgsl` は Eq.34 後の DP射影および `v_vol` 更新を実装しておらず、`J` の一様リスケールに留まる。
+    - `mpm_grid_update.wgsl` の相間連成で法線を `rel/|rel|` から作っているため、接線成分が常に0となり、Eq.44 相当の接線摩擦が機能していない。
+    - 粉体状態量が `v_vol` ではなく `jp` で保持されており、`physics.md` Eq.21 の体積補正トラッキングに未対応。
+  - 2026-03-02: `jp -> v_vol(diff_log_J)` へ置換（Rust `ContinuumParticleWorld` / GPU particle layout / readback 同期 / render shader layout追随）。
+  - 2026-03-02: `mpm_g2p.wgsl` を 2x2 SVD + log-strain DP射影へ更新し、Eq.21 の `v_vol` 更新を実装。`mpm_p2g.wgsl` は Neo-Hookean 応力（Eq.13）で内部力評価へ変更。
+  - 2026-03-02: `mpm_grid_update.wgsl` の相間連成を `∇phi_g` 法線 + 対称drag/摩擦円錐（Eqs.39-44）へ更新。地形境界には内部侵入回復用の速度押し戻し（数値安定化）を追加。
+  - 2026-03-02: CPU粉体ソルバを削除（`src/physics/solver/granular.rs` 削除、`particle_step` から呼び出し撤去、関連unit test整理）。`StoneGranular` を MPM managed phase に含めた。
+  - 2026-03-02: 検証実行:
+    - `cargo check` ✅
+    - `cargo test --lib` ✅（100 passed）
+    - `cargo test --test physics_scenarios -- --nocapture` ✅
+    - `cargo run -q -- --autoverify-config configs/autoverify/soil_repose_drop.json` ❌（`granular_repose_angle_deg` 未達: 12.037）
+    - `cargo run -q -- --autoverify-config configs/autoverify/sand_water_interaction_drop.json` ❌（`material_interaction_centroid_order` 未達: primary_y=-7.2037, secondary_y=-7.2405）
+  - 2026-03-02: 追加修正:
+    - `mpm_p2g.wgsl` の粉体内部力項で、`∇w` を粒子位置勾配（`∇_{x_p}`）として計算しているにも関わらず Eq.24 の符号をそのまま適用していた不一致を修正（`stress_force = -v0p * Agrad` -> `+v0p * Agrad`）。
+    - `assets/params/physics.ron` の粉体系数を再調整（`j_min=0.60`, `alpha_apic_granular=0.60`, soil/sand の `E`・`friction_deg` を強化、`coupling_drag_gamma=0.35`, `coupling_friction=0.25`）。
+    - mixed での沈降順序安定化のため `src/physics/material/defaults.rs` の `SAND_GRANULAR_CELL_MASS` を `1.3 -> 2.2` に引き上げ。
+  - 2026-03-02: 再検証（test world autoverify）:
+    - `cargo run -q -- --autoverify-config configs/autoverify/soil_repose_drop.json` ✅
+    - `cargo run -q -- --autoverify-config configs/autoverify/sand_water_interaction_drop.json` ✅
+    - `cargo check` ✅
+    - `cargo test --lib` ✅（100 passed）
+    - `cargo test --test physics_scenarios -- --nocapture` ✅
+  - 2026-03-02: 粒子 overlay 非表示回帰を修正。`particle_overlay_gpu.wgsl` のローカル `GpuParticle/MpmParams` 定義を廃止し `mpm_types.wgsl` を import して GPU バッファレイアウトと単一化。`configs/autoverify/soil_repose_drop_screenshot.json` 実行で `artifacts/autoverify/soil_repose_drop.png` に overlay 粒子描画を確認。
+  - 2026-03-02: 土砂落下で「底面で過圧縮 -> 横噴出」する回帰に対応。
+    - `mpm_g2p.wgsl` の DP 射影後で極小 `det(F)` のみ等方フォールバックするガードを追加（通常応答は維持）。
+    - `mpm_grid_update.wgsl` の地形侵入回復速度注入を再調整（方式は維持しつつ cap を `3.0 -> 1.2`）。
+    - `assets/params/physics.ron` を連成安定寄りに再調整（`coupling_drag_gamma=0.20`, `coupling_friction=0.15`）。
+    - `src/physics/material/defaults.rs` の砂粒状セル質量を `2.6` に更新し mixed での重心順序を安定化。
+  - 2026-03-02: 再検証（過圧縮/不安定化チェック）
+    - `cargo run -q -- --autoverify-config configs/autoverify/soil_repose_drop.json` ✅（pass, `max_speed_mps=0.686`, `terrain_penetration_ratio=0.00113`）
+    - `cargo run -q -- --autoverify-config configs/autoverify/sand_water_interaction_drop.json` ✅（pass, `max_speed_mps=7.774`, `terrain_penetration_ratio=0.0`）
+    - `cargo run -q -- --autoverify-config configs/autoverify/soil_repose_drop_screenshot.json` ✅（`artifacts/autoverify/soil_repose_drop.png` で底面一列化・噴出の再発なしを確認）
+    - `cargo check` / `cargo test --lib` / `cargo test --test physics_scenarios -- --nocapture` ✅
+  - 2026-03-02: `grid` 密度計測を autoverify レポートへ追加（`grid_phi_*`）。
+    - 実装: `src/main.rs` の `MpmAutoVerifyReport` に `grid_phi_{water,granular}_{max,p99,mean_nonzero}` と `nonzero_nodes` を追加。粒子→3x3 B-spline の質量散布から `phi = m / (rho0 * h^2)` を算出。
+    - 観測: `soil_repose_drop` で `grid_phi_granular_max=11.03`, `p99=10.99`。`sand_water_interaction_drop` では granular `max=4.10`, `p99=3.57`。
+    - 切り分け: `j_min` 引き上げ（0.60→0.80）と soil `friction/cohesion` 低下を試験したが、`soil` の一列化/過密化は改善せず（`j_min=0.80` では `phi` がさらに悪化）。単純な係数調整より、DP射影（Case II tensionless）で圧縮が塑性固定される処理特性の寄与が大きいと判断。
+    - 対応方針: 次段で「granular 高密度ノードの compaction cap（例: `phi_g` しきい値超過時の体積回復/内部力上限）」を shader 側に導入し、`grid_phi_granular_p99` を受け入れ指標へ追加する（閾値変更は承認後）。
+  - 2026-03-02: overlay 描画順を修正。
+    - `src/overlay/mod.rs` の Core2d graph を `MainTransparentPass -> WaterDotGpuLabel -> ParticleOverlayGpuLabel -> EndMainPass` に明示し、root graph の `try_add_node_edge` 依存を撤去。
+    - これにより `particle overlay` は water dot 描画より後段で実行される。
+  - 2026-03-02: 粉体 `alpha_apic_granular=0` 実験（塑性OFF条件）を実施。
+    - `mpm_g2p.wgsl` で granular 限定の `C` 分離を追加（`C_def=C_raw` を `F` 更新へ、`C_xfer=alpha*C_raw` を P2G affine 用に保存）。
+    - `assets/params/physics.ron` で `apic.granular=0.00` 条件で検証。
+    - 結果: `sand_water_interaction_drop` は形式上 pass するが granular ノード質量が消失（`grid_phi_granular_nonzero_nodes=0`）。`soil_repose_drop` は fail で粒子が極端に飛散（`tracked_max_y=192148.88`, `tracked_min_x=-177445.02`）。
+    - 判断: `alpha=0` で「粘弾性らしさ」は現れず、現行の塑性OFF + 高弾性設定では数値発散傾向が支配的。
+  - 2026-03-03: 爆発前兆解析のため autoverify ログを拡張。
+    - `src/main.rs` に granular 診断値を追加: `det(F) min/p99/max`, Neo-Hookean `|P| p99/max`, `v_vol_abs_max`, invalid件数。
+    - `soil_repose_drop`（塑性OFF + `alpha_apic_granular=0`）: `det(F)_min=0.60`, `|P|_p99=17638`, `|P|_max=35473`。
+    - `sand_water_interaction_drop` 同条件: `det(F)` が全体で `0.60` 近傍に貼り付き、`|P|_p99=174843`, `|P|_max=323982`、`grid_phi_granular_max=79.43`。
+    - screenshot でも粒子群の可視消失/画角外飛散を確認（`artifacts/autoverify/soil_repose_drop.png`, `sand_water_interaction_drop.png`）。
+  - 2026-03-03: 「着地後に左右下へ吸い込まれる」現象をゼロベースで再切り分け。
+    - 比較実験（同一パラメータ、`soil_repose_drop` 3600 step）:
+      - **bug実装**（`mpm_p2g.wgsl` で `F^{-T}` の off-diagonal が入れ替わっている状態）
+        - `cargo run -q -- --autoverify-config configs/autoverify/soil_repose_drop_long_bug.json`
+        - `grid_phi_granular_nonzero_nodes=18`, `grid_phi_granular_max=48.37`, `granular_det_f_min=max=0.60`（全粒子が下限張り付き）
+        - `artifacts/autoverify/soil_repose_drop_long_bug_late.png` で左右下の2点へ収束する崩壊を確認。
+      - **fix実装**（`F^{-T}` を正しく評価）
+        - `cargo run -q -- --autoverify-config configs/autoverify/soil_repose_drop_long_fix.json`
+        - `grid_phi_granular_nonzero_nodes=206`, `grid_phi_granular_max=3.99`, `granular_det_f_min=0.735`（過密化が解消）
+        - `artifacts/autoverify/soil_repose_drop_long_fix_late.png` で左右吸い込みの消失を確認。
+    - 結論: 主因は **physics.md ではなく WGSL 実装**。Eq.13 の `F^{-T}` を `F^{-1}` 相当で評価していたため、回転/せん断で偽応力が出て粒子が異常収束していた。
+    - 反映: `assets/shaders/physics/mpm_p2g.wgsl` の `invt01/invt10` を修正（`invt01=-f10*inv_j`, `invt10=-f01*inv_j`）。
+    - mixed 影響確認: `sand_water_interaction_drop` では過密化は改善（`phi_g_max` 79.43 -> 1.71）したが、`material_interaction_centroid_order` は未達のため追加調整が必要。
+- 完了条件:
+  - `physics.md` Eqs.13-21, 37-44 と実装が一致し、granular-only / mixed シナリオで新指標が閾値内を満たす。
+  - 粉体本番経路が MLS-MPM 単一路となり、XPBD粉体の混在依存が残らない。
+
+
 ## Closed Work Units (Deferred / Superseded)
 
 - `MPM-WATER-04A` / `Deferred` / GPU-first方針へ転換 / `docs/tasks_archive/2026-03-02-full-before-compaction.md`
