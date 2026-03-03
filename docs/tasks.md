@@ -184,7 +184,7 @@
 
 ### [REND-GPU-01] GPU常駐地形描画パイプライン（Near/Far 2層キャッシュ + リングバッファ）
 
-- Status: `Planned`
+- Status: `In Progress`
 - 背景:
   - 現行の `terrain_dot_gpu` は毎フレームCPUが全セルをエンコードし GPU storage buffer へ転送するシンプルな方式。
   - これは CPU→GPU 転送を常態化させており、Near/Far LOD分離・リングバッファ・ズーム予算管理が未実装。
@@ -204,7 +204,7 @@
   - 旧 `src/render/terrain_dot_gpu.rs` の単純転送方式を削除する。
   - 自動検証ループ（セル正確性・パン継続性・ズーム遷移・予算遵守）を整備する。
 - Subtasks:
-  - [ ] **[P0: 旧タスク整理]** [MPM-GPU-03] を Done、[WGEN-02]/[REND-01] を Superseded に移動する。
+  - [x] **[P0: 旧タスク整理]** [MPM-GPU-03] を Done、[WGEN-02]/[REND-01] を Superseded に移動する。
   - [ ] **[P1: WGSL生成関数移植]** `assets/shaders/render/terrain_gen.wgsl` を実装する。
     - [ ] CPU側 fBm（OpenSimplex or 互換ハッシュノイズ）をWGSLへ移植する。
     - [ ] `surface_height_for_x(world_x: i32) → i32` 相当を実装する。
@@ -226,11 +226,11 @@
   - [ ] **[P5: TerrainFarUpdate compute]** `assets/shaders/render/terrain_far_update.wgsl` を実装する。
     - [ ] Near テクスチャを多点サンプリングして Far 集約値（top1_id, w1）を計算する。
     - [ ] LOD k_far 変化時に Far 全体を dirty 化し、予算内で逐次再サンプリングする。
-  - [ ] **[P6: TerrainCompose fragment]** `assets/shaders/render/terrain_compose.wgsl` を実装する。
-    - [ ] フルスクリーン quad で Far（背景） → Near（前景）の順に合成する。
-    - [ ] Near: 最近傍サンプリング + 材料IDパレット（palette.ron 参照）でタイルアートを表示する。
-    - [ ] Far: カバレッジ alpha でブレンド表示する。
-    - [ ] `s = (CELL_SIZE_M * camera_zoom) / screen_pixel_size_m` を計算し、S_UP/S_DOWN ヒステリシスでモード切替する。
+  - [x] **[P6: TerrainCompose fragment — 初期版]** `assets/shaders/render/terrain_compose.wgsl` を実装する（Near単層、Farなし）。
+    - [x] フルスクリーン quad で Near テクスチャを合成して画面へ出力する。
+    - [x] Near: 最近傍サンプリング + 材料IDパレット（8×8 ドット内確定的ハッシュ）で表示する。
+    - [ ] Far: カバレッジ alpha でブレンド表示する（Far実装後）。
+    - [ ] `s = (CELL_SIZE_M * camera_zoom) / screen_pixel_size_m` を計算し、S_UP/S_DOWN ヒステリシスでモード切替する（P7後）。
   - [ ] **[P7: カメラ同期 + パン/ズーム制御]** Update schedule で `TerrainCacheState` をカメラ状態から更新するシステムを実装する。
     - [ ] カメラパン量（セル単位）を計算し、ring_offset を更新する。
     - [ ] 新規可視セル範囲を Near dirty キューへ追加する。
@@ -241,15 +241,20 @@
     - [ ] 1フレームあたり最大 `max_tiles_near / max_tiles_far` タイルを dispatch する。
     - [ ] dispatch tile list を per-frame SSBO へ書き込み、NearUpdate / FarUpdate へ渡す。
     - [ ] `render.ron` へ `terrain.max_tiles_per_frame_near / far` パラメータを追加する。
-  - [ ] **[P9: RenderGraph 統合 + 旧削除]** 3パスを RenderGraph へ組み込み、旧方式を削除する。
-    - [ ] TerrainNearUpdate → TerrainFarUpdate → TerrainCompose → WaterDotGpu → ParticleOverlay のエッジを設定する。
-    - [ ] `src/render/terrain_dot_gpu.rs` を削除し、`TerrainDotGpuPlugin` を `TerrainGpuPlugin` へ置換する。
-    - [ ] `cargo check` / `cargo test --lib` が通ることを確認する。
-  - [ ] **[P10: 自動検証]** autoverify ループを整備する。
-    - [ ] `configs/autoverify/terrain_cell_correctness.json`: 固定カメラで GPU生成セル vs CPU参照の一致率を `artifacts/terrain_cell_correctness.json` へ出力（≥ 99.9%）。
-    - [ ] `configs/autoverify/terrain_pan_continuity.json`: カメラを複数方向にパンした後スクリーンショット取得（`artifacts/terrain_pan_*.png`）。継ぎ目・穴なしを目視確認可能な成果物として出力する。
-    - [ ] `configs/autoverify/terrain_zoom_lod.json`: 複数ズームレベルでスクリーンショット取得（`artifacts/terrain_zoom_*.png`）。LOD切替後の表示一貫性を確認する。
-    - [ ] autoverify JSON に更新タイル数・GPU時間推定指標を追加する（`terrain_near_tiles_updated`, `terrain_far_tiles_updated`）。
+  - [x] **[P9: RenderGraph 統合 + 旧削除]** 2パス（NearUpdate compute + TerrainCompose fragment）を RenderGraph へ組み込み、旧方式を削除する。
+    - [x] TerrainNearUpdate（main graph） → CameraDriver → Core2d: TerrainCompose → WaterDotGpu のエッジを設定する。
+    - [x] `src/render/terrain_dot_gpu.rs` を削除し、`TerrainDotGpuPlugin` を `TerrainGpuPlugin` へ置換する。
+    - [x] `cargo check` / `cargo test --lib` が通ることを確認する（100件 pass）。
+    - [x] pipeline retry: `pending_dispatch_frames=32` でシェーダー遅延コンパイル時のリトライを実装する。
+    - [x] shader coordinate fix: `cell_f = world_xy / cell_size_m`（double-subtract バグを修正）。
+    - [x] subgraph edge: `link_terrain_and_water_graph` で Core2d sub-graph 経由の edge を正しく設定する。
+  - [x] **[P10: 自動検証 — 初期]** autoverify スクリーンショット確認を整備する。
+    - [x] `configs/autoverify/terrain_gpu_screenshot.json`: GPU地形描画スクリーンショット取得・目視確認（`artifacts/terrain_gpu.png`）。石壁・土壌パレット正常表示を確認済み。
+    - [ ] `configs/autoverify/terrain_cell_correctness.json`: GPU生成セル vs CPU参照の一致率チェック（WGSL生成関数実装後）。
+    - [ ] `configs/autoverify/terrain_pan_continuity.json`: パン継続性スクリーンショット（リングバッファ実装後）。
+    - [ ] `configs/autoverify/terrain_zoom_lod.json`: ズーム遷移スクリーンショット（LOD実装後）。
+- 進捗:
+  - 2026-03-04: P0/P9/P10初期を完了。`src/render/terrain_gpu.rs` + WGSL 2本で TerrainNearUpdate compute + TerrainCompose fragment を実装。旧 terrain_dot_gpu.rs 削除。autoverify screenshot で石壁・土壌の正常描画を確認。
 - 完了条件:
   - GPU compute で地形生成関数が自律評価され、毎フレームの CPU→GPU 全セル転送が不要になる。
   - Near/Far 2層キャッシュが GPU 常駐し、パン・ズームでリングバッファ更新が機能する。
