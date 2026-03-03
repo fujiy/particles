@@ -150,7 +150,7 @@
 
 ### [MPM-GPU-03] 地形表示のGPU完結化（CPU生成→GPU描画）
 
-- Status: `In Progress`
+- Status: `Done`
 - 背景:
   - 今後、地形と粒子へ統一的にライティング/反射を適用するためには、地形描画もGPU本流へ寄せる必要がある。
   - 既存CPUタイル描画はデバッグしやすいが、描画経路が分離し将来拡張の足かせになる。
@@ -180,6 +180,82 @@
   - `water_drop` で岩枠がGPU地形描画として表示される。
   - `default world` で生成地形がGPU描画として表示される。
   - CPU地形表示コードが撤去される。
+
+
+### [REND-GPU-01] GPU常駐地形描画パイプライン（Near/Far 2層キャッシュ + リングバッファ）
+
+- Status: `Planned`
+- 背景:
+  - 現行の `terrain_dot_gpu` は毎フレームCPUが全セルをエンコードし GPU storage buffer へ転送するシンプルな方式。
+  - これは CPU→GPU 転送を常態化させており、Near/Far LOD分離・リングバッファ・ズーム予算管理が未実装。
+  - `render.md` が規定する GPU常駐 Near/Far 2層キャッシュ方式へ移行し、CPU転送を「dirty差分のみ」に削減する。
+  - 地形生成関数（fBm + 材料層決定）をWGSLへ移植し、GPU compute が新規可視領域を自律的に評価できるようにする。
+  - [MPM-GPU-03] の完了条件はすでに達成されているため Done とし、本WUが描画品質・アーキテクチャを引き継ぐ。
+  - [REND-01]（CPUタイルパイプライン）および [WGEN-02]（CPU LODスプライト）は本WUに Superseded とする。
+- スコープ:
+  - 地形生成関数（fBm ノイズ + 材料層決定）を `terrain_gen.wgsl` としてWGSLへ移植する。
+  - Near（材料ID テクスチャ, R16Uint）/ Far（集約テクスチャ, RGBA8）をGPU常駐バッファとして保持し、リングバッファでパンに追従する。
+  - 3パス構成（`render.md` §3）:
+    - `TerrainNearUpdate` (compute): dirty タイルの材料IDをGPU生成関数で更新
+    - `TerrainFarUpdate`  (compute): Near → Far 集約
+    - `TerrainCompose`   (fragment): Far → Near を合成して画面へ
+  - dirty キュー + 予算スケジューラ（`render.ron` の `max_tiles_per_frame_near/far`）でスパイクを抑える。
+  - モード切替（Magnify/Minify + ヒステリシス S_UP=1.2, S_DOWN=0.8）を `TerrainCompose` で管理する。
+  - 旧 `src/render/terrain_dot_gpu.rs` の単純転送方式を削除する。
+  - 自動検証ループ（セル正確性・パン継続性・ズーム遷移・予算遵守）を整備する。
+- Subtasks:
+  - [ ] **[P0: 旧タスク整理]** [MPM-GPU-03] を Done、[WGEN-02]/[REND-01] を Superseded に移動する。
+  - [ ] **[P1: WGSL生成関数移植]** `assets/shaders/render/terrain_gen.wgsl` を実装する。
+    - [ ] CPU側 fBm（OpenSimplex or 互換ハッシュノイズ）をWGSLへ移植する。
+    - [ ] `surface_height_for_x(world_x: i32) → i32` 相当を実装する。
+    - [ ] `material_for_cell(global_cell: vec2<i32>) → u32`（0=Empty, 1=Stone, 2=Soil, 3=Sand）を実装する。
+    - [ ] CPU生成との整合テスト: autoverify で全セル材料一致率 ≥ 99.9% を `artifacts/terrain_cell_correctness.json` に出力する。
+  - [ ] **[P2: Near キャッシュ定義]** `TerrainNearGpuCache` テクスチャと `TerrainCacheState` Resource を定義する。
+    - [ ] テクスチャ: R16Uint、解像度 = screen_res × NearMargin / NearQuality（デフォルト 1/2 × 1.35倍）
+    - [ ] Resource: `cache_origin_world: IVec2`, `ring_offset: IVec2`, `lod_k: i32`, `near_dirty_queue`, `far_dirty_queue`
+    - [ ] `world_cell → texture_index`（mod-ring 座標変換）ユーティリティを実装する。
+  - [ ] **[P3: Far キャッシュ定義]** `TerrainFarGpuCache` テクスチャを定義する。
+    - [ ] 解像度 = Near の 1/2、マージン 2.5 倍（`render.md` §5.4）
+    - [ ] セル値: `far_top1_id: u8`, `far_w1: u8`, `solid_fraction: u8`, pad（RGBA8 format）
+    - [ ] LOD k_far = k_near + FAR_OFFSET（デフォルト 3）
+  - [ ] **[P4: TerrainNearUpdate compute]** `assets/shaders/render/terrain_near_update.wgsl` を実装する。
+    - [ ] 入力: dirty tile list（SSBO）、生成関数パラメータ（uniform）、地形オーバーライドSSBO
+    - [ ] 各 dirty cell で `material_for_cell()` を評価し、オーバーライドがあれば上書きする。
+    - [ ] 結果を Near テクスチャ（リング座標）へ書き込む。
+    - [ ] 地形編集オーバーライド転送経路: `TerrainOverrideDeltaBuffer`（CPU dirty_chunks差分 → GPU）を実装する。
+  - [ ] **[P5: TerrainFarUpdate compute]** `assets/shaders/render/terrain_far_update.wgsl` を実装する。
+    - [ ] Near テクスチャを多点サンプリングして Far 集約値（top1_id, w1）を計算する。
+    - [ ] LOD k_far 変化時に Far 全体を dirty 化し、予算内で逐次再サンプリングする。
+  - [ ] **[P6: TerrainCompose fragment]** `assets/shaders/render/terrain_compose.wgsl` を実装する。
+    - [ ] フルスクリーン quad で Far（背景） → Near（前景）の順に合成する。
+    - [ ] Near: 最近傍サンプリング + 材料IDパレット（palette.ron 参照）でタイルアートを表示する。
+    - [ ] Far: カバレッジ alpha でブレンド表示する。
+    - [ ] `s = (CELL_SIZE_M * camera_zoom) / screen_pixel_size_m` を計算し、S_UP/S_DOWN ヒステリシスでモード切替する。
+  - [ ] **[P7: カメラ同期 + パン/ズーム制御]** Update schedule で `TerrainCacheState` をカメラ状態から更新するシステムを実装する。
+    - [ ] カメラパン量（セル単位）を計算し、ring_offset を更新する。
+    - [ ] 新規可視セル範囲を Near dirty キューへ追加する。
+    - [ ] テレポート検出（`|Δ| > cache_size / 2`）→ Near/Far 全面 dirty 化する。
+    - [ ] ズーム LOD k を計算し、ヒステリシスで切替判断する。k 変化時に Far dirty キューを全面化する。
+  - [ ] **[P8: dirty キュー + 予算スケジューラ]** Near/Far dirty キューと1フレーム更新予算を実装する。
+    - [ ] タイル単位 dirty キュー（カメラ中心距離優先ソート）を実装する。
+    - [ ] 1フレームあたり最大 `max_tiles_near / max_tiles_far` タイルを dispatch する。
+    - [ ] dispatch tile list を per-frame SSBO へ書き込み、NearUpdate / FarUpdate へ渡す。
+    - [ ] `render.ron` へ `terrain.max_tiles_per_frame_near / far` パラメータを追加する。
+  - [ ] **[P9: RenderGraph 統合 + 旧削除]** 3パスを RenderGraph へ組み込み、旧方式を削除する。
+    - [ ] TerrainNearUpdate → TerrainFarUpdate → TerrainCompose → WaterDotGpu → ParticleOverlay のエッジを設定する。
+    - [ ] `src/render/terrain_dot_gpu.rs` を削除し、`TerrainDotGpuPlugin` を `TerrainGpuPlugin` へ置換する。
+    - [ ] `cargo check` / `cargo test --lib` が通ることを確認する。
+  - [ ] **[P10: 自動検証]** autoverify ループを整備する。
+    - [ ] `configs/autoverify/terrain_cell_correctness.json`: 固定カメラで GPU生成セル vs CPU参照の一致率を `artifacts/terrain_cell_correctness.json` へ出力（≥ 99.9%）。
+    - [ ] `configs/autoverify/terrain_pan_continuity.json`: カメラを複数方向にパンした後スクリーンショット取得（`artifacts/terrain_pan_*.png`）。継ぎ目・穴なしを目視確認可能な成果物として出力する。
+    - [ ] `configs/autoverify/terrain_zoom_lod.json`: 複数ズームレベルでスクリーンショット取得（`artifacts/terrain_zoom_*.png`）。LOD切替後の表示一貫性を確認する。
+    - [ ] autoverify JSON に更新タイル数・GPU時間推定指標を追加する（`terrain_near_tiles_updated`, `terrain_far_tiles_updated`）。
+- 完了条件:
+  - GPU compute で地形生成関数が自律評価され、毎フレームの CPU→GPU 全セル転送が不要になる。
+  - Near/Far 2層キャッシュが GPU 常駐し、パン・ズームでリングバッファ更新が機能する。
+  - dirty キュー＋予算スケジューラで1フレーム更新コストが `max_tiles_near/far` 以内に収まる。
+  - autoverify でセル一致率 ≥ 99.9%、パン継続性・ズーム遷移スクリーンショットが成立する。
+  - 旧 `terrain_dot_gpu` 方式が完全削除され、[MPM-GPU-03]/[REND-01]/[WGEN-02] が整理済みである。
 
 
 ### [MPM-WATER-02] 明示MLS-MPM水ソルバ（単一レート）実装
@@ -340,7 +416,7 @@
 
 ### [WGEN-02] 地形LODサムネイル生成
 
-- Status: `In Progress`
+- Status: `Superseded` → [REND-GPU-01] GPU常駐キャッシュ方式に置換
 - 背景:
   - 遠景背景と超拡大表示の両方で、フルチャンク生成なしに地形外観を取得したい。
 - スコープ:
@@ -396,7 +472,7 @@
 
 ### [REND-01] Tileベース描画パイプライン再編（Full/LOD統合）
 
-- Status: `In Progress`
+- Status: `Superseded` → [REND-GPU-01] GPU常駐キャッシュ方式に置換
 - 背景:
   - 現状はフルチャンク描画とLOD描画の管理単位が分かれており、同期コストと責務境界が不明瞭。
   - ズーム時に `sync_lod_chunks_to_render` などの更新コストが高く、Tile単位の並列更新へ寄せたい。
@@ -571,6 +647,9 @@
 
 ## Closed Work Units (Deferred / Superseded)
 
+- `MPM-GPU-03` / `Done` / 完了条件達成（GPU地形描画成立・旧CPU描画削除済み）/ Active Work Units 進捗欄参照
+- `REND-01` / `Superseded` / GPU Near/Far 2層キャッシュ方式 [REND-GPU-01] に置換 / Active Work Units 詳細参照
+- `WGEN-02` / `Superseded` / GPU Near/Far 2層キャッシュ方式 [REND-GPU-01] に置換 / Active Work Units 詳細参照
 - `MPM-WATER-04A` / `Deferred` / GPU-first方針へ転換 / `docs/tasks_archive/2026-03-02-full-before-compaction.md`
 - `MPM-WATER-04B` / `Deferred` / 単一grid GPU版で一様substepを優先 / `docs/tasks_archive/2026-03-02-full-before-compaction.md`
 - `MPM-WATER-07` / `Deferred` / 空間LoD方針を凍結 / `docs/tasks_archive/2026-03-02-full-before-compaction.md`
