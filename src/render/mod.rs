@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bevy::prelude::*;
 
-mod terrain_dot_gpu;
+mod terrain_gpu;
 mod water_dot_gpu;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -21,5 +21,5 @@ pub struct TerrainRenderDiagnostics {
     pub visible_tiles: Vec<RenderVisibleTile>,
 }
 
-pub use terrain_dot_gpu::TerrainDotGpuPlugin;
+pub use terrain_gpu::TerrainGpuPlugin;
 pub use water_dot_gpu::{WaterDotGpuLabel, WaterDotGpuPlugin};

@@ -21,7 +21,7 @@ use particles::physics::world::continuum::{
 use particles::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use particles::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use particles::physics::world::terrain::{CELL_SIZE_M, TerrainCell, TerrainWorld, world_to_cell};
-use particles::render::{TerrainDotGpuPlugin, TerrainRenderDiagnostics, WaterDotGpuPlugin};
+use particles::render::{TerrainGpuPlugin, TerrainRenderDiagnostics, WaterDotGpuPlugin};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -1113,7 +1113,7 @@ fn main() {
         ParamsPlugin,
         PhysicsPlugin,
         GpuMpmPlugin,
-        TerrainDotGpuPlugin,
+        TerrainGpuPlugin,
         WaterDotGpuPlugin,
         InterfacePlugin,
         OverlayPlugin,
