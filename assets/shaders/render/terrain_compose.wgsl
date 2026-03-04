@@ -5,14 +5,14 @@
 #import bevy_render::view::View
 
 struct ComposeParams {
-    origin_x:      f32,  // world-space X of cache origin (metres)
-    origin_y:      f32,  // world-space Y of cache origin (metres)
     cell_size_m:   f32,  // metres per cell (CELL_SIZE_M = 0.25)
     dot_size_m:    f32,  // metres per dot (cell_size_m / dots_per_cell)
     cache_origin_x: i32, // world cell X of texture texel (0,0)
     cache_origin_y: i32, // world cell Y of texture texel (0,0)
     palette_seed:  u32,
     dots_per_cell: u32,
+    ring_offset_x: i32,  // ring buffer offset in physical texture X
+    ring_offset_y: i32,  // ring buffer offset in physical texture Y
 }
 
 @group(0) @binding(0) var<uniform> view:    View;
@@ -98,6 +98,11 @@ fn terrain_color(material: u32, dot_x: i32, dot_y: i32, seed: u32) -> vec3<f32> 
     return sand_color(shade);
 }
 
+fn positive_mod(x: i32, m: i32) -> i32 {
+    let r = x % m;
+    return select(r + m, r, r >= 0);
+}
+
 // ── Fragment ──────────────────────────────────────────────────────────────────
 
 @fragment
@@ -107,11 +112,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let world_cell = vec2<i32>(i32(floor(cell_f.x)), i32(floor(cell_f.y)));
 
     // Global cell → texture coordinate (subtract cache origin; no ring offset in this initial version).
-    let tc = world_cell - vec2<i32>(params.cache_origin_x, params.cache_origin_y);
+    let logical = world_cell - vec2<i32>(params.cache_origin_x, params.cache_origin_y);
     let tex_size = vec2<i32>(textureDimensions(near_tex));
-    if tc.x < 0 || tc.y < 0 || tc.x >= tex_size.x || tc.y >= tex_size.y {
+    if logical.x < 0 || logical.y < 0 || logical.x >= tex_size.x || logical.y >= tex_size.y {
         discard;
     }
+    let tc = vec2<i32>(
+        positive_mod(logical.x + params.ring_offset_x, tex_size.x),
+        positive_mod(logical.y + params.ring_offset_y, tex_size.y),
+    );
 
     let material = textureLoad(near_tex, tc, 0).r;
     if material == 0u {

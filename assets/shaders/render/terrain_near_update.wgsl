@@ -1,50 +1,74 @@
 /// TerrainNearUpdate compute pass.
 ///
-/// Reads material IDs from `override_cells` (CPU-uploaded, one u32 per world cell)
-/// and writes them into the `near_tex` StorageTexture (R16Uint).
+/// Evaluates procedural terrain material IDs on GPU and writes them into
+/// `near_tex` (R16Uint). CPU-provided per-cell overrides replace generated
+/// values when present.
 ///
 /// Texture layout: one texel == one world cell. `texel (tx, ty)` corresponds to
 /// world cell `(cache_origin_x + tx, cache_origin_y + ty)`.
 ///
 /// Material encoding: 0 = Empty, 1 = Stone, 2 = Soil, 3 = Sand.
+#import particles::terrain_gen::{material_for_cell}
 
 struct NearParams {
-    override_origin_x: i32,
-    override_origin_y: i32,
-    override_width:    u32,
-    override_height:   u32,
     cache_origin_x:    i32,
     cache_origin_y:    i32,
+    cache_width:       u32,
+    cache_height:      u32,
+    ring_offset_x:     i32,
+    ring_offset_y:     i32,
+    generation_enabled: u32,
+    override_none:     u32,
+    dirty_count:       u32,
     _pad0:             u32,
     _pad1:             u32,
+    _pad2:             u32,
 }
 
-@group(0) @binding(0) var<uniform>  params:         NearParams;
-@group(0) @binding(1) var<storage, read> override_cells: array<u32>;
-@group(0) @binding(2) var           near_tex:       texture_storage_2d<r16uint, write>;
+struct DirtyCell {
+    world_x:          i32,
+    world_y:          i32,
+    override_material: u32,
+    _pad0:            u32,
+}
 
-@compute @workgroup_size(8, 8)
+@group(0) @binding(0) var<uniform> params: NearParams;
+@group(0) @binding(1) var<storage, read> dirty_cells: array<DirtyCell>;
+@group(0) @binding(2) var near_tex: texture_storage_2d<r16uint, write>;
+
+fn positive_mod(x: i32, m: i32) -> i32 {
+    let r = x % m;
+    return select(r + m, r, r >= 0);
+}
+
+fn ring_index(logical: i32, ring_offset: i32, extent: u32) -> i32 {
+    return positive_mod(logical + ring_offset, i32(extent));
+}
+
+@compute @workgroup_size(64, 1, 1)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let tex_size = textureDimensions(near_tex);
-    if gid.x >= tex_size.x || gid.y >= tex_size.y {
+    let idx = gid.x;
+    if idx >= params.dirty_count {
+        return;
+    }
+    let dirty = dirty_cells[idx];
+    let world_cell = vec2<i32>(dirty.world_x, dirty.world_y);
+
+    let logical = world_cell - vec2<i32>(params.cache_origin_x, params.cache_origin_y);
+    if logical.x < 0 || logical.y < 0
+        || logical.x >= i32(params.cache_width)
+        || logical.y >= i32(params.cache_height) {
         return;
     }
 
-    // Local texture coordinate → world cell coordinate.
-    let world_x = params.cache_origin_x + i32(gid.x);
-    let world_y = params.cache_origin_y + i32(gid.y);
+    let tx = ring_index(logical.x, params.ring_offset_x, params.cache_width);
+    let ty = ring_index(logical.y, params.ring_offset_y, params.cache_height);
+    let generated = material_for_cell(world_cell, params.generation_enabled != 0u);
 
-    // Look up in the override buffer (covers the same world extent as the texture).
-    let ov_x = world_x - params.override_origin_x;
-    let ov_y = world_y - params.override_origin_y;
-
-    var material: u32 = 0u;
-    if ov_x >= 0 && ov_y >= 0
-       && u32(ov_x) < params.override_width
-       && u32(ov_y) < params.override_height {
-        let idx = u32(ov_y) * params.override_width + u32(ov_x);
-        material = override_cells[idx];
+    var material = generated;
+    if dirty.override_material != params.override_none {
+        material = dirty.override_material;
     }
 
-    textureStore(near_tex, vec2<i32>(i32(gid.x), i32(gid.y)), vec4<u32>(material, 0u, 0u, 0u));
+    textureStore(near_tex, vec2<i32>(tx, ty), vec4<u32>(material, 0u, 0u, 0u));
 }

@@ -1,0 +1,12 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "soil_repose_drop",
+    "output_path": "artifacts/autoverify/terrain_gpu_panned.png",
+    "warmup_frames": 120,
+    "max_wait_after_capture_frames": 60,
+    "camera_scale": 0.45,
+    "camera_center_x": 6.0,
+    "camera_center_y": -7.0
+  }
+}

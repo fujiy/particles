@@ -206,22 +206,22 @@
 - Subtasks:
   - [x] **[P0: 旧タスク整理]** [MPM-GPU-03] を Done、[WGEN-02]/[REND-01] を Superseded に移動する。
   - [ ] **[P1: WGSL生成関数移植]** `assets/shaders/render/terrain_gen.wgsl` を実装する。
-    - [ ] CPU側 fBm（OpenSimplex or 互換ハッシュノイズ）をWGSLへ移植する。
-    - [ ] `surface_height_for_x(world_x: i32) → i32` 相当を実装する。
-    - [ ] `material_for_cell(global_cell: vec2<i32>) → u32`（0=Empty, 1=Stone, 2=Soil, 3=Sand）を実装する。
+    - [x] CPU側 fBm（OpenSimplex or 互換ハッシュノイズ）をWGSLへ移植する。
+    - [x] `surface_height_for_x(world_x: i32) → i32` 相当を実装する。
+    - [x] `material_for_cell(global_cell: vec2<i32>) → u32`（0=Empty, 1=Stone, 2=Soil, 3=Sand）を実装する。
     - [ ] CPU生成との整合テスト: autoverify で全セル材料一致率 ≥ 99.9% を `artifacts/terrain_cell_correctness.json` に出力する。
-  - [ ] **[P2: Near キャッシュ定義]** `TerrainNearGpuCache` テクスチャと `TerrainCacheState` Resource を定義する。
-    - [ ] テクスチャ: R16Uint、解像度 = screen_res × NearMargin / NearQuality（デフォルト 1/2 × 1.35倍）
-    - [ ] Resource: `cache_origin_world: IVec2`, `ring_offset: IVec2`, `lod_k: i32`, `near_dirty_queue`, `far_dirty_queue`
-    - [ ] `world_cell → texture_index`（mod-ring 座標変換）ユーティリティを実装する。
+  - [x] **[P2: Near キャッシュ定義]** `TerrainNearGpuCache` テクスチャと `TerrainCacheState` Resource を定義する。
+    - [x] テクスチャ: R16Uint、解像度 = screen_res × NearMargin / NearQuality（デフォルト 1/2 × 1.35倍）
+    - [x] Resource: `cache_origin_world: IVec2`, `ring_offset: IVec2`, `lod_k: i32`, `near_dirty_queue`, `far_dirty_queue`
+    - [x] `world_cell → texture_index`（mod-ring 座標変換）ユーティリティを実装する。
   - [ ] **[P3: Far キャッシュ定義]** `TerrainFarGpuCache` テクスチャを定義する。
     - [ ] 解像度 = Near の 1/2、マージン 2.5 倍（`render.md` §5.4）
     - [ ] セル値: `far_top1_id: u8`, `far_w1: u8`, `solid_fraction: u8`, pad（RGBA8 format）
     - [ ] LOD k_far = k_near + FAR_OFFSET（デフォルト 3）
   - [ ] **[P4: TerrainNearUpdate compute]** `assets/shaders/render/terrain_near_update.wgsl` を実装する。
-    - [ ] 入力: dirty tile list（SSBO）、生成関数パラメータ（uniform）、地形オーバーライドSSBO
-    - [ ] 各 dirty cell で `material_for_cell()` を評価し、オーバーライドがあれば上書きする。
-    - [ ] 結果を Near テクスチャ（リング座標）へ書き込む。
+    - [x] 入力: dirty list（SSBO）、生成関数パラメータ（uniform）、地形オーバーライド情報（SSBO）
+    - [x] 各 dirty cell で `material_for_cell()` を評価し、オーバーライドがあれば上書きする。
+    - [x] 結果を Near テクスチャ（リング座標）へ書き込む。
     - [ ] 地形編集オーバーライド転送経路: `TerrainOverrideDeltaBuffer`（CPU dirty_chunks差分 → GPU）を実装する。
   - [ ] **[P5: TerrainFarUpdate compute]** `assets/shaders/render/terrain_far_update.wgsl` を実装する。
     - [ ] Near テクスチャを多点サンプリングして Far 集約値（top1_id, w1）を計算する。
@@ -254,7 +254,21 @@
     - [ ] `configs/autoverify/terrain_pan_continuity.json`: パン継続性スクリーンショット（リングバッファ実装後）。
     - [ ] `configs/autoverify/terrain_zoom_lod.json`: ズーム遷移スクリーンショット（LOD実装後）。
 - 進捗:
+  - 2026-03-04: 診断表示を追加。HUD に `TerrainGen/frame`（そのフレームで NearUpdate が評価する dirty cell 数）を表示し、スクロール時の生成負荷を可視化。あわせて `prepare_terrain_near_uploads` の retry を「pipeline ready 時は1フレーム、未ready時のみ32フレーム」へ変更し、不要な再dispatchを削減。
+  - 2026-03-04: リングバッファ表示のずれを修正。`terrain_compose.wgsl` に `ring_offset` を追加し、`world_cell -> texture` 参照を mod-ring 化。`prepare_terrain_near_uploads` で compose uniform へ `ring_offset` を転送。スクロール時の地形が飛び飛びに移動する表示不整合を解消。
+  - 2026-03-04: スクロール時の周期的カクつき対策として Near 更新を dirty 列/行ベースへ移行。`prepare_terrain_near_update_request` はカメラ移動量から新規可視ストリップのみ dirty 発行し、`ring_offset` を更新。`terrain_near_update.wgsl` は dirty cell SSBO を1D dispatchで処理する方式に変更し、Near 全面再生成を回避。`cargo check` / `cargo test --lib` / `terrain_gpu_screenshot` / `terrain_gpu_panned_screenshot` で確認。
+  - 2026-03-04: P2 を実装。`src/render/terrain_gpu.rs` に `TerrainNearGpuCache` / `TerrainCacheState` を追加し、Near キャッシュ解像度を `screen_res × 1.35 / 2` で算出する経路へ移行。`world_cell -> texture_index`（mod-ring）ユーティリティを導入し、Near upload 生成に適用。`cargo check` / `cargo test --lib` / `cargo run -q -- --autoverify-config configs/autoverify/terrain_gpu_screenshot.json` を通過。
   - 2026-03-04: P0/P9/P10初期を完了。`src/render/terrain_gpu.rs` + WGSL 2本で TerrainNearUpdate compute + TerrainCompose fragment を実装。旧 terrain_dot_gpu.rs 削除。autoverify screenshot で石壁・土壌の正常描画を確認。
+  - 2026-03-04: 遠方パン時の FPS 低下対策として Near 更新CPU経路を最適化。`prepare_terrain_near_update_request` で列ごとの `surface_y` をキャッシュし、未ロード領域で同一列のノイズ再計算を削減。
+  - 2026-03-04: P1 前半を実装。`assets/shaders/render/terrain_gen.wgsl` を追加し、`terrain_near_update.wgsl` は GPU生成 `material_for_cell` を基準値にして CPU由来は override のみ適用する構成へ移行。`terrain_gpu_screenshot` / `terrain_gpu_panned_screenshot` で表示成立を確認。
+  - 2026-03-04: 起動直後の低FPS要因を修正。`terrain.is_changed()` 依存をやめ、`TerrainWorld.terrain_version`（実地形変更時のみ増加）で Near 更新トリガーを判定するよう変更。
+  - 2026-03-04: 停止時低FPSの追加要因を修正。`step_physics` は `running=false && step_once=false` のとき早期returnし、停止中の active region 走査 / object field 更新を停止。
+  - 2026-03-04: `default_world` 停止時FPS低下の主因を修正。`gpu_mpm::prepare_terrain_upload` の更新判定を `terrain.is_changed()` から `TerrainWorld.terrain_version` ベースへ変更し、不要な全グリッド SDF/normal 再構築・再アップロードを停止。autoverify（`default_world_paused_screenshot` / `default_world_paused_start`）で停止時 FPS が ~120 へ回復することを確認。
+  - 2026-03-04: スクロール時スパイク（`TerrainGen/frame=104976`）対策として、Near の全面再生成条件を「旧キャッシュと新可視領域が非重複の場合」に限定（`|Δorigin| >= cache_extent`）。あわせて HUD に `Δorigin` / `full refresh` フラグ / reason bit を表示し、スパイク要因を実行時に診断可能化。
+  - 2026-03-04: Near キャッシュ範囲を「画面ピクセル固定」から「カメラ投影のワールド可視範囲（セル換算）× margin」へ変更し、ズームイン時に不要な生成（例: 常時 `243` 行）を抑制。`TerrainGen/frame` 表示は可変桁で揺れないよう固定幅フォーマットへ更新。
+  - 2026-03-04: 横スクロール時の16セル周期カクつき対策として、`stream_terrain_around_camera` を軽量化。停止中（`running=false && step_once=false`）は地形ストリーミングを停止し、再生中でも中心チャンクが変わらないフレームは処理をスキップするよう変更。
+  - 2026-03-04: ズームアウト時クラッシュ（wgpu dispatch group x=65536 > 65535）を修正。Near extent 算出に「dispatch上限面積」クランプを追加し、upload側でも `dirty_count` を `MAX_DIRTY_CELLS_PER_DISPATCH` で保険クランプ。`near_extent_is_clamped_to_dispatch_limit` テストを追加。
+  - 2026-03-04: 暫定方針を明記。地形改変なし前提で、REND-GPU-01 の検証中はレンダ側の地形 override 転送（loaded/edited cell の CPU→GPU 上書き）を無効化し、Near は GPU 生成値のみを使用する。
 - 完了条件:
   - GPU compute で地形生成関数が自律評価され、毎フレームの CPU→GPU 全セル転送が不要になる。
   - Near/Far 2層キャッシュが GPU 常駐し、パン・ズームでリングバッファ更新が機能する。
@@ -679,3 +693,4 @@
 - 水の圧力モデル（`J` ベース / EOS ベース）の採用条件とパラメータ範囲を確定する。
 - 地形境界SDF供給の「未改変=生成関数、改変=差分LoDキャッシュ」運用を実装側で固定する。
 - `PARAM-01` のパラメータ資産数が実装では6ファイル（`palette.ron` 追加）へ増えているため、`docs/design.md` の記述（5ファイル前提）を次回Design sessionで更新する。
+- REND-GPU-01 検証中は「地形改変なし」前提でレンダ override 転送を一時停止している。改変地形を再有効化する条件（CPU差分→GPU反映方式、検証項目、切替フラグ）を次回Design sessionで明文化する。

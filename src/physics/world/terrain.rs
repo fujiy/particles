@@ -123,6 +123,8 @@ pub fn generated_cell_for_world(global_cell: IVec2) -> TerrainCell {
 #[derive(Resource, Debug)]
 pub struct TerrainWorld {
     generation_enabled: bool,
+    terrain_version: u64,
+    terrain_render_version: u64,
     chunks: HashMap<IVec2, TerrainChunk>,
     chunk_overrides: HashMap<IVec2, HashMap<IVec2, TerrainCell>>,
     dirty_chunks: HashSet<IVec2>,
@@ -142,6 +144,8 @@ impl Default for TerrainWorld {
     fn default() -> Self {
         Self {
             generation_enabled: true,
+            terrain_version: 0,
+            terrain_render_version: 0,
             chunks: HashMap::default(),
             chunk_overrides: HashMap::default(),
             dirty_chunks: HashSet::default(),
@@ -161,6 +165,10 @@ impl Default for TerrainWorld {
 
 impl TerrainWorld {
     pub fn set_generation_enabled(&mut self, enabled: bool) {
+        if self.generation_enabled != enabled {
+            self.terrain_version = self.terrain_version.wrapping_add(1);
+            self.terrain_render_version = self.terrain_render_version.wrapping_add(1);
+        }
         self.generation_enabled = enabled;
     }
 
@@ -168,7 +176,17 @@ impl TerrainWorld {
         self.generation_enabled
     }
 
+    pub fn terrain_version(&self) -> u64 {
+        self.terrain_version
+    }
+
+    pub fn terrain_render_version(&self) -> u64 {
+        self.terrain_render_version
+    }
+
     pub fn clear(&mut self) {
+        self.terrain_version = self.terrain_version.wrapping_add(1);
+        self.terrain_render_version = self.terrain_render_version.wrapping_add(1);
         self.chunks.clear();
         self.chunk_overrides.clear();
         self.dirty_chunks.clear();
@@ -226,6 +244,7 @@ impl TerrainWorld {
             self.chunks.remove(&chunk_coord);
             self.dirty_chunks.remove(&chunk_coord);
         }
+        self.terrain_version = self.terrain_version.wrapping_add(1);
         self.static_particles_dirty = true;
     }
 
@@ -239,6 +258,8 @@ impl TerrainWorld {
         let (chunk_coord, local_cell) = global_to_chunk_local(global_cell);
         let changed = self.ensure_chunk_mut(chunk_coord).set(local_cell, next);
         if changed {
+            self.terrain_version = self.terrain_version.wrapping_add(1);
+            self.terrain_render_version = self.terrain_render_version.wrapping_add(1);
             self.update_chunk_override(global_cell, next);
             self.dirty_chunks.insert(chunk_coord);
             self.static_particles_dirty = true;
@@ -311,6 +332,7 @@ impl TerrainWorld {
         if self.chunks.is_empty() {
             return;
         }
+        let mut any_changed = false;
         let loaded_chunks: Vec<IVec2> = self.chunks.keys().copied().collect();
         for chunk_coord in loaded_chunks {
             let mut changed = false;
@@ -333,8 +355,13 @@ impl TerrainWorld {
                 self.update_chunk_override(global_cell, TerrainCell::Empty);
             }
             if changed {
+                any_changed = true;
                 self.dirty_chunks.insert(chunk_coord);
             }
+        }
+        if any_changed {
+            self.terrain_version = self.terrain_version.wrapping_add(1);
+            self.terrain_render_version = self.terrain_render_version.wrapping_add(1);
         }
         self.static_particles_dirty = true;
     }
@@ -348,18 +375,39 @@ impl TerrainWorld {
             .unwrap_or_default()
     }
 
-    pub fn get_cell_or_generated(&self, global_cell: IVec2) -> TerrainCell {
+    pub fn get_loaded_or_overridden_cell(&self, global_cell: IVec2) -> Option<TerrainCell> {
         let (chunk_coord, local_cell) = global_to_chunk_local(global_cell);
         if let Some(chunk) = self.chunks.get(&chunk_coord) {
-            return chunk.get(local_cell);
+            return Some(chunk.get(local_cell));
         }
-        if let Some(overrides) = self.chunk_overrides.get(&chunk_coord) {
-            if let Some(&cell) = overrides.get(&local_cell) {
-                return cell;
-            }
+        self.chunk_overrides
+            .get(&chunk_coord)
+            .and_then(|overrides| overrides.get(&local_cell).copied())
+    }
+
+    pub fn get_cell_or_generated(&self, global_cell: IVec2) -> TerrainCell {
+        if let Some(cell) = self.get_loaded_or_overridden_cell(global_cell) {
+            return cell;
         }
         if self.generation_enabled {
             generated_cell_for_world(global_cell)
+        } else {
+            TerrainCell::Empty
+        }
+    }
+
+    pub fn get_cell_or_generated_with_surface_y(
+        &self,
+        global_cell: IVec2,
+        surface_y: i32,
+    ) -> TerrainCell {
+        if let Some(cell) = self.get_loaded_or_overridden_cell(global_cell) {
+            return cell;
+        }
+        if self.generation_enabled {
+            generation::generated_material_for_y(global_cell.y, surface_y)
+                .map(TerrainCell::solid)
+                .unwrap_or(TerrainCell::Empty)
         } else {
             TerrainCell::Empty
         }
@@ -602,6 +650,7 @@ impl TerrainWorld {
                 if chunk.is_dirty() {
                     self.dirty_chunks.insert(chunk_coord);
                 }
+                self.terrain_version = self.terrain_version.wrapping_add(1);
                 self.static_particles_dirty = true;
                 vacant.insert(chunk)
             }
@@ -909,6 +958,34 @@ mod tests {
         assert!(terrain.set_cell(cell, generated));
         terrain.chunks.remove(&chunk);
         assert_eq!(terrain.get_cell_or_generated(cell), generated);
+    }
+
+    #[test]
+    fn get_cell_or_generated_with_surface_y_matches_default_path() {
+        let mut terrain = TerrainWorld::default();
+        let chunk = IVec2::new(4, -2);
+        let overridden_cell = chunk * CHUNK_SIZE_I32 + IVec2::new(5, 7);
+        terrain.ensure_chunk_loaded(chunk);
+        let generated = generated_cell_for_world(overridden_cell);
+        let overridden = if matches!(generated, TerrainCell::Empty) {
+            TerrainCell::stone()
+        } else {
+            TerrainCell::Empty
+        };
+        assert!(terrain.set_cell(overridden_cell, overridden));
+        terrain.chunks.remove(&chunk);
+
+        for x in -96..=96 {
+            let surface_y = surface_y_for_world_x(x);
+            for y in (surface_y - 12)..=(surface_y + 8) {
+                let cell = IVec2::new(x, y);
+                assert_eq!(
+                    terrain.get_cell_or_generated(cell),
+                    terrain.get_cell_or_generated_with_surface_y(cell, surface_y),
+                    "mismatch at cell ({x}, {y})"
+                );
+            }
+        }
     }
 
     #[test]

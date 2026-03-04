@@ -1,0 +1,13 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "default_world",
+    "run_simulation": false,
+    "output_path": "artifacts/autoverify/default_world_paused.png",
+    "warmup_frames": 240,
+    "max_wait_after_capture_frames": 240,
+    "camera_scale": 0.45,
+    "camera_center_x": 0.0,
+    "camera_center_y": -6.0
+  }
+}

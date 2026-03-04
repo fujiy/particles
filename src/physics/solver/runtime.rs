@@ -57,14 +57,23 @@ pub(crate) fn handle_sim_controls(
 
 pub(crate) fn stream_terrain_around_camera(
     mut terrain_world: ResMut<TerrainWorld>,
+    sim_state: Res<SimulationState>,
     replay_state: Res<ReplayState>,
     streaming_settings: Res<TerrainStreamingSettings>,
     camera_transforms: Query<&Transform, With<Camera2d>>,
+    mut last_center_chunk: Local<Option<IVec2>>,
 ) {
     if replay_state.enabled || !streaming_settings.enabled || !terrain_world.generation_enabled() {
+        *last_center_chunk = None;
+        return;
+    }
+    if !sim_state.running && !sim_state.step_once {
+        // Keep paused camera motion lightweight; streaming will catch up on resume/step.
+        *last_center_chunk = None;
         return;
     }
     let Some(camera_transform) = camera_transforms.iter().next() else {
+        *last_center_chunk = None;
         return;
     };
     let center_cell = world_to_cell(camera_transform.translation.truncate());
@@ -72,6 +81,10 @@ pub(crate) fn stream_terrain_around_camera(
         center_cell.x.div_euclid(CHUNK_SIZE_I32),
         center_cell.y.div_euclid(CHUNK_SIZE_I32),
     );
+    if last_center_chunk.is_some_and(|prev| prev == center_chunk) {
+        return;
+    }
+    *last_center_chunk = Some(center_chunk);
     let radius = streaming_settings.load_radius_chunks.max(0);
     for y in (center_chunk.y - radius)..=(center_chunk.y + radius) {
         for x in (center_chunk.x - radius)..=(center_chunk.x + radius) {

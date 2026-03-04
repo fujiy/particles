@@ -22,6 +22,7 @@ use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,
 };
+use crate::render::TerrainRenderDiagnostics;
 
 const HUD_BG_COLOR: Color = Color::srgba(0.05, 0.06, 0.09, 0.82);
 const BUTTON_BG_OFF: Color = Color::srgba(0.17, 0.18, 0.22, 0.95);
