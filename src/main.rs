@@ -639,6 +639,17 @@ fn write_report<T: Serialize>(path: &str, report: &T) {
     }
 }
 
+fn autoverify_hard_exit(exit_writer: &mut MessageWriter<bevy::app::AppExit>, code: u8) -> ! {
+    if code == 0 {
+        exit_writer.write(bevy::app::AppExit::Success);
+    } else {
+        exit_writer.write(bevy::app::AppExit::from_code(code));
+    }
+    // In non-interactive cargo-run loops, AppExit can occasionally leave a lingering process.
+    // Force termination after signaling AppExit to keep automation deterministic.
+    std::process::exit(i32::from(code));
+}
+
 fn run_mpm_autoverify(
     mut state: ResMut<MpmAutoVerifyState>,
     time: Res<Time>,
@@ -720,7 +731,7 @@ fn run_mpm_autoverify(
                     failed_assertions: Vec::new(),
                 };
                 write_report(&state.output_path, &report);
-                exit_writer.write(bevy::app::AppExit::from_code(4));
+                autoverify_hard_exit(&mut exit_writer, 4);
             }
             return;
         }
@@ -817,8 +828,7 @@ fn run_mpm_autoverify(
             failed_assertions: Vec::new(),
         };
         write_report(&state.output_path, &report);
-        exit_writer.write(bevy::app::AppExit::from_code(5));
-        return;
+        autoverify_hard_exit(&mut exit_writer, 5);
     }
 
     let end_mean_y =
@@ -986,11 +996,7 @@ fn run_mpm_autoverify(
     write_report(&state.output_path, &report);
     gpu_control.readback_enabled = false;
     sim_state.step_once = false;
-    exit_writer.write(if passed {
-        bevy::app::AppExit::Success
-    } else {
-        bevy::app::AppExit::from_code(6)
-    });
+    autoverify_hard_exit(&mut exit_writer, if passed { 0 } else { 6 });
 }
 
 fn run_screenshot_autoverify(
@@ -1059,13 +1065,12 @@ fn run_screenshot_autoverify(
         .unwrap_or(false);
     if ready {
         state.enabled = false;
-        exit_writer.write(bevy::app::AppExit::Success);
-        return;
+        autoverify_hard_exit(&mut exit_writer, 0);
     }
 
     if state.wait_after_capture_frames > state.max_wait_after_capture_frames {
         state.enabled = false;
-        exit_writer.write(bevy::app::AppExit::from_code(7));
+        autoverify_hard_exit(&mut exit_writer, 7);
     }
 }
 

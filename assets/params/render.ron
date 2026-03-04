@@ -19,11 +19,43 @@
             // 水面判定の密度閾値. 許容: 0.01 – 1.0
             density_threshold: 0.50,
         ),
+        // 水ドット側のハッシュシード
+        palette_seed: 0xA53C9E4D,
     ),
 
     // 地形ドット描画パラメータ
     terrain: (
         // 地形パレットシード（デバッグ用色の再現性）
         palette_seed: 0x5EED7163,
+        // Near/Far LOD 設定
+        lod: (
+            // Near キャッシュの画面余白倍率
+            near_margin_factor: 1.35,
+            // Near 品質分母（大きいほど解像度を下げる）
+            near_quality_divisor: 1.0,
+            // Far キャッシュの画面余白倍率
+            far_margin_factor: 2.5,
+            // Far 品質分母（大きいほど解像度を下げる）
+            far_quality_divisor: 2.0,
+            // Far 解像度の追加ヘッドルーム係数
+            far_quality_headroom: 1.1,
+            // Far downsample の最小値
+            far_min_downsample: 1,
+        ),
+        // Back レイヤ設定
+        back: (
+            // Back が維持する最小画面解像度の分母（2.0 なら screen_px / 2 以上）
+            min_screen_resolution_divisor: 2.0,
+            // Back の視差スケール係数（大きいほど遠景の縮尺差が強くなる）
+            scale_multiplier: 4.0,
+            // 空気遠近ティント量
+            atmosphere_tint: 0.42,
+        ),
+        // 全体背景の空色 (sRGB 8bit)
+        sky_color: (
+            r: 164.0,
+            g: 208.0,
+            b: 255.0,
+        ),
     ),
 )

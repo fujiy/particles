@@ -1,4 +1,5 @@
 use crate::physics::cell_to_world_center;
+use crate::physics::state::SimUpdateSet;
 use bevy::camera::ScalingMode;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
@@ -17,7 +18,7 @@ pub struct CameraControllerPlugin;
 impl Plugin for CameraControllerPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_main_camera)
-            .add_systems(Update, control_main_camera);
+            .add_systems(Update, control_main_camera.in_set(SimUpdateSet::Controls));
     }
 }
 

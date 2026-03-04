@@ -48,6 +48,7 @@ use bevy::window::PrimaryWindow;
 use bytemuck::{Pod, Zeroable, cast_slice};
 
 use crate::camera_controller::MainCamera;
+use crate::params::ActiveRenderParams;
 use crate::physics::material::TerrainMaterial;
 use crate::physics::state::SimUpdateSet;
 use crate::physics::world::constants::CELL_SIZE_M;
@@ -68,6 +69,12 @@ const FAR_MIN_DOWNSAMPLE: u32 = 1;
 const FAR_MARGIN_FACTOR: f32 = 2.5;
 const FAR_QUALITY_DIVISOR: f32 = 2.0;
 const FAR_QUALITY_HEADROOM: f32 = 1.1;
+const BACK_MIN_SCREEN_RESOLUTION_DIVISOR: f32 = 2.0;
+const BACK_SCALE_MULTIPLIER: f32 = 2.0;
+const BACK_ATMOSPHERE_TINT: f32 = 0.35;
+const SKY_COLOR_R: f32 = 164.0;
+const SKY_COLOR_G: f32 = 208.0;
+const SKY_COLOR_B: f32 = 255.0;
 const MAX_DISPATCH_GROUPS_X: u32 = 65_535;
 const MAX_DIRTY_CELLS_PER_DISPATCH: u32 = NEAR_UPDATE_WORKGROUP * MAX_DISPATCH_GROUPS_X;
 const TERRAIN_OVERRIDE_NONE: u32 = 0xFFFF;
@@ -83,6 +90,68 @@ const FAR_TEX_MIN_CELLS: u32 = 1;
 const FAR_TEX_MAX_CELLS: u32 = 4096;
 const DEFAULT_SCREEN_SIZE_PX: UVec2 = UVec2::new(1280, 720);
 const DEFAULT_CAMERA_VIEWPORT_HEIGHT_M: f32 = 14.0;
+
+#[derive(Clone, Copy, Debug)]
+struct TerrainRuntimeSettings {
+    near_margin_factor: f32,
+    near_quality_divisor: f32,
+    far_margin_factor: f32,
+    far_quality_divisor: f32,
+    far_quality_headroom: f32,
+    far_min_downsample: u32,
+    back_min_screen_resolution_divisor: f32,
+    back_scale_multiplier: f32,
+    back_atmosphere_tint: f32,
+    sky_color_r: f32,
+    sky_color_g: f32,
+    sky_color_b: f32,
+    terrain_palette_seed: u32,
+}
+
+impl Default for TerrainRuntimeSettings {
+    fn default() -> Self {
+        Self {
+            near_margin_factor: NEAR_MARGIN_FACTOR,
+            near_quality_divisor: NEAR_QUALITY_DIVISOR,
+            far_margin_factor: FAR_MARGIN_FACTOR,
+            far_quality_divisor: FAR_QUALITY_DIVISOR,
+            far_quality_headroom: FAR_QUALITY_HEADROOM,
+            far_min_downsample: FAR_MIN_DOWNSAMPLE,
+            back_min_screen_resolution_divisor: BACK_MIN_SCREEN_RESOLUTION_DIVISOR,
+            back_scale_multiplier: BACK_SCALE_MULTIPLIER,
+            back_atmosphere_tint: BACK_ATMOSPHERE_TINT,
+            sky_color_r: SKY_COLOR_R,
+            sky_color_g: SKY_COLOR_G,
+            sky_color_b: SKY_COLOR_B,
+            terrain_palette_seed: 0x5EED_7163,
+        }
+    }
+}
+
+fn terrain_runtime_settings_from_active(
+    active: Option<&ActiveRenderParams>,
+) -> TerrainRuntimeSettings {
+    let mut settings = TerrainRuntimeSettings::default();
+    let Some(active) = active else {
+        return settings;
+    };
+    let terrain = &active.0.terrain;
+    settings.near_margin_factor = terrain.lod.near_margin_factor;
+    settings.near_quality_divisor = terrain.lod.near_quality_divisor;
+    settings.far_margin_factor = terrain.lod.far_margin_factor;
+    settings.far_quality_divisor = terrain.lod.far_quality_divisor;
+    settings.far_quality_headroom = terrain.lod.far_quality_headroom;
+    settings.far_min_downsample = terrain.lod.far_min_downsample.max(1);
+    settings.back_min_screen_resolution_divisor =
+        terrain.back.min_screen_resolution_divisor.max(1.0);
+    settings.back_scale_multiplier = terrain.back.scale_multiplier.max(0.25);
+    settings.back_atmosphere_tint = terrain.back.atmosphere_tint.clamp(0.0, 1.0);
+    settings.sky_color_r = terrain.sky_color.r.clamp(0.0, 255.0);
+    settings.sky_color_g = terrain.sky_color.g.clamp(0.0, 255.0);
+    settings.sky_color_b = terrain.sky_color.b.clamp(0.0, 255.0);
+    settings.terrain_palette_seed = terrain.palette_seed;
+    settings
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct TerrainDirtyTile {
@@ -122,29 +191,79 @@ fn default_viewport_world(screen_size_px: UVec2) -> Vec2 {
     )
 }
 
-fn projection_viewport_world(projection: &Projection) -> Option<Vec2> {
+fn projection_viewport_world(projection: &Projection, viewport_size_px: Vec2) -> Option<Vec2> {
     let Projection::Orthographic(ortho) = projection else {
         return None;
     };
-    let viewport_world = (ortho.area.max - ortho.area.min).abs();
+    let width = viewport_size_px.x.max(1.0);
+    let height = viewport_size_px.y.max(1.0);
+    let (projection_width, projection_height) = match ortho.scaling_mode {
+        bevy::camera::ScalingMode::WindowSize => (width, height),
+        bevy::camera::ScalingMode::AutoMin {
+            min_width,
+            min_height,
+        } => {
+            if width * min_height > min_width * height {
+                (width * min_height / height, min_height)
+            } else {
+                (min_width, height * min_width / width)
+            }
+        }
+        bevy::camera::ScalingMode::AutoMax {
+            max_width,
+            max_height,
+        } => {
+            if width * max_height < max_width * height {
+                (width * max_height / height, max_height)
+            } else {
+                (max_width, height * max_width / width)
+            }
+        }
+        bevy::camera::ScalingMode::FixedVertical { viewport_height } => {
+            (width * viewport_height / height, viewport_height)
+        }
+        bevy::camera::ScalingMode::FixedHorizontal { viewport_width } => {
+            (viewport_width, height * viewport_width / width)
+        }
+        bevy::camera::ScalingMode::Fixed { width, height } => (width, height),
+    };
+    let viewport_world =
+        Vec2::new(projection_width, projection_height) * ortho.scale.abs().max(1.0e-6);
     if viewport_world.x <= 0.0 || viewport_world.y <= 0.0 {
         return None;
     }
     Some(viewport_world)
 }
 
-fn near_target_extent_cells_from_viewport_world(viewport_world_m: Vec2) -> Vec2 {
+fn near_target_extent_cells_from_viewport_world_with_settings(
+    viewport_world_m: Vec2,
+    settings: TerrainRuntimeSettings,
+) -> Vec2 {
     let viewport_world_m = viewport_world_m.max(Vec2::splat(CELL_SIZE_M.max(1e-6)));
     let viewport_cells = viewport_world_m / CELL_SIZE_M;
-    viewport_cells * (NEAR_MARGIN_FACTOR / NEAR_QUALITY_DIVISOR)
+    viewport_cells * (settings.near_margin_factor / settings.near_quality_divisor.max(1e-6))
+}
+
+fn compute_near_cache_extent_with_settings(
+    screen_size_px: UVec2,
+    settings: TerrainRuntimeSettings,
+) -> UVec2 {
+    compute_near_cache_extent_from_viewport_world_with_settings(
+        default_viewport_world(screen_size_px),
+        settings,
+    )
 }
 
 fn compute_near_cache_extent(screen_size_px: UVec2) -> UVec2 {
-    compute_near_cache_extent_from_viewport_world(default_viewport_world(screen_size_px))
+    compute_near_cache_extent_with_settings(screen_size_px, TerrainRuntimeSettings::default())
 }
 
-fn compute_near_cache_extent_from_viewport_world(viewport_world_m: Vec2) -> UVec2 {
-    let scaled = near_target_extent_cells_from_viewport_world(viewport_world_m);
+fn compute_near_cache_extent_from_viewport_world_with_settings(
+    viewport_world_m: Vec2,
+    settings: TerrainRuntimeSettings,
+) -> UVec2 {
+    let scaled =
+        near_target_extent_cells_from_viewport_world_with_settings(viewport_world_m, settings);
     let mut extent = UVec2::new(
         scaled
             .x
@@ -169,9 +288,22 @@ fn compute_near_cache_extent_from_viewport_world(viewport_world_m: Vec2) -> UVec
     extent
 }
 
-fn compute_far_cache_base_extent(screen_size_px: UVec2) -> UVec2 {
+#[cfg(test)]
+fn compute_near_cache_extent_from_viewport_world(viewport_world_m: Vec2) -> UVec2 {
+    compute_near_cache_extent_from_viewport_world_with_settings(
+        viewport_world_m,
+        TerrainRuntimeSettings::default(),
+    )
+}
+
+fn compute_far_cache_base_extent_with_settings(
+    screen_size_px: UVec2,
+    settings: TerrainRuntimeSettings,
+) -> UVec2 {
     let screen = screen_size_px.max(UVec2::splat(1)).as_vec2();
-    let scaled = screen * (FAR_MARGIN_FACTOR * FAR_QUALITY_HEADROOM / FAR_QUALITY_DIVISOR);
+    let scaled = screen
+        * (settings.far_margin_factor * settings.far_quality_headroom
+            / settings.far_quality_divisor.max(1e-6));
     UVec2::new(
         scaled
             .x
@@ -186,6 +318,11 @@ fn compute_far_cache_base_extent(screen_size_px: UVec2) -> UVec2 {
     )
 }
 
+#[cfg(test)]
+fn compute_far_cache_base_extent(screen_size_px: UVec2) -> UVec2 {
+    compute_far_cache_base_extent_with_settings(screen_size_px, TerrainRuntimeSettings::default())
+}
+
 fn ceil_to_power_of_two(v: u32) -> u32 {
     if v <= 1 {
         return 1;
@@ -193,18 +330,51 @@ fn ceil_to_power_of_two(v: u32) -> u32 {
     v.checked_next_power_of_two().unwrap_or(1 << 31)
 }
 
-fn compute_far_downsample_for_viewport(viewport_world_m: Vec2, far_extent: UVec2) -> u32 {
+fn compute_far_downsample_for_viewport_with_settings(
+    viewport_world_m: Vec2,
+    far_extent: UVec2,
+    settings: TerrainRuntimeSettings,
+) -> u32 {
     let viewport_world_m = viewport_world_m.max(Vec2::splat(CELL_SIZE_M.max(1e-6)));
     let viewport_cells = viewport_world_m / CELL_SIZE_M;
     let far_extent = far_extent.max(UVec2::splat(1)).as_vec2();
-    let required_x = (viewport_cells.x * FAR_MARGIN_FACTOR / far_extent.x)
+    let required_x = (viewport_cells.x * settings.far_margin_factor / far_extent.x)
         .ceil()
         .max(1.0) as u32;
-    let required_y = (viewport_cells.y * FAR_MARGIN_FACTOR / far_extent.y)
+    let required_y = (viewport_cells.y * settings.far_margin_factor / far_extent.y)
         .ceil()
         .max(1.0) as u32;
     let required = required_x.max(required_y).max(1);
-    ceil_to_power_of_two(required.max(FAR_MIN_DOWNSAMPLE))
+    ceil_to_power_of_two(required.max(settings.far_min_downsample.max(1)))
+}
+
+#[cfg(test)]
+fn compute_far_downsample_for_viewport(viewport_world_m: Vec2, far_extent: UVec2) -> u32 {
+    compute_far_downsample_for_viewport_with_settings(
+        viewport_world_m,
+        far_extent,
+        TerrainRuntimeSettings::default(),
+    )
+}
+
+fn compute_back_display_scale(
+    front_mpp_cells_per_px: f32,
+    settings: TerrainRuntimeSettings,
+) -> f32 {
+    let front_mpp_cells_per_px = front_mpp_cells_per_px.max(1.0e-6);
+    let scale_excess = settings.back_scale_multiplier.max(0.0)
+        / (settings.back_min_screen_resolution_divisor.max(1.0) * front_mpp_cells_per_px);
+    1.0 + scale_excess
+}
+
+fn compute_back_downsample_for_viewport_with_settings(
+    viewport_world_m: Vec2,
+    back_extent: UVec2,
+    settings: TerrainRuntimeSettings,
+) -> u32 {
+    // Back downsample follows the same rule as Far (power-of-two coverage),
+    // but is computed independently to keep the path decoupled.
+    compute_far_downsample_for_viewport_with_settings(viewport_world_m, back_extent, settings)
 }
 
 fn compute_far_origin_world(camera_cell: IVec2, far_extent: UVec2, far_downsample: u32) -> IVec2 {
@@ -221,11 +391,8 @@ fn compute_far_origin_world(camera_cell: IVec2, far_extent: UVec2, far_downsampl
     )
 }
 
-fn compute_near_lod_k_for_projection(projection: &Projection) -> i32 {
-    let Projection::Orthographic(ortho) = projection else {
-        return 0;
-    };
-    let viewport_world_height = (ortho.area.max.y - ortho.area.min.y).abs().max(1e-6);
+fn compute_near_lod_k_from_viewport_world(viewport_world_m: Vec2) -> i32 {
+    let viewport_world_height = viewport_world_m.y.abs().max(1e-6);
     let ratio = (viewport_world_height / DEFAULT_CAMERA_VIEWPORT_HEIGHT_M.max(1e-6)).max(1.0);
     ratio.log2().floor() as i32
 }
@@ -233,14 +400,23 @@ fn compute_near_lod_k_for_projection(projection: &Projection) -> i32 {
 fn compute_near_cache_extent_for_projection(
     screen_size_px: UVec2,
     projection: &Projection,
+    window_size_px: Vec2,
+    settings: TerrainRuntimeSettings,
 ) -> UVec2 {
-    projection_viewport_world(projection)
-        .map(compute_near_cache_extent_from_viewport_world)
-        .unwrap_or_else(|| compute_near_cache_extent(screen_size_px))
+    projection_viewport_world(projection, window_size_px)
+        .map(|viewport| {
+            compute_near_cache_extent_from_viewport_world_with_settings(viewport, settings)
+        })
+        .unwrap_or_else(|| compute_near_cache_extent_with_settings(screen_size_px, settings))
 }
 
-fn near_covers_viewport_with_margin(near_extent: UVec2, viewport_world_m: Vec2) -> bool {
-    let target = near_target_extent_cells_from_viewport_world(viewport_world_m);
+fn near_covers_viewport_with_margin(
+    near_extent: UVec2,
+    viewport_world_m: Vec2,
+    settings: TerrainRuntimeSettings,
+) -> bool {
+    let target =
+        near_target_extent_cells_from_viewport_world_with_settings(viewport_world_m, settings);
     near_extent.x as f32 + 0.5 >= target.x.ceil() && near_extent.y as f32 + 0.5 >= target.y.ceil()
 }
 
@@ -288,6 +464,9 @@ pub struct TerrainNearUpdateLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub struct TerrainFarUpdateLabel;
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+pub struct TerrainBackUpdateLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub struct TerrainComposeLabel;
@@ -344,22 +523,30 @@ const _: () = assert!(std::mem::size_of::<TerrainFarParams>() == 32);
 struct TerrainComposeParams {
     cell_size_m: f32,
     dot_size_m: f32,
-    near_origin_x: i32,
-    near_origin_y: i32,
+    back_min_screen_resolution_divisor: f32,
+    back_scale_multiplier: f32,
+    front_mpp_cells_per_px: f32,
+    back_atmosphere_tint: f32,
     far_origin_x: i32,
     far_origin_y: i32,
+    back_origin_x: i32,
+    back_origin_y: i32,
+    near_origin_x: i32,
+    near_origin_y: i32,
     palette_seed: u32,
     dots_per_cell: u32,
     ring_offset_x: i32,
     ring_offset_y: i32,
     near_enabled: u32,
     far_downsample: u32,
-    _pad0: u32,
+    back_downsample: u32,
     _pad1: u32,
-    _pad2: u32,
-    _pad3: u32,
+    sky_color_r: f32,
+    sky_color_g: f32,
+    sky_color_b: f32,
+    _pad2: f32,
 }
-const _: () = assert!(std::mem::size_of::<TerrainComposeParams>() == 64);
+const _: () = assert!(std::mem::size_of::<TerrainComposeParams>() == 96);
 
 // ── GPU resources (render world) ──────────────────────────────────────────────
 
@@ -378,10 +565,19 @@ struct TerrainFarGpuCache {
     extent_cells: UVec2,
 }
 
+struct TerrainBackGpuCache {
+    /// RGBA8Uint persistent texture:
+    /// R = top1 material id, G = top1 weight, B = solid fraction, A = unused.
+    _back_texture: Texture,
+    back_texture_view: TextureView,
+    extent_cells: UVec2,
+}
+
 #[derive(Resource)]
 struct TerrainNearGpuResources {
     near_cache: TerrainNearGpuCache,
     far_cache: TerrainFarGpuCache,
+    back_cache: TerrainBackGpuCache,
     /// Storage buffer: dirty world cells to update in the current dispatch.
     dirty_cells_buf: Buffer,
     dirty_cells_capacity: u32,
@@ -389,6 +585,8 @@ struct TerrainNearGpuResources {
     near_params_buf: Buffer,
     /// Uniform buffer for far compute pass (TerrainFarParams).
     far_params_buf: Buffer,
+    /// Uniform buffer for back compute pass (TerrainFarParams).
+    back_params_buf: Buffer,
     /// Uniform buffer for fragment pass (TerrainComposeParams).
     compose_params_buf: Buffer,
     /// How many more frames to keep the dirty flag set, used to retry when the
@@ -398,6 +596,9 @@ struct TerrainNearGpuResources {
     pending_far_dispatch_frames: u32,
     pending_far_dispatch_width: u32,
     pending_far_dispatch_height: u32,
+    pending_back_dispatch_frames: u32,
+    pending_back_dispatch_width: u32,
+    pending_back_dispatch_height: u32,
 }
 
 /// Set `true` when override data needs to be dispatched via compute; cleared in Cleanup.
@@ -407,6 +608,10 @@ struct TerrainNearCacheDirty(bool);
 /// Set `true` when far cache needs refresh via compute; cleared in Cleanup.
 #[derive(Resource, Default)]
 struct TerrainFarCacheDirty(bool);
+
+/// Set `true` when back cache needs refresh via compute; cleared in Cleanup.
+#[derive(Resource, Default)]
+struct TerrainBackCacheDirty(bool);
 
 fn make_near_cache(render_device: &RenderDevice, extent: UVec2) -> TerrainNearGpuCache {
     let near_texture = render_device.create_texture(&TextureDescriptor {
@@ -455,6 +660,31 @@ fn make_far_cache(render_device: &RenderDevice, far_extent: UVec2) -> TerrainFar
         _far_texture: far_texture,
         far_texture_view,
         extent_cells: far_extent,
+    }
+}
+
+fn make_back_cache(render_device: &RenderDevice, back_extent: UVec2) -> TerrainBackGpuCache {
+    let back_texture = render_device.create_texture(&TextureDescriptor {
+        label: Some("terrain_back_cache"),
+        size: Extent3d {
+            width: back_extent.x,
+            height: back_extent.y,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba8Uint,
+        usage: TextureUsages::TEXTURE_BINDING
+            | TextureUsages::STORAGE_BINDING
+            | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let back_texture_view = back_texture.create_view(&TextureViewDescriptor::default());
+    TerrainBackGpuCache {
+        _back_texture: back_texture,
+        back_texture_view,
+        extent_cells: back_extent,
     }
 }
 
@@ -620,6 +850,74 @@ impl Node for TerrainFarUpdateNode {
     }
 }
 
+#[derive(Default)]
+struct TerrainBackUpdateNode;
+
+impl Node for TerrainBackUpdateNode {
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        if !world
+            .get_resource::<TerrainBackCacheDirty>()
+            .is_some_and(|d| d.0)
+        {
+            return Ok(());
+        }
+        let Some(resources) = world.get_resource::<TerrainNearGpuResources>() else {
+            return Ok(());
+        };
+        let Some(pipeline_res) = world.get_resource::<TerrainFarUpdatePipeline>() else {
+            return Ok(());
+        };
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipeline_res.pipeline_id) else {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                match pipeline_cache.get_compute_pipeline_state(pipeline_res.pipeline_id) {
+                    CachedPipelineState::Err(e) => {
+                        warn!("terrain_gpu: back_update pipeline error: {e}")
+                    }
+                    s => warn!("terrain_gpu: back_update pipeline not ready: {s:?}"),
+                }
+            }
+            return Ok(());
+        };
+
+        let w = resources.pending_back_dispatch_width;
+        let h = resources.pending_back_dispatch_height;
+        if w == 0 || h == 0 {
+            return Ok(());
+        }
+
+        let layout = pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout);
+        let bind_group = render_context.render_device().create_bind_group(
+            "terrain_back_update_bg",
+            &layout,
+            &BindGroupEntries::sequential((
+                resources.back_params_buf.as_entire_binding(),
+                BindingResource::TextureView(&resources.back_cache.back_texture_view),
+            )),
+        );
+
+        let dispatch_x = w.div_ceil(FAR_UPDATE_WORKGROUP_X);
+        let dispatch_y = h.div_ceil(FAR_UPDATE_WORKGROUP_Y);
+        let encoder = render_context.command_encoder();
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("terrain_back_update"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+
+        Ok(())
+    }
+}
+
 // ── Fragment (TerrainCompose) pipeline & node ─────────────────────────────────
 
 #[derive(Resource)]
@@ -726,6 +1024,7 @@ impl ViewNode for TerrainComposeNode {
                 resources.compose_params_buf.as_entire_binding(),
                 BindingResource::TextureView(&resources.near_cache.near_texture_view),
                 BindingResource::TextureView(&resources.far_cache.far_texture_view),
+                BindingResource::TextureView(&resources.back_cache.back_texture_view),
             )),
         );
 
@@ -750,6 +1049,7 @@ impl ViewNode for TerrainComposeNode {
 pub struct TerrainNearUpdateRequest {
     dirty: bool,
     far_refresh_dirty: bool,
+    back_refresh_dirty: bool,
     initialized: bool,
     terrain_render_version: u64,
     near_lod_k: i32,
@@ -760,6 +1060,19 @@ pub struct TerrainNearUpdateRequest {
     far_height: u32,
     far_origin_x: i32,
     far_origin_y: i32,
+    back_downsample: u32,
+    back_width: u32,
+    back_height: u32,
+    back_origin_x: i32,
+    back_origin_y: i32,
+    back_min_screen_resolution_divisor: f32,
+    back_scale_multiplier: f32,
+    front_mpp_cells_per_px: f32,
+    back_atmosphere_tint: f32,
+    sky_color_r: f32,
+    sky_color_g: f32,
+    sky_color_b: f32,
+    palette_seed: u32,
     generation_enabled: bool,
     width: u32,
     height: u32,
@@ -775,6 +1088,7 @@ impl Clone for TerrainNearUpdateRequest {
         Self {
             dirty: self.dirty,
             far_refresh_dirty: self.far_refresh_dirty,
+            back_refresh_dirty: self.back_refresh_dirty,
             initialized: self.initialized,
             terrain_render_version: self.terrain_render_version,
             near_lod_k: self.near_lod_k,
@@ -785,6 +1099,19 @@ impl Clone for TerrainNearUpdateRequest {
             far_height: self.far_height,
             far_origin_x: self.far_origin_x,
             far_origin_y: self.far_origin_y,
+            back_downsample: self.back_downsample,
+            back_width: self.back_width,
+            back_height: self.back_height,
+            back_origin_x: self.back_origin_x,
+            back_origin_y: self.back_origin_y,
+            back_min_screen_resolution_divisor: self.back_min_screen_resolution_divisor,
+            back_scale_multiplier: self.back_scale_multiplier,
+            front_mpp_cells_per_px: self.front_mpp_cells_per_px,
+            back_atmosphere_tint: self.back_atmosphere_tint,
+            sky_color_r: self.sky_color_r,
+            sky_color_g: self.sky_color_g,
+            sky_color_b: self.sky_color_b,
+            palette_seed: self.palette_seed,
             generation_enabled: self.generation_enabled,
             width: self.width,
             height: self.height,
@@ -859,12 +1186,14 @@ fn append_dirty_rect_cells(
 
 pub fn prepare_terrain_near_update_request(
     terrain: Res<TerrainWorld>,
+    render_params: Res<ActiveRenderParams>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut request: ResMut<TerrainNearUpdateRequest>,
     mut cache_state: ResMut<TerrainCacheState>,
     mut diagnostics: ResMut<TerrainRenderDiagnostics>,
     camera_q: Query<(&Transform, &Projection), With<MainCamera>>,
 ) {
+    let settings = terrain_runtime_settings_from_active(Some(&render_params));
     diagnostics.terrain_generation_eval_count_frame = 0;
     diagnostics.terrain_generation_origin_delta_x_frame = 0;
     diagnostics.terrain_generation_origin_delta_y_frame = 0;
@@ -888,25 +1217,44 @@ pub fn prepare_terrain_near_update_request(
     let (camera_pos, viewport_world_m, near_extent, near_lod_k) = camera_q
         .single()
         .map(|(transform, projection)| {
-            let viewport_world = projection_viewport_world(projection)
-                .unwrap_or_else(|| default_viewport_world(window_size_px));
+            let viewport_world = projection_viewport_world(
+                projection,
+                window_size_px.max(UVec2::splat(1)).as_vec2(),
+            )
+            .unwrap_or_else(|| default_viewport_world(window_size_px));
             (
                 transform.translation.xy(),
                 viewport_world,
-                compute_near_cache_extent_for_projection(window_size_px, projection),
-                compute_near_lod_k_for_projection(projection),
+                compute_near_cache_extent_for_projection(
+                    window_size_px,
+                    projection,
+                    window_size_px.max(UVec2::splat(1)).as_vec2(),
+                    settings,
+                ),
+                compute_near_lod_k_from_viewport_world(viewport_world),
             )
         })
         .unwrap_or((
             Vec2::ZERO,
             default_viewport_world(window_size_px),
-            compute_near_cache_extent(window_size_px),
+            compute_near_cache_extent_with_settings(window_size_px, settings),
             0,
         ));
-    let far_extent = compute_far_cache_base_extent(window_size_px);
-    let far_downsample = compute_far_downsample_for_viewport(viewport_world_m, far_extent);
+    let front_mpp_cells_per_px =
+        (viewport_world_m.y / CELL_SIZE_M.max(1e-6)) / (window_size_px.y.max(1) as f32);
+    let back_scale = compute_back_display_scale(front_mpp_cells_per_px, settings);
+    let far_extent = compute_far_cache_base_extent_with_settings(window_size_px, settings);
+    let far_downsample =
+        compute_far_downsample_for_viewport_with_settings(viewport_world_m, far_extent, settings);
+    let back_extent = far_extent;
+    let back_downsample = compute_back_downsample_for_viewport_with_settings(
+        viewport_world_m * back_scale.max(1.0),
+        back_extent,
+        settings,
+    );
     let far_lod_k = near_lod_k + FAR_LOD_OFFSET;
-    let near_render_enabled = near_covers_viewport_with_margin(near_extent, viewport_world_m);
+    let near_render_enabled =
+        near_covers_viewport_with_margin(near_extent, viewport_world_m, settings);
     let near_extent_i = IVec2::new(
         saturating_u32_to_i32(near_extent.x),
         saturating_u32_to_i32(near_extent.y),
@@ -928,6 +1276,7 @@ pub fn prepare_terrain_near_update_request(
     );
     let new_origin = camera_cell - IVec2::new(near_extent_i.x / 2, near_extent_i.y / 2);
     let far_origin = compute_far_origin_world(camera_cell, far_extent, far_downsample);
+    let back_origin = compute_far_origin_world(camera_cell, back_extent, back_downsample);
     let old_origin = IVec2::new(request.origin_x, request.origin_y);
     let origin_delta = if request.initialized {
         new_origin - old_origin
@@ -942,11 +1291,33 @@ pub fn prepare_terrain_near_update_request(
         request.initialized && IVec2::new(request.far_origin_x, request.far_origin_y) != far_origin;
     let far_extent_changed = request.initialized
         && (request.far_width != far_extent.x || request.far_height != far_extent.y);
+    let back_origin_changed = request.initialized
+        && IVec2::new(request.back_origin_x, request.back_origin_y) != back_origin;
+    let back_extent_changed = request.initialized
+        && (request.back_width != back_extent.x || request.back_height != back_extent.y);
 
     let terrain_changed = request.terrain_render_version != terrain.terrain_render_version();
     let near_lod_changed = request.initialized && request.near_lod_k != near_lod_k;
     let far_lod_changed = request.initialized && request.far_lod_k != far_lod_k;
     let far_downsample_changed = request.initialized && request.far_downsample != far_downsample;
+    let back_downsample_changed = request.initialized && request.back_downsample != back_downsample;
+    let back_min_resolution_divisor_changed = request.initialized
+        && (request.back_min_screen_resolution_divisor
+            - settings.back_min_screen_resolution_divisor)
+            .abs()
+            > 1e-6;
+    let back_scale_multiplier_changed = request.initialized
+        && (request.back_scale_multiplier - settings.back_scale_multiplier).abs() > 1e-6;
+    let front_mpp_changed = request.initialized
+        && (request.front_mpp_cells_per_px - front_mpp_cells_per_px).abs() > 1e-6;
+    let back_atmosphere_tint_changed = request.initialized
+        && (request.back_atmosphere_tint - settings.back_atmosphere_tint).abs() > 1e-6;
+    let sky_color_changed = request.initialized
+        && ((request.sky_color_r - settings.sky_color_r).abs() > 1e-6
+            || (request.sky_color_g - settings.sky_color_g).abs() > 1e-6
+            || (request.sky_color_b - settings.sky_color_b).abs() > 1e-6);
+    let palette_seed_changed =
+        request.initialized && request.palette_seed != settings.terrain_palette_seed;
     let near_mode_changed =
         request.initialized && request.near_render_enabled != near_render_enabled;
     if request.initialized
@@ -955,13 +1326,23 @@ pub fn prepare_terrain_near_update_request(
         && !extent_changed
         && !far_origin_changed
         && !far_extent_changed
+        && !back_origin_changed
+        && !back_extent_changed
         && !near_lod_changed
         && !far_lod_changed
         && !far_downsample_changed
+        && !back_downsample_changed
+        && !back_min_resolution_divisor_changed
+        && !back_scale_multiplier_changed
+        && !front_mpp_changed
+        && !back_atmosphere_tint_changed
+        && !sky_color_changed
+        && !palette_seed_changed
         && !near_mode_changed
     {
         request.dirty = false;
         request.far_refresh_dirty = false;
+        request.back_refresh_dirty = false;
         return;
     }
 
@@ -1086,6 +1467,19 @@ pub fn prepare_terrain_near_update_request(
     request.far_height = far_extent.y;
     request.far_origin_x = far_origin.x;
     request.far_origin_y = far_origin.y;
+    request.back_downsample = back_downsample;
+    request.back_width = back_extent.x;
+    request.back_height = back_extent.y;
+    request.back_origin_x = back_origin.x;
+    request.back_origin_y = back_origin.y;
+    request.back_min_screen_resolution_divisor = settings.back_min_screen_resolution_divisor;
+    request.back_scale_multiplier = settings.back_scale_multiplier;
+    request.front_mpp_cells_per_px = front_mpp_cells_per_px;
+    request.back_atmosphere_tint = settings.back_atmosphere_tint;
+    request.sky_color_r = settings.sky_color_r;
+    request.sky_color_g = settings.sky_color_g;
+    request.sky_color_b = settings.sky_color_b;
+    request.palette_seed = settings.terrain_palette_seed;
     request.width = near_extent.x;
     request.height = near_extent.y;
     request.origin_x = new_origin.x;
@@ -1099,23 +1493,42 @@ pub fn prepare_terrain_near_update_request(
         || far_downsample_changed
         || far_origin_changed
         || far_extent_changed;
+    request.back_refresh_dirty = !request.initialized
+        || terrain_changed
+        || back_downsample_changed
+        || back_origin_changed
+        || back_extent_changed;
     request.initialized = true;
 }
 
 // ── Render startup systems ────────────────────────────────────────────────────
 
 fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<RenderDevice>) {
+    let settings = TerrainRuntimeSettings::default();
     let near_extent = compute_near_cache_extent(DEFAULT_SCREEN_SIZE_PX);
-    let far_extent = compute_far_cache_base_extent(DEFAULT_SCREEN_SIZE_PX);
-    let far_downsample = compute_far_downsample_for_viewport(
-        default_viewport_world(DEFAULT_SCREEN_SIZE_PX),
+    let default_viewport_world = default_viewport_world(DEFAULT_SCREEN_SIZE_PX);
+    let far_extent = compute_far_cache_base_extent_with_settings(DEFAULT_SCREEN_SIZE_PX, settings);
+    let front_mpp_cells_per_px =
+        (default_viewport_world.y / CELL_SIZE_M.max(1e-6)) / (DEFAULT_SCREEN_SIZE_PX.y as f32);
+    let back_scale = compute_back_display_scale(front_mpp_cells_per_px, settings);
+    let far_downsample = compute_far_downsample_for_viewport_with_settings(
+        default_viewport_world,
         far_extent,
+        settings,
+    );
+    let back_extent = far_extent;
+    let back_downsample = compute_back_downsample_for_viewport_with_settings(
+        default_viewport_world * back_scale.max(1.0),
+        back_extent,
+        settings,
     );
     let near_cache = make_near_cache(&render_device, near_extent);
     let far_cache = make_far_cache(&render_device, far_extent);
+    let back_cache = make_back_cache(&render_device, back_extent);
     let dirty_cells_capacity = near_extent.x.saturating_mul(near_extent.y).max(1);
     let dirty_cells_buf = make_dirty_cells_buffer(&render_device, dirty_cells_capacity);
     let far_origin = compute_far_origin_world(IVec2::ZERO, far_extent, far_downsample);
+    let back_origin = compute_far_origin_world(IVec2::ZERO, back_extent, back_downsample);
 
     // Initial params use origin (0, 0); overwritten immediately on first frame.
     let near_params = TerrainNearParams {
@@ -1157,24 +1570,49 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         },
     );
+    let back_params = TerrainFarParams {
+        far_origin_x: back_origin.x,
+        far_origin_y: back_origin.y,
+        far_width: back_cache.extent_cells.x,
+        far_height: back_cache.extent_cells.y,
+        far_downsample: back_downsample,
+        generation_enabled: 1,
+        _pad0: 0,
+        _pad1: 0,
+    };
+    let back_params_buf = render_device.create_buffer_with_data(
+        &bevy::render::render_resource::BufferInitDescriptor {
+            label: Some("terrain_back_params"),
+            contents: bytemuck::bytes_of(&back_params),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        },
+    );
 
     let compose_params = TerrainComposeParams {
         cell_size_m: CELL_SIZE_M,
         dot_size_m: CELL_SIZE_M / TERRAIN_DOTS_PER_CELL as f32,
-        near_origin_x: 0,
-        near_origin_y: 0,
+        back_min_screen_resolution_divisor: settings.back_min_screen_resolution_divisor,
+        back_scale_multiplier: settings.back_scale_multiplier,
+        front_mpp_cells_per_px: 1.0,
+        back_atmosphere_tint: settings.back_atmosphere_tint,
         far_origin_x: far_origin.x,
         far_origin_y: far_origin.y,
-        palette_seed: 0x5EED_7163,
+        back_origin_x: back_origin.x,
+        back_origin_y: back_origin.y,
+        near_origin_x: 0,
+        near_origin_y: 0,
+        palette_seed: settings.terrain_palette_seed,
         dots_per_cell: TERRAIN_DOTS_PER_CELL,
         ring_offset_x: 0,
         ring_offset_y: 0,
         near_enabled: 1,
         far_downsample,
-        _pad0: 0,
+        back_downsample,
         _pad1: 0,
-        _pad2: 0,
-        _pad3: 0,
+        sky_color_r: settings.sky_color_r,
+        sky_color_g: settings.sky_color_g,
+        sky_color_b: settings.sky_color_b,
+        _pad2: 0.0,
     };
     let compose_params_buf = render_device.create_buffer_with_data(
         &bevy::render::render_resource::BufferInitDescriptor {
@@ -1187,19 +1625,25 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
     commands.insert_resource(TerrainNearGpuResources {
         near_cache,
         far_cache,
+        back_cache,
         dirty_cells_buf,
         dirty_cells_capacity,
         near_params_buf,
         far_params_buf,
+        back_params_buf,
         compose_params_buf,
         pending_dispatch_frames: 0,
         pending_dispatch_cells: 0,
         pending_far_dispatch_frames: 0,
         pending_far_dispatch_width: 0,
         pending_far_dispatch_height: 0,
+        pending_back_dispatch_frames: 0,
+        pending_back_dispatch_width: 0,
+        pending_back_dispatch_height: 0,
     });
     commands.insert_resource(TerrainNearCacheDirty(false));
     commands.insert_resource(TerrainFarCacheDirty(false));
+    commands.insert_resource(TerrainBackCacheDirty(false));
 }
 
 fn init_terrain_near_update_pipeline(
@@ -1285,7 +1729,11 @@ fn init_terrain_compose_pipeline(mut commands: Commands, asset_server: Res<Asset
             ShaderStages::VERTEX_FRAGMENT,
             (
                 uniform_buffer::<ViewUniform>(true),
-                uniform_buffer_sized(false, core::num::NonZeroU64::new(64)),
+                uniform_buffer_sized(
+                    false,
+                    core::num::NonZeroU64::new(std::mem::size_of::<TerrainComposeParams>() as u64),
+                ),
+                texture_2d(TextureSampleType::Uint),
                 texture_2d(TextureSampleType::Uint),
                 texture_2d(TextureSampleType::Uint),
             ),
@@ -1316,18 +1764,25 @@ fn prepare_terrain_near_uploads(
     far_pipeline: Res<TerrainFarUpdatePipeline>,
     mut dirty: ResMut<TerrainNearCacheDirty>,
     mut far_dirty: ResMut<TerrainFarCacheDirty>,
+    mut back_dirty: ResMut<TerrainBackCacheDirty>,
 ) {
     let near_upload_requested = upload.dirty && !upload.dirty_cells.is_empty();
     let far_refresh_requested = upload.far_refresh_dirty;
-    if near_upload_requested || far_refresh_requested {
+    let back_refresh_requested = upload.back_refresh_dirty;
+    let requested_far_downsample = upload.far_downsample.max(1);
+    let requested_back_downsample = upload.back_downsample.max(1);
+    if near_upload_requested || far_refresh_requested || back_refresh_requested {
         let requested_extent = UVec2::new(upload.width.max(1), upload.height.max(1));
-        let requested_far_downsample = upload.far_downsample.max(1);
         let requested_far_extent = UVec2::new(upload.far_width.max(1), upload.far_height.max(1));
+        let requested_back_extent = UVec2::new(upload.back_width.max(1), upload.back_height.max(1));
         if near_upload_requested && resources.near_cache.extent_cells != requested_extent {
             resources.near_cache = make_near_cache(&render_device, requested_extent);
         }
         if resources.far_cache.extent_cells != requested_far_extent {
             resources.far_cache = make_far_cache(&render_device, requested_far_extent);
+        }
+        if resources.back_cache.extent_cells != requested_back_extent {
+            resources.back_cache = make_back_cache(&render_device, requested_back_extent);
         }
 
         if near_upload_requested {
@@ -1385,31 +1840,6 @@ fn prepare_terrain_near_uploads(
             resources.pending_dispatch_cells = dirty_count;
         }
 
-        // Update fragment-pass uniform: cache origin for texture lookup and Far mapping.
-        let compose_params = TerrainComposeParams {
-            cell_size_m: CELL_SIZE_M,
-            dot_size_m: CELL_SIZE_M / TERRAIN_DOTS_PER_CELL as f32,
-            near_origin_x: upload.origin_x,
-            near_origin_y: upload.origin_y,
-            far_origin_x: upload.far_origin_x,
-            far_origin_y: upload.far_origin_y,
-            palette_seed: 0x5EED_7163,
-            dots_per_cell: TERRAIN_DOTS_PER_CELL,
-            ring_offset_x: upload.ring_offset_x,
-            ring_offset_y: upload.ring_offset_y,
-            near_enabled: u32::from(upload.near_render_enabled),
-            far_downsample: requested_far_downsample,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
-            _pad3: 0,
-        };
-        queue.write_buffer(
-            &resources.compose_params_buf,
-            0,
-            bytemuck::bytes_of(&compose_params),
-        );
-
         // Update far-aggregation params and request full far refresh.
         let far_params = TerrainFarParams {
             far_origin_x: upload.far_origin_x,
@@ -1426,6 +1856,21 @@ fn prepare_terrain_near_uploads(
             0,
             bytemuck::bytes_of(&far_params),
         );
+        let back_params = TerrainFarParams {
+            far_origin_x: upload.back_origin_x,
+            far_origin_y: upload.back_origin_y,
+            far_width: resources.back_cache.extent_cells.x,
+            far_height: resources.back_cache.extent_cells.y,
+            far_downsample: requested_back_downsample,
+            generation_enabled: u32::from(upload.generation_enabled),
+            _pad0: 0,
+            _pad1: 0,
+        };
+        queue.write_buffer(
+            &resources.back_params_buf,
+            0,
+            bytemuck::bytes_of(&back_params),
+        );
 
         if far_refresh_requested {
             let far_pipeline_ready = pipeline_cache
@@ -1435,7 +1880,47 @@ fn prepare_terrain_near_uploads(
             resources.pending_far_dispatch_width = resources.far_cache.extent_cells.x;
             resources.pending_far_dispatch_height = resources.far_cache.extent_cells.y;
         }
+        if back_refresh_requested {
+            let back_pipeline_ready = pipeline_cache
+                .get_compute_pipeline(far_pipeline.pipeline_id)
+                .is_some();
+            resources.pending_back_dispatch_frames = if back_pipeline_ready { 1 } else { 32 };
+            resources.pending_back_dispatch_width = resources.back_cache.extent_cells.x;
+            resources.pending_back_dispatch_height = resources.back_cache.extent_cells.y;
+        }
     }
+    // Keep compose uniforms in sync even on frames without cache refresh.
+    let compose_params = TerrainComposeParams {
+        cell_size_m: CELL_SIZE_M,
+        dot_size_m: CELL_SIZE_M / TERRAIN_DOTS_PER_CELL as f32,
+        back_min_screen_resolution_divisor: upload.back_min_screen_resolution_divisor,
+        back_scale_multiplier: upload.back_scale_multiplier,
+        front_mpp_cells_per_px: upload.front_mpp_cells_per_px,
+        back_atmosphere_tint: upload.back_atmosphere_tint,
+        far_origin_x: upload.far_origin_x,
+        far_origin_y: upload.far_origin_y,
+        back_origin_x: upload.back_origin_x,
+        back_origin_y: upload.back_origin_y,
+        near_origin_x: upload.origin_x,
+        near_origin_y: upload.origin_y,
+        palette_seed: upload.palette_seed,
+        dots_per_cell: TERRAIN_DOTS_PER_CELL,
+        ring_offset_x: upload.ring_offset_x,
+        ring_offset_y: upload.ring_offset_y,
+        near_enabled: u32::from(upload.near_render_enabled),
+        far_downsample: requested_far_downsample,
+        back_downsample: requested_back_downsample,
+        _pad1: 0,
+        sky_color_r: upload.sky_color_r,
+        sky_color_g: upload.sky_color_g,
+        sky_color_b: upload.sky_color_b,
+        _pad2: 0.0,
+    };
+    queue.write_buffer(
+        &resources.compose_params_buf,
+        0,
+        bytemuck::bytes_of(&compose_params),
+    );
     if resources.pending_dispatch_frames > 0 && resources.pending_dispatch_cells > 0 {
         dirty.0 = true;
         resources.pending_dispatch_frames -= 1;
@@ -1446,6 +1931,13 @@ fn prepare_terrain_near_uploads(
     {
         far_dirty.0 = true;
         resources.pending_far_dispatch_frames -= 1;
+    }
+    if resources.pending_back_dispatch_frames > 0
+        && resources.pending_back_dispatch_width > 0
+        && resources.pending_back_dispatch_height > 0
+    {
+        back_dirty.0 = true;
+        resources.pending_back_dispatch_frames -= 1;
     }
 }
 
@@ -1485,9 +1977,11 @@ fn prepare_terrain_compose_pipeline(
 fn clear_terrain_cache_dirty(
     mut near_dirty: ResMut<TerrainNearCacheDirty>,
     mut far_dirty: ResMut<TerrainFarCacheDirty>,
+    mut back_dirty: ResMut<TerrainBackCacheDirty>,
 ) {
     near_dirty.0 = false;
     far_dirty.0 = false;
+    back_dirty.0 = false;
 }
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
@@ -1543,14 +2037,16 @@ impl Plugin for TerrainGpuPlugin {
                 ),
             );
 
-        // TerrainNearUpdateLabel / TerrainFarUpdateLabel:
+        // TerrainNearUpdateLabel / TerrainFarUpdateLabel / TerrainBackUpdateLabel:
         // non-view compute nodes in main render graph.
         {
             let mut main_graph = render_app.world_mut().resource_mut::<RenderGraph>();
             main_graph.add_node(TerrainNearUpdateLabel, TerrainNearUpdateNode);
             main_graph.add_node(TerrainFarUpdateLabel, TerrainFarUpdateNode);
+            main_graph.add_node(TerrainBackUpdateLabel, TerrainBackUpdateNode);
             main_graph.add_node_edge(TerrainNearUpdateLabel, TerrainFarUpdateLabel);
-            main_graph.add_node_edge(TerrainFarUpdateLabel, CameraDriverLabel);
+            main_graph.add_node_edge(TerrainFarUpdateLabel, TerrainBackUpdateLabel);
+            main_graph.add_node_edge(TerrainBackUpdateLabel, CameraDriverLabel);
         }
     }
 }
@@ -1558,10 +2054,12 @@ impl Plugin for TerrainGpuPlugin {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_SCREEN_SIZE_PX, FAR_MIN_DOWNSAMPLE, MAX_DIRTY_CELLS_PER_DISPATCH,
-        TerrainCacheState, compute_far_cache_base_extent, compute_far_downsample_for_viewport,
-        compute_near_cache_extent, compute_near_cache_extent_from_viewport_world,
-        default_viewport_world, world_cell_to_texture_index,
+        CELL_SIZE_M, DEFAULT_SCREEN_SIZE_PX, FAR_MIN_DOWNSAMPLE, MAX_DIRTY_CELLS_PER_DISPATCH,
+        TerrainCacheState, TerrainRuntimeSettings, compute_back_display_scale,
+        compute_back_downsample_for_viewport_with_settings, compute_far_cache_base_extent,
+        compute_far_downsample_for_viewport, compute_near_cache_extent,
+        compute_near_cache_extent_from_viewport_world, default_viewport_world,
+        world_cell_to_texture_index,
     };
     use bevy::math::{IVec2, UVec2, Vec2};
 
@@ -1615,5 +2113,73 @@ mod tests {
             compute_far_downsample_for_viewport(zoomed_out_viewport, far),
             4
         );
+    }
+
+    #[test]
+    fn back_downsample_converges_toward_far_rule_at_zoom_out() {
+        let far = compute_far_cache_base_extent(DEFAULT_SCREEN_SIZE_PX);
+        let zoomed_out_viewport = default_viewport_world(DEFAULT_SCREEN_SIZE_PX) * 27.0;
+        let viewport_cells = zoomed_out_viewport / CELL_SIZE_M.max(1.0e-6);
+        let front_mpp_cells_per_px = viewport_cells.y / (DEFAULT_SCREEN_SIZE_PX.y.max(1) as f32);
+        let back_scale =
+            compute_back_display_scale(front_mpp_cells_per_px, TerrainRuntimeSettings::default());
+        let far_downsample = compute_far_downsample_for_viewport(zoomed_out_viewport, far);
+        let back_downsample = compute_back_downsample_for_viewport_with_settings(
+            zoomed_out_viewport * back_scale.max(1.0),
+            far,
+            TerrainRuntimeSettings::default(),
+        );
+        assert_eq!(far_downsample, 4);
+        assert!(back_downsample >= far_downsample);
+
+        let huge_zoomed_out_viewport = default_viewport_world(DEFAULT_SCREEN_SIZE_PX) * 512.0;
+        let huge_cells = huge_zoomed_out_viewport / CELL_SIZE_M.max(1.0e-6);
+        let huge_mpp = huge_cells.y / (DEFAULT_SCREEN_SIZE_PX.y.max(1) as f32);
+        let huge_back_scale =
+            compute_back_display_scale(huge_mpp, TerrainRuntimeSettings::default());
+        let huge_far_downsample =
+            compute_far_downsample_for_viewport(huge_zoomed_out_viewport, far);
+        let huge_back_downsample = compute_back_downsample_for_viewport_with_settings(
+            huge_zoomed_out_viewport * huge_back_scale.max(1.0),
+            far,
+            TerrainRuntimeSettings::default(),
+        );
+        assert_eq!(huge_back_downsample, huge_far_downsample);
+    }
+
+    #[test]
+    fn back_downsample_expands_for_zoom_in_coverage() {
+        let far = compute_far_cache_base_extent(DEFAULT_SCREEN_SIZE_PX);
+        let zoomed_in_viewport = default_viewport_world(DEFAULT_SCREEN_SIZE_PX) * 0.45;
+        let far_downsample = compute_far_downsample_for_viewport(zoomed_in_viewport, far);
+        let viewport_cells = zoomed_in_viewport / CELL_SIZE_M.max(1.0e-6);
+        let front_mpp_cells_per_px = viewport_cells.y / (DEFAULT_SCREEN_SIZE_PX.y.max(1) as f32);
+        let back_scale =
+            compute_back_display_scale(front_mpp_cells_per_px, TerrainRuntimeSettings::default());
+        let back_downsample = compute_back_downsample_for_viewport_with_settings(
+            zoomed_in_viewport * back_scale.max(1.0),
+            far,
+            TerrainRuntimeSettings::default(),
+        );
+        assert!(back_downsample >= far_downsample);
+    }
+
+    #[test]
+    fn back_scale_floor_keeps_half_screen_resolution_target() {
+        let settings = TerrainRuntimeSettings::default();
+        let far = compute_far_cache_base_extent(DEFAULT_SCREEN_SIZE_PX);
+        let zoomed_in_viewport = default_viewport_world(DEFAULT_SCREEN_SIZE_PX) * 0.45;
+        let viewport_cells = zoomed_in_viewport / CELL_SIZE_M.max(1.0e-6);
+        let front_mpp_cells_per_px = viewport_cells.y / (DEFAULT_SCREEN_SIZE_PX.y.max(1) as f32);
+        let back_scale = compute_back_display_scale(front_mpp_cells_per_px, settings);
+        let back_downsample = compute_back_downsample_for_viewport_with_settings(
+            zoomed_in_viewport * back_scale.max(1.0),
+            far,
+            settings,
+        );
+        let back_texels_y = viewport_cells.y * back_scale / (back_downsample.max(1) as f32);
+        let target_texels_y = (DEFAULT_SCREEN_SIZE_PX.y as f32)
+            / settings.back_min_screen_resolution_divisor.max(1.0);
+        assert!(back_texels_y + 1.0e-3 >= target_texels_y);
     }
 }

@@ -230,6 +230,7 @@
     - [x] フルスクリーン quad で Near テクスチャを合成して画面へ出力する。
     - [x] Near: 最近傍サンプリング + 材料IDパレット（8×8 ドット内確定的ハッシュ）で表示する。
     - [x] Far: カバレッジ alpha でブレンド表示する（Far実装後）。
+    - [x] Near有効時は Far を nearest、Far単独表示時のみ bilinear とする（Farぼけはみ出し抑制）。
     - [ ] `s = (CELL_SIZE_M * camera_zoom) / screen_pixel_size_m` を計算し、S_UP/S_DOWN ヒステリシスでモード切替する（P7後）。
   - [ ] **[P7: カメラ同期 + パン/ズーム制御]** Update schedule で `TerrainCacheState` をカメラ状態から更新するシステムを実装する。
     - [ ] カメラパン量（セル単位）を計算し、ring_offset を更新する。
@@ -251,6 +252,7 @@
   - [x] **[P10: 自動検証 — 初期]** autoverify スクリーンショット確認を整備する。
     - [x] `configs/autoverify/terrain_gpu_screenshot.json`: GPU地形描画スクリーンショット取得・目視確認（`artifacts/terrain_gpu.png`）。石壁・土壌パレット正常表示を確認済み。
     - [x] HUDスケールバー（左下）の表示を追加し、`m/km` 表示と 1-2-5 系列スナップ（`1m,2m,5m,...`）を確認する。
+    - [x] screenshot/mpm autoverify の終了を `autoverify_hard_exit` で安定化し、`cargo run` 残留を抑止する。
     - [ ] `configs/autoverify/terrain_cell_correctness.json`: GPU生成セル vs CPU参照の一致率チェック（WGSL生成関数実装後）。
     - [ ] `configs/autoverify/terrain_pan_continuity.json`: パン継続性スクリーンショット（リングバッファ実装後）。
     - [ ] `configs/autoverify/terrain_zoom_lod.json`: ズーム遷移スクリーンショット（LOD実装後）。
@@ -278,6 +280,19 @@
   - 2026-03-04: Far粗さ低減の追加調整。`far_downsample` は 2冪を維持しつつ、`viewport_cells * far_margin / far_extent` の必要値を power-of-two へ切り上げて算出する方式へ変更。Farベース解像度は `screen * (far_margin / 2) * 1.1`（画面1/2品質 + margin + headroom）で固定し、Far切替直後に品質が過度に荒くなる状態を緩和。Far再生成トリガは `far_downsample`・`far_origin`・地形バージョン変化に限定。
   - 2026-03-04: Far最小解像度を調整。`FAR_MIN_DOWNSAMPLE` を `2 -> 1` に変更し、Near表示中（Far最小downsample時）の Far 1texel が 1セルに一致するよう修正。
   - 2026-03-04: Far表示の1セルずれ補正。`terrain_compose.wgsl` の Far サンプリング座標を「連続 world 座標」から「world_cell 中心基準」へ変更し、`downsample=1` 時に Far がセル境界へ正しく一致するよう調整。
+  - 2026-03-04: Back 背景レイヤーを追加。Far と同じ compute 経路を使って `back_downsample = far_downsample * 8` のキャッシュを生成し、`terrain_compose.wgsl` を `空色ベース -> Back(空気遠近ティント) -> Far -> Near` 合成へ更新。Back は `camera_cell * 0.35` 基準の origin 更新でパララックス移動させる。`cargo check` / `cargo test --lib` / `cargo run -q -- --autoverify-config configs/autoverify/default_world_paused_screenshot.json` / 追加 screenshot autoverify（camera_center_y=40）で確認（`artifacts/autoverify/default_world_backlayer_verify.png`）。
+  - 2026-03-04: 実行時調整可能な描画パラメータを `assets/params/render.ron` へ集約。`src/params/render.rs` を拡張し、terrain 側へ `lod`（margin/quality/min_downsample）、`back`（downsample/display_scale/parallax/tint）、`sky_color` を追加。water 側へ `palette_seed` を追加し、`water_dot_gpu.rs` の splat/blur/threshold/seed を `ActiveRenderParams` 経由で参照するよう接続。
+  - 2026-03-05: Back 表示式を投影ベースへ更新。`terrain_compose.wgsl` の Back サンプル座標を `raw_scale = 1 + beta / front_mpp_cells_per_px`（`[1, display_scale_max]` に clamp）で計算する方式へ変更し、ズームインで Back が拡大・ズームアウトで前景と同スケールへ滑らかに遷移するよう調整。対応パラメータとして `back.perspective_beta_cells_per_px` と `back.display_scale_max` を `render.ron` へ反映。
+  - 2026-03-05: Back 解像度制御を Far から分離。`back_downsample = far_downsample * multiplier` を廃止し、`viewport + Back scale` から Back 専用 downsample を算出する経路へ変更。さらに Back scale 式へ `min_screen_resolution_divisor` ベースの下限（`screen_px / divisor` 以上）を導入し、ズームイン時に Back の見かけ解像度が落ちすぎないよう補正。
+  - 2026-03-05: Back のズーム見た目を Far 準拠へ再調整。Back downsample は Far と同じ power-of-two coverage 規則で独立算出し、ズームアウト極限で Far と一致するよう変更。Back の表示スケールは「1セル=1ドット(2px)を上限」にする最小倍率 `back_downsample / (min_screen_resolution_divisor * front_mpp)` のみを採用し、拡大時のセル感を抑制。
+  - 2026-03-05: Back のセル段差/ズーム時ブレを追加修正。Far/Back サンプリング座標を「整数セル中心」ではなく連続 `cell_f` で評価するよう変更し、Back のスケール中心を整数 `camera_cell` から実座標 `camera_pos / CELL_SIZE_M` へ変更。これによりズーム中の位置ドリフトとセル単位の段差感を低減。
+  - 2026-03-05: Back の内部ドットを Near から分離。Back 合成時の palette ドット座標を `back_world_cell` 基準の「1セル=1ドット」へ変更し、ズームイン時に Near のサブセルドットがそのまま拡大される見え方を回避。あわせて `control_main_camera` を `SimUpdateSet::Controls` へ移し、`prepare_terrain_near_update_request` より前にカメラ更新される順序を固定。
+  - 2026-03-05: Back のズーム/スクロール同時時のブレ対策を追加。Back スケールのピボット座標を `TerrainComposeParams.camera_cell_*`（CPU転送）から、`terrain_compose.wgsl` 内で `view.world_from_clip` から直接算出する方式へ変更し、`view` 行列と同フレーム基準へ統一。あわせて `camera_cell_*` uniform と `camera_continuous_changed` 判定を削除し、サブセル移動時の不要な upload dirty 化を抑制。
+  - 2026-03-05: Back のパン時ガクつき低減を追加。Back の palette 位相を `1cell=1dot` から `dots_per_cell`（サブセル）基準へ変更し、スクロール時に内部パターンがセル境界でのみ更新される見え方を緩和。
+  - 2026-03-05: ズーム時の1フレーム倍率ブレを追加修正。`prepare_terrain_near_update_request` の viewport 取得を `OrthographicProjection.area` 依存から `scaling_mode + scale + window_size` の直接計算へ変更し、Bevy の `camera_system` による `area` 更新タイミング差で `front_mpp_cells_per_px` が1フレーム遅れる問題を解消。
+  - 2026-03-05: ズームイン時の Back 見切れを修正。Back downsample の必要カバー範囲を `viewport_world * back_scale` で評価するよう変更し、Back スケール拡張時でもキャッシュが画面端まで届くようにした。あわせて `terrain_compose.wgsl` の layer サンプルを clamp-to-edge 化し、境界近傍の透明抜けを防止。
+  - 2026-03-05: Far ぼかし条件を調整。Near が有効なフレームは Far を nearest、Far 単独表示（`near_enabled == 0`）時のみ bilinear に切り替えるよう compose を更新し、Near 併用時の Far ぼけはみ出しを抑制。
+  - 2026-03-05: autoverify 実行時の `cargo run` 残留対策を追加。`run_mpm_autoverify` / `run_screenshot_autoverify` の終了条件で `AppExit` 通知後に `std::process::exit(code)` を呼ぶ `autoverify_hard_exit` を導入し、非対話実行でのプロセス残留を抑止。
   - 2026-03-04: 左下スケールバーを追加。カメラ投影から m/px を算出し、バー長を「10刻み」（`m` もしくは `km`）へスナップして表示する UI を実装。`default_world_paused_screenshot` で `30 m` 表示を確認。
   - 2026-03-04: スケールバー刻みを 1-2-5 系列へ変更。表示値を `1m, 2m, 5m, 10m, ... , 1km, 2km, 5km, ...` にスナップするよう更新し、`default_world_paused_screenshot` で `1 m` 開始表示を確認。
 - 完了条件:

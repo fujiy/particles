@@ -26,8 +26,8 @@ use bevy::render::view::{Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewU
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bytemuck::{Pod, Zeroable};
 
-use crate::params::ActivePaletteParams;
 use crate::params::palette::{MaterialPalette4, PaletteColor};
+use crate::params::{ActivePaletteParams, ActiveRenderParams};
 use crate::physics::gpu_mpm::{MpmComputeLabel, gpu_resources::MpmGpuBuffers};
 use crate::physics::world::constants::{
     CELL_SIZE_M, CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
@@ -38,11 +38,12 @@ const WATER_DOT_RENDER_SHADER_PATH: &str = "shaders/render/water_dot_gpu_mainlin
 const WATER_DOT_PREPROCESS_SHADER_PATH: &str = "shaders/render/water_dot_preprocess.wgsl";
 const DOTS_PER_CELL: u32 = 8;
 const DOT_GRID_PADDING_CELLS: i32 = 32;
-const SPLAT_RADIUS_DOTS: f32 = 2.5;
-const BLUR_SIGMA_DOTS: f32 = 5.0;
-const BLUR_RADIUS_DOTS: u32 = 10;
-const DENSITY_ATOMIC_SCALE: f32 = 256.0;
-const DENSITY_THRESHOLD: f32 = 0.50;
+const DEFAULT_SPLAT_RADIUS_DOTS: f32 = 2.5;
+const DEFAULT_BLUR_SIGMA_DOTS: f32 = 5.0;
+const DEFAULT_BLUR_RADIUS_DOTS: u32 = 10;
+const DEFAULT_DENSITY_ATOMIC_SCALE: f32 = 256.0;
+const DEFAULT_DENSITY_THRESHOLD: f32 = 0.50;
+const DEFAULT_WATER_PALETTE_SEED: u32 = 0xA53C_9E4D;
 const WORKGROUP_SIZE: u32 = 64;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
@@ -137,21 +138,51 @@ struct WaterDotGpuResources {
 }
 
 impl WaterDotGpuResources {
-    fn params_for(&self, particle_count: u32) -> WaterDotParams {
+    fn params_for(
+        &self,
+        particle_count: u32,
+        active_render: Option<&ActiveRenderParams>,
+    ) -> WaterDotParams {
+        let (
+            density_threshold,
+            atomic_scale,
+            splat_radius_dots,
+            blur_sigma_dots,
+            blur_radius_dots,
+            palette_seed,
+        ) = active_render
+            .map(|r| {
+                (
+                    r.0.water.splat.density_threshold,
+                    r.0.water.splat.atomic_scale,
+                    r.0.water.splat.radius_dots,
+                    r.0.water.splat.blur_sigma_dots,
+                    r.0.water.splat.blur_radius_dots,
+                    r.0.water.palette_seed,
+                )
+            })
+            .unwrap_or((
+                DEFAULT_DENSITY_THRESHOLD,
+                DEFAULT_DENSITY_ATOMIC_SCALE,
+                DEFAULT_SPLAT_RADIUS_DOTS,
+                DEFAULT_BLUR_SIGMA_DOTS,
+                DEFAULT_BLUR_RADIUS_DOTS,
+                DEFAULT_WATER_PALETTE_SEED,
+            ));
         WaterDotParams {
             origin_x: self.layout.origin.x,
             origin_y: self.layout.origin.y,
             dot_size_m: self.layout.dot_size_m,
-            density_threshold: DENSITY_THRESHOLD,
-            atomic_scale: DENSITY_ATOMIC_SCALE,
-            splat_radius_dots: SPLAT_RADIUS_DOTS,
-            blur_sigma_dots: BLUR_SIGMA_DOTS,
+            density_threshold,
+            atomic_scale,
+            splat_radius_dots,
+            blur_sigma_dots,
             _pad0: 0.0,
             width: self.layout.width,
             height: self.layout.height,
             particle_count,
-            blur_radius_dots: BLUR_RADIUS_DOTS,
-            palette_seed: 0xA53C_9E4D,
+            blur_radius_dots,
+            palette_seed,
             _pad1: [0; 3],
         }
     }
@@ -567,7 +598,8 @@ impl Node for WaterDotPreprocessNode {
             std::sync::atomic::AtomicBool::new(false);
         let had_particles_previous_frame =
             HAD_PARTICLES_PREVIOUS_FRAME.load(std::sync::atomic::Ordering::Relaxed);
-        let params = resources.params_for(particle_count);
+        let params =
+            resources.params_for(particle_count, world.get_resource::<ActiveRenderParams>());
         world.resource::<RenderQueue>().write_buffer(
             &resources.params_buf,
             0,
@@ -881,6 +913,7 @@ pub struct WaterDotGpuPlugin;
 impl Plugin for WaterDotGpuPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(ExtractResourcePlugin::<ActivePaletteParams>::default());
+        app.add_plugins(ExtractResourcePlugin::<ActiveRenderParams>::default());
         let render_app = app.sub_app_mut(RenderApp);
         render_app
             .init_resource::<SpecializedRenderPipelines<WaterDotGpuPipeline>>()

@@ -52,7 +52,7 @@ pub struct GenerationParamsHandle(pub Handle<GenerationParams>);
 
 #[derive(Resource)]
 pub struct ActivePhysicsParams(pub PhysicsParams);
-#[derive(Resource)]
+#[derive(Resource, Clone, ExtractResource)]
 pub struct ActiveRenderParams(pub RenderParams);
 #[derive(Resource, Clone, ExtractResource)]
 pub struct ActivePaletteParams(pub PaletteParams);
