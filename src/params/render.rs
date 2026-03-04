@@ -91,7 +91,12 @@ impl RenderParams {
         check!(s.blur_sigma_dots, "water.splat.blur_sigma_dots", 0.5, 20.0);
         check!(s.blur_radius_dots, "water.splat.blur_radius_dots", 1, 30);
         check!(s.atomic_scale, "water.splat.atomic_scale", 16.0, 4096.0);
-        check!(s.density_threshold, "water.splat.density_threshold", 0.01, 1.0);
+        check!(
+            s.density_threshold,
+            "water.splat.density_threshold",
+            0.01,
+            1.0
+        );
         Ok(())
     }
 }

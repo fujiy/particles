@@ -91,6 +91,7 @@ struct ScreenshotAutoVerifyConfig {
     output_path: Option<String>,
     warmup_frames: Option<u32>,
     max_wait_after_capture_frames: Option<u32>,
+    run_simulation: Option<bool>,
     camera_scale: Option<f32>,
     camera_center_x: Option<f32>,
     camera_center_y: Option<f32>,
@@ -192,6 +193,7 @@ struct ScreenshotVerifyState {
     enabled: bool,
     scenario_name: String,
     skip_scenario_load: bool,
+    run_simulation: bool,
     output_path: String,
     warmup_frames: u32,
     max_wait_after_capture_frames: u32,
@@ -239,6 +241,14 @@ impl ScreenshotVerifyState {
                     .and_then(|s| s.parse::<u32>().ok())
             })
             .unwrap_or(180);
+        let run_simulation = config
+            .run_simulation
+            .or_else(|| {
+                std::env::var("PARTICLES_AUTOVERIFY_SCREENSHOT_RUN_SIM")
+                    .ok()
+                    .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+            })
+            .unwrap_or(true);
         let camera_scale = config
             .camera_scale
             .or_else(|| {
@@ -265,6 +275,7 @@ impl ScreenshotVerifyState {
             enabled,
             scenario_name,
             skip_scenario_load,
+            run_simulation,
             output_path,
             warmup_frames,
             max_wait_after_capture_frames,
@@ -528,12 +539,8 @@ fn collect_grid_density_stats(particles: &ParticleWorld, rho0: f32, h: f32) -> G
 
     let (water_phi_max, water_phi_p99, water_phi_mean_nonzero, water_nonzero_nodes) =
         phi_stats_from_mass_map(&water_mass, rho0, h);
-    let (
-        granular_phi_max,
-        granular_phi_p99,
-        granular_phi_mean_nonzero,
-        granular_nonzero_nodes,
-    ) = phi_stats_from_mass_map(&granular_mass, rho0, h);
+    let (granular_phi_max, granular_phi_p99, granular_phi_mean_nonzero, granular_nonzero_nodes) =
+        phi_stats_from_mass_map(&granular_mass, rho0, h);
 
     GridDensityStats {
         water_phi_max,
@@ -854,7 +861,8 @@ fn run_mpm_autoverify(
         active_physics_params.0.water.rho0,
         CELL_SIZE_M,
     );
-    let granular_diag = collect_granular_elastic_diagnostics(&continuum_world, &active_physics_params);
+    let granular_diag =
+        collect_granular_elastic_diagnostics(&continuum_world, &active_physics_params);
 
     let fps_ok = avg_fps >= state.min_avg_fps;
     let drop_ok = mean_drop >= state.min_mean_drop;
@@ -1007,7 +1015,7 @@ fn run_screenshot_autoverify(
                 scenario_name: state.scenario_name.clone(),
             });
         }
-        sim_state.running = true;
+        sim_state.running = state.run_simulation;
         sim_state.step_once = false;
         state.scenario_requested = true;
         return;
@@ -1015,7 +1023,7 @@ fn run_screenshot_autoverify(
 
     if !state.capture_requested {
         // Keep simulation advancing even if scenario load reset it to paused.
-        sim_state.running = true;
+        sim_state.running = state.run_simulation;
         sim_state.step_once = false;
         if !state.camera_scale_applied {
             if let Ok((mut projection, mut transform)) = camera_query.single_mut() {
@@ -1044,7 +1052,7 @@ fn run_screenshot_autoverify(
     }
 
     state.wait_after_capture_frames = state.wait_after_capture_frames.saturating_add(1);
-    sim_state.running = true;
+    sim_state.running = state.run_simulation;
     sim_state.step_once = false;
     let ready = fs::metadata(&state.output_path)
         .map(|meta| meta.len() > 0)

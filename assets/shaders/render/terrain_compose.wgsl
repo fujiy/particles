@@ -7,17 +7,26 @@
 struct ComposeParams {
     cell_size_m:   f32,  // metres per cell (CELL_SIZE_M = 0.25)
     dot_size_m:    f32,  // metres per dot (cell_size_m / dots_per_cell)
-    cache_origin_x: i32, // world cell X of texture texel (0,0)
-    cache_origin_y: i32, // world cell Y of texture texel (0,0)
+    near_origin_x: i32,  // world cell X of near texel (0,0)
+    near_origin_y: i32,  // world cell Y of near texel (0,0)
+    far_origin_x:  i32,  // world cell X of far texel block (0,0)
+    far_origin_y:  i32,  // world cell Y of far texel block (0,0)
     palette_seed:  u32,
     dots_per_cell: u32,
     ring_offset_x: i32,  // ring buffer offset in physical texture X
     ring_offset_y: i32,  // ring buffer offset in physical texture Y
+    near_enabled:  u32,  // 0: disable near overlay, 1: enable
+    far_downsample: u32, // world-cell pitch of far texel
+    _pad0:         u32,
+    _pad1:         u32,
+    _pad2:         u32,
+    _pad3:         u32,
 }
 
 @group(0) @binding(0) var<uniform> view:    View;
 @group(0) @binding(1) var<uniform> params:  ComposeParams;
 @group(0) @binding(2) var          near_tex: texture_2d<u32>;
+@group(0) @binding(3) var          far_tex:  texture_2d<u32>;
 
 // ── Vertex (full-screen quad) ─────────────────────────────────────────────────
 
@@ -103,6 +112,34 @@ fn positive_mod(x: i32, m: i32) -> i32 {
     return select(r + m, r, r >= 0);
 }
 
+fn floor_div_positive(x: i32, d: i32) -> i32 {
+    let q = x / d;
+    let r = x % d;
+    return select(q - 1, q, r >= 0);
+}
+
+fn far_sample_weighted_color(
+    texel: vec2<i32>,
+    w: f32,
+    dot: vec2<i32>,
+    seed: u32,
+    inout_color: ptr<function, vec3<f32>>,
+    inout_alpha: ptr<function, f32>,
+) {
+    let sample = textureLoad(far_tex, texel, 0);
+    let material = sample.r;
+    if material == 0u {
+        return;
+    }
+    let a = f32(sample.b) / 255.0;
+    if a <= 0.0 {
+        return;
+    }
+    let weighted = w * a;
+    (*inout_color) = (*inout_color) + terrain_color(material, dot.x, dot.y, seed) * weighted;
+    (*inout_alpha) = (*inout_alpha) + weighted;
+}
+
 // ── Fragment ──────────────────────────────────────────────────────────────────
 
 @fragment
@@ -111,26 +148,73 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let cell_f = in.world_xy / params.cell_size_m;
     let world_cell = vec2<i32>(i32(floor(cell_f.x)), i32(floor(cell_f.y)));
 
-    // Global cell → texture coordinate (subtract cache origin; no ring offset in this initial version).
-    let logical = world_cell - vec2<i32>(params.cache_origin_x, params.cache_origin_y);
-    let tex_size = vec2<i32>(textureDimensions(near_tex));
-    if logical.x < 0 || logical.y < 0 || logical.x >= tex_size.x || logical.y >= tex_size.y {
-        discard;
-    }
-    let tc = vec2<i32>(
-        positive_mod(logical.x + params.ring_offset_x, tex_size.x),
-        positive_mod(logical.y + params.ring_offset_y, tex_size.y),
-    );
-
-    let material = textureLoad(near_tex, tc, 0).r;
-    if material == 0u {
-        discard;
-    }
-
     // Dot coordinates for palette variation (8×8 sub-cell grid, global indexing).
     let dot_f = in.world_xy / params.dot_size_m;
     let dot = vec2<i32>(i32(floor(dot_f.x)), i32(floor(dot_f.y)));
 
-    let color = terrain_color(material, dot.x, dot.y, params.palette_seed);
-    return vec4<f32>(color, 1.0);
+    // Far is always rendered as background (manual bilinear-like blend across 4 texels).
+    let far_size = vec2<i32>(textureDimensions(far_tex));
+    let downsample_f = f32(max(params.far_downsample, 1u));
+    // Sample Far using world-cell centers. This keeps Far aligned with cell boundaries
+    // when downsample == 1 (no half-cell drift from continuous world sampling).
+    let world_cell_center = vec2<f32>(f32(world_cell.x) + 0.5, f32(world_cell.y) + 0.5);
+    let far_coord =
+        (world_cell_center - vec2<f32>(f32(params.far_origin_x), f32(params.far_origin_y)))
+            / downsample_f
+        - vec2<f32>(0.5, 0.5);
+    let far_base = vec2<i32>(i32(floor(far_coord.x)), i32(floor(far_coord.y)));
+    let frac = far_coord - vec2<f32>(f32(far_base.x), f32(far_base.y));
+    let wx0 = 1.0 - clamp(frac.x, 0.0, 1.0);
+    let wx1 = clamp(frac.x, 0.0, 1.0);
+    let wy0 = 1.0 - clamp(frac.y, 0.0, 1.0);
+    let wy1 = clamp(frac.y, 0.0, 1.0);
+
+    var color_acc = vec3<f32>(0.0, 0.0, 0.0);
+    var alpha_acc = 0.0;
+    let tx00 = far_base;
+    let tx10 = far_base + vec2<i32>(1, 0);
+    let tx01 = far_base + vec2<i32>(0, 1);
+    let tx11 = far_base + vec2<i32>(1, 1);
+
+    if tx00.x >= 0 && tx00.y >= 0 && tx00.x < far_size.x && tx00.y < far_size.y {
+        far_sample_weighted_color(tx00, wx0 * wy0, dot, params.palette_seed, &color_acc, &alpha_acc);
+    }
+    if tx10.x >= 0 && tx10.y >= 0 && tx10.x < far_size.x && tx10.y < far_size.y {
+        far_sample_weighted_color(tx10, wx1 * wy0, dot, params.palette_seed, &color_acc, &alpha_acc);
+    }
+    if tx01.x >= 0 && tx01.y >= 0 && tx01.x < far_size.x && tx01.y < far_size.y {
+        far_sample_weighted_color(tx01, wx0 * wy1, dot, params.palette_seed, &color_acc, &alpha_acc);
+    }
+    if tx11.x >= 0 && tx11.y >= 0 && tx11.x < far_size.x && tx11.y < far_size.y {
+        far_sample_weighted_color(tx11, wx1 * wy1, dot, params.palette_seed, &color_acc, &alpha_acc);
+    }
+
+    var color = vec3<f32>(0.0, 0.0, 0.0);
+    var alpha = 0.0;
+    if alpha_acc > 1.0e-6 {
+        color = color_acc / alpha_acc;
+        alpha = alpha_acc;
+    }
+
+    // Near overlays Far when enabled.
+    let near_logical = world_cell - vec2<i32>(params.near_origin_x, params.near_origin_y);
+    let near_size = vec2<i32>(textureDimensions(near_tex));
+    if params.near_enabled != 0u
+        && near_logical.x >= 0 && near_logical.y >= 0
+        && near_logical.x < near_size.x && near_logical.y < near_size.y {
+        let tc = vec2<i32>(
+            positive_mod(near_logical.x + params.ring_offset_x, near_size.x),
+            positive_mod(near_logical.y + params.ring_offset_y, near_size.y),
+        );
+        let near_material = textureLoad(near_tex, tc, 0).r;
+        if near_material != 0u {
+            color = terrain_color(near_material, dot.x, dot.y, params.palette_seed);
+            alpha = 1.0;
+        }
+    }
+
+    if alpha <= 1.0e-6 {
+        discard;
+    }
+    return vec4<f32>(color, alpha);
 }

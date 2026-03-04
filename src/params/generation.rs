@@ -127,8 +127,18 @@ impl GenerationParams {
         let h = &self.height_noise;
         check!(h.freq, "height_noise.freq", 1e-5, 1.0);
         check!(h.amp_cells, "height_noise.amp_cells", 0, 500);
-        check!(h.detail_freq_mult, "height_noise.detail_freq_mult", 1.0, 20.0);
-        check!(h.detail_amp_cells, "height_noise.detail_amp_cells", 0.0, 20.0);
+        check!(
+            h.detail_freq_mult,
+            "height_noise.detail_freq_mult",
+            1.0,
+            20.0
+        );
+        check!(
+            h.detail_amp_cells,
+            "height_noise.detail_amp_cells",
+            0.0,
+            20.0
+        );
         check!(h.detail_octaves, "height_noise.detail_octaves", 1, 8);
         let f = &self.fbm;
         check!(f.octaves, "fbm.octaves", 1, 10);
@@ -140,8 +150,18 @@ impl GenerationParams {
         check!(b.per_footprint, "surface_blend.per_footprint", 0.0, 5.0);
         let s = &self.soil;
         check!(s.depth_cells, "soil.depth_cells", 0, 50);
-        check!(s.depth_variation_cells, "soil.depth_variation_cells", 0.0, 20.0);
-        check!(s.depth_noise_freq_mult, "soil.depth_noise_freq_mult", 0.1, 2.0);
+        check!(
+            s.depth_variation_cells,
+            "soil.depth_variation_cells",
+            0.0,
+            20.0
+        );
+        check!(
+            s.depth_noise_freq_mult,
+            "soil.depth_noise_freq_mult",
+            0.1,
+            2.0
+        );
         Ok(())
     }
 }

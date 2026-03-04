@@ -137,13 +137,15 @@ pub fn prepare_terrain_upload(
     if control.init_only {
         upload.terrain_sdf.clear();
         upload.terrain_normal.clear();
+        upload.last_uploaded_terrain_version = None;
         return;
     }
     // When MLS-MPM stepping is disabled, terrain upload is unnecessary for overlay debug.
     if !sim_state.mpm_enabled {
         return;
     }
-    if !terrain.is_changed() {
+    let terrain_version = terrain.terrain_version();
+    if upload.last_uploaded_terrain_version == Some(terrain_version) {
         return;
     }
     let layout = world_grid_layout();
@@ -186,6 +188,7 @@ pub fn prepare_terrain_upload(
     upload.terrain_sdf = sdf;
     upload.terrain_normal = normals;
     upload.upload_terrain = true;
+    upload.last_uploaded_terrain_version = Some(terrain_version);
 }
 
 /// System: update MpmGpuParamsRequest from SolverParams, simulation state, and PhysicsParams asset.

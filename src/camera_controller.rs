@@ -8,7 +8,7 @@ const CAMERA_VIEWPORT_HEIGHT_M: f32 = 14.0;
 const CAMERA_PAN_SPEED_MPS: f32 = 10.0;
 const CAMERA_ZOOM_SENSITIVITY: f32 = 0.06;
 const CAMERA_MIN_ZOOM: f32 = 0.1;
-const CAMERA_MAX_ZOOM: f32 = 50.0;
+const CAMERA_MAX_ZOOM: f32 = 1000.0;
 const CAMERA_START_CELL: IVec2 = IVec2::new(0, 8);
 const CAMERA_START_Z: f32 = 100.0;
 
@@ -22,7 +22,7 @@ impl Plugin for CameraControllerPlugin {
 }
 
 #[derive(Component)]
-struct MainCamera;
+pub struct MainCamera;
 
 #[derive(Component)]
 struct CameraController {

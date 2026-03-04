@@ -6,7 +6,7 @@ pub const WORLD_SEED: u32 = 13_370;
 // Base frequency of the surface height noise in world-cell units.
 pub const HEIGHT_NOISE_FREQ: f64 = 0.01;
 // Height amplitude of the terrain surface variation in cells.
-pub const HEIGHT_NOISE_AMP_CELLS: i32 = 50;
+pub const HEIGHT_NOISE_AMP_CELLS: i32 = 80;
 // Extra high-frequency surface detail frequency multiplier over HEIGHT_NOISE_FREQ.
 pub const HEIGHT_NOISE_DETAIL_FREQ_MULT: f64 = 6.0;
 // Height amplitude of high-frequency surface detail in cells.

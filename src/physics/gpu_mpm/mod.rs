@@ -57,6 +57,7 @@ impl Clone for MpmGpuUploadRequest {
             particles: self.particles.clone(),
             terrain_sdf: self.terrain_sdf.clone(),
             terrain_normal: self.terrain_normal.clone(),
+            last_uploaded_terrain_version: self.last_uploaded_terrain_version,
         }
     }
 }

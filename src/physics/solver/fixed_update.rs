@@ -119,6 +119,12 @@ pub(crate) fn step_physics(
     let terrain_boundary_radius_m = terrain_boundary_radius_m(*material_params);
     let _step_span = tracing::info_span!("physics::fixed_step").entered();
     let should_step = sim_state.running || sim_state.step_once;
+    if !should_step {
+        // Paused: skip active-region scans and object/terrain bookkeeping.
+        // They are recomputed on the first stepping frame after resume.
+        sim_state.step_once = false;
+        return;
+    }
     update_block_coloring_experiment(
         &replay_state,
         should_step,
@@ -355,10 +361,6 @@ pub(crate) fn step_physics(
         if replay_state.enabled {
             replay_state.current_step = replay_state.current_step.saturating_add(1);
         }
-    } else {
-        let _span = tracing::info_span!("physics::particle_step").entered();
-        let _ =
-            particle_world.step_if_running(&terrain_world, &object_field, &mut object_world, false);
     }
     sim_state.step_once = false;
 }

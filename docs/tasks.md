@@ -205,31 +205,31 @@
   - 自動検証ループ（セル正確性・パン継続性・ズーム遷移・予算遵守）を整備する。
 - Subtasks:
   - [x] **[P0: 旧タスク整理]** [MPM-GPU-03] を Done、[WGEN-02]/[REND-01] を Superseded に移動する。
-  - [ ] **[P1: WGSL生成関数移植]** `assets/shaders/render/terrain_gen.wgsl` を実装する。
+  - [x] **[P1: WGSL生成関数移植]** `assets/shaders/render/terrain_gen.wgsl` を実装する。
     - [x] CPU側 fBm（OpenSimplex or 互換ハッシュノイズ）をWGSLへ移植する。
     - [x] `surface_height_for_x(world_x: i32) → i32` 相当を実装する。
     - [x] `material_for_cell(global_cell: vec2<i32>) → u32`（0=Empty, 1=Stone, 2=Soil, 3=Sand）を実装する。
-    - [ ] CPU生成との整合テスト: autoverify で全セル材料一致率 ≥ 99.9% を `artifacts/terrain_cell_correctness.json` に出力する。
   - [x] **[P2: Near キャッシュ定義]** `TerrainNearGpuCache` テクスチャと `TerrainCacheState` Resource を定義する。
     - [x] テクスチャ: R16Uint、解像度 = screen_res × NearMargin / NearQuality（デフォルト 1/2 × 1.35倍）
     - [x] Resource: `cache_origin_world: IVec2`, `ring_offset: IVec2`, `lod_k: i32`, `near_dirty_queue`, `far_dirty_queue`
     - [x] `world_cell → texture_index`（mod-ring 座標変換）ユーティリティを実装する。
-  - [ ] **[P3: Far キャッシュ定義]** `TerrainFarGpuCache` テクスチャを定義する。
-    - [ ] 解像度 = Near の 1/2、マージン 2.5 倍（`render.md` §5.4）
-    - [ ] セル値: `far_top1_id: u8`, `far_w1: u8`, `solid_fraction: u8`, pad（RGBA8 format）
-    - [ ] LOD k_far = k_near + FAR_OFFSET（デフォルト 3）
+  - [x] **[P3: Far キャッシュ定義]** `TerrainFarGpuCache` テクスチャを定義する。
+    - [x] 解像度 = 画面 + 余白（2.5倍）を基準に固定し、ズーム時は downsample（LOD）でカバーする。
+    - [x] セル値: `far_top1_id: u8`, `far_w1: u8`, `solid_fraction: u8`, pad（RGBA8 format）
+    - [x] LOD k_far = k_near + FAR_OFFSET（デフォルト 3）
   - [ ] **[P4: TerrainNearUpdate compute]** `assets/shaders/render/terrain_near_update.wgsl` を実装する。
     - [x] 入力: dirty list（SSBO）、生成関数パラメータ（uniform）、地形オーバーライド情報（SSBO）
     - [x] 各 dirty cell で `material_for_cell()` を評価し、オーバーライドがあれば上書きする。
     - [x] 結果を Near テクスチャ（リング座標）へ書き込む。
     - [ ] 地形編集オーバーライド転送経路: `TerrainOverrideDeltaBuffer`（CPU dirty_chunks差分 → GPU）を実装する。
   - [ ] **[P5: TerrainFarUpdate compute]** `assets/shaders/render/terrain_far_update.wgsl` を実装する。
-    - [ ] Near テクスチャを多点サンプリングして Far 集約値（top1_id, w1）を計算する。
-    - [ ] LOD k_far 変化時に Far 全体を dirty 化し、予算内で逐次再サンプリングする。
+    - [x] Far texel が表すワールド領域を多点サンプリングして集約値（top1_id, w1）を計算する。
+    - [x] LOD k_far 変化時に Far 全体を dirty 化する。
+    - [ ] 予算内で逐次再サンプリングする。
   - [x] **[P6: TerrainCompose fragment — 初期版]** `assets/shaders/render/terrain_compose.wgsl` を実装する（Near単層、Farなし）。
     - [x] フルスクリーン quad で Near テクスチャを合成して画面へ出力する。
     - [x] Near: 最近傍サンプリング + 材料IDパレット（8×8 ドット内確定的ハッシュ）で表示する。
-    - [ ] Far: カバレッジ alpha でブレンド表示する（Far実装後）。
+    - [x] Far: カバレッジ alpha でブレンド表示する（Far実装後）。
     - [ ] `s = (CELL_SIZE_M * camera_zoom) / screen_pixel_size_m` を計算し、S_UP/S_DOWN ヒステリシスでモード切替する（P7後）。
   - [ ] **[P7: カメラ同期 + パン/ズーム制御]** Update schedule で `TerrainCacheState` をカメラ状態から更新するシステムを実装する。
     - [ ] カメラパン量（セル単位）を計算し、ring_offset を更新する。
@@ -250,6 +250,7 @@
     - [x] subgraph edge: `link_terrain_and_water_graph` で Core2d sub-graph 経由の edge を正しく設定する。
   - [x] **[P10: 自動検証 — 初期]** autoverify スクリーンショット確認を整備する。
     - [x] `configs/autoverify/terrain_gpu_screenshot.json`: GPU地形描画スクリーンショット取得・目視確認（`artifacts/terrain_gpu.png`）。石壁・土壌パレット正常表示を確認済み。
+    - [x] HUDスケールバー（左下）の表示を追加し、`m/km` 表示と 1-2-5 系列スナップ（`1m,2m,5m,...`）を確認する。
     - [ ] `configs/autoverify/terrain_cell_correctness.json`: GPU生成セル vs CPU参照の一致率チェック（WGSL生成関数実装後）。
     - [ ] `configs/autoverify/terrain_pan_continuity.json`: パン継続性スクリーンショット（リングバッファ実装後）。
     - [ ] `configs/autoverify/terrain_zoom_lod.json`: ズーム遷移スクリーンショット（LOD実装後）。
@@ -269,6 +270,16 @@
   - 2026-03-04: 横スクロール時の16セル周期カクつき対策として、`stream_terrain_around_camera` を軽量化。停止中（`running=false && step_once=false`）は地形ストリーミングを停止し、再生中でも中心チャンクが変わらないフレームは処理をスキップするよう変更。
   - 2026-03-04: ズームアウト時クラッシュ（wgpu dispatch group x=65536 > 65535）を修正。Near extent 算出に「dispatch上限面積」クランプを追加し、upload側でも `dirty_count` を `MAX_DIRTY_CELLS_PER_DISPATCH` で保険クランプ。`near_extent_is_clamped_to_dispatch_limit` テストを追加。
   - 2026-03-04: 暫定方針を明記。地形改変なし前提で、REND-GPU-01 の検証中はレンダ側の地形 override 転送（loaded/edited cell の CPU→GPU 上書き）を無効化し、Near は GPU 生成値のみを使用する。
+  - 2026-03-04: Far 初期版を実装。`TerrainFarGpuCache`（RGBA8Uint）を追加し、`terrain_far_update.wgsl` で Near(2x2)→Far 集約（top1_id/w1/solid_fraction）を compute 更新。`terrain_compose.wgsl` は Near 優先 + Near空セルで Far alpha fallback 合成に対応。現時点では Far LOD連動/2.5xマージンは未実装（P3/P5継続）。
+  - 2026-03-04: Far LOD 連動を実装。`k_near` をカメラズームから算出し `k_far = k_near + 3` を `TerrainNearUpdateRequest` に保持。`k_far` 変化時は Near dirty がなくても Far 全体を再生成する経路を追加し、`far_downsample` は `2,4,8...` へ段階的に拡大。
+  - 2026-03-04: Far を Near範囲依存から分離。Far キャッシュ解像度を「ベース画面 + 2.5 margin」で固定し、ズームアウト時は `far_downsample` で可視範囲を拡大。`terrain_far_update.wgsl` は Near tex 参照をやめ、`terrain_gen` から直接集約生成へ変更。compose は Far を常時背景描画し、Near が viewport+margin を満たせないフレームでは Near 描画を無効化して Far のみ表示。
+  - 2026-03-04: Far 荒さ/ズーム依存負荷を改善。原因は (1) Far更新が `downsample^2` サンプルでズームアウトほど計算量増加、(2) Far-only フレームでも Near cache をズーム解像度に再確保していた点。対策として Far集約を固定 2x2 サンプルへ変更し、Near cache 再確保は Near upload 時のみ実施。compose 側は Far を4点重み付き合成してブロック境界の荒さを緩和。
+  - 2026-03-04: 地形マクロ高低差を増加。CPU/WGSL の `HEIGHT_NOISE_AMP_CELLS` を `50 -> 80` に統一更新。
+  - 2026-03-04: Far粗さ低減の追加調整。`far_downsample` は 2冪を維持しつつ、`viewport_cells * far_margin / far_extent` の必要値を power-of-two へ切り上げて算出する方式へ変更。Farベース解像度は `screen * (far_margin / 2) * 1.1`（画面1/2品質 + margin + headroom）で固定し、Far切替直後に品質が過度に荒くなる状態を緩和。Far再生成トリガは `far_downsample`・`far_origin`・地形バージョン変化に限定。
+  - 2026-03-04: Far最小解像度を調整。`FAR_MIN_DOWNSAMPLE` を `2 -> 1` に変更し、Near表示中（Far最小downsample時）の Far 1texel が 1セルに一致するよう修正。
+  - 2026-03-04: Far表示の1セルずれ補正。`terrain_compose.wgsl` の Far サンプリング座標を「連続 world 座標」から「world_cell 中心基準」へ変更し、`downsample=1` 時に Far がセル境界へ正しく一致するよう調整。
+  - 2026-03-04: 左下スケールバーを追加。カメラ投影から m/px を算出し、バー長を「10刻み」（`m` もしくは `km`）へスナップして表示する UI を実装。`default_world_paused_screenshot` で `30 m` 表示を確認。
+  - 2026-03-04: スケールバー刻みを 1-2-5 系列へ変更。表示値を `1m, 2m, 5m, 10m, ... , 1km, 2km, 5km, ...` にスナップするよう更新し、`default_world_paused_screenshot` で `1 m` 開始表示を確認。
 - 完了条件:
   - GPU compute で地形生成関数が自律評価され、毎フレームの CPU→GPU 全セル転送が不要になる。
   - Near/Far 2層キャッシュが GPU 常駐し、パン・ズームでリングバッファ更新が機能する。

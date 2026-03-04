@@ -175,21 +175,67 @@ impl MaterialAssetParams {
             };
         }
         if let Some(liq) = &k.liquid {
-            check!(liq.terrain_repulsion_stiffness, "liquid.terrain_repulsion_stiffness", 0.0, 5.0);
-            check!(liq.object_repulsion_stiffness, "liquid.object_repulsion_stiffness", 0.0, 5.0);
+            check!(
+                liq.terrain_repulsion_stiffness,
+                "liquid.terrain_repulsion_stiffness",
+                0.0,
+                5.0
+            );
+            check!(
+                liq.object_repulsion_stiffness,
+                "liquid.object_repulsion_stiffness",
+                0.0,
+                5.0
+            );
             check!(liq.friction_static, "liquid.friction_static", 0.0, 1.0);
             check!(liq.friction_dynamic, "liquid.friction_dynamic", 0.0, 1.0);
             check!(liq.xsph_viscosity, "liquid.xsph_viscosity", 0.0, 1.0);
         }
-        for (phase_params, prefix) in [k.solid.as_ref().map(|p| (p, "solid")), k.granular.as_ref().map(|p| (p, "granular"))].into_iter().flatten() {
-            check!(phase_params.terrain_repulsion_stiffness, &format!("{prefix}.terrain_repulsion_stiffness"), 0.0, 5.0);
-            check!(phase_params.object_repulsion_stiffness, &format!("{prefix}.object_repulsion_stiffness"), 0.0, 5.0);
-            check!(phase_params.friction_static, &format!("{prefix}.friction_static"), 0.0, 50.0);
-            check!(phase_params.friction_dynamic, &format!("{prefix}.friction_dynamic"), 0.0, 50.0);
+        for (phase_params, prefix) in [
+            k.solid.as_ref().map(|p| (p, "solid")),
+            k.granular.as_ref().map(|p| (p, "granular")),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            check!(
+                phase_params.terrain_repulsion_stiffness,
+                &format!("{prefix}.terrain_repulsion_stiffness"),
+                0.0,
+                5.0
+            );
+            check!(
+                phase_params.object_repulsion_stiffness,
+                &format!("{prefix}.object_repulsion_stiffness"),
+                0.0,
+                5.0
+            );
+            check!(
+                phase_params.friction_static,
+                &format!("{prefix}.friction_static"),
+                0.0,
+                50.0
+            );
+            check!(
+                phase_params.friction_dynamic,
+                &format!("{prefix}.friction_dynamic"),
+                0.0,
+                50.0
+            );
         }
         if let Some(brk) = &k.solid_break {
-            check!(brk.collision_impulse_threshold, "solid_break.collision_impulse_threshold", 0.0, 1e8);
-            check!(brk.strain_threshold, "solid_break.strain_threshold", 0.0, 10.0);
+            check!(
+                brk.collision_impulse_threshold,
+                "solid_break.collision_impulse_threshold",
+                0.0,
+                1e8
+            );
+            check!(
+                brk.strain_threshold,
+                "solid_break.strain_threshold",
+                0.0,
+                10.0
+            );
         }
         Ok(())
     }

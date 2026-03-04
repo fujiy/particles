@@ -174,6 +174,8 @@ pub struct MpmGpuUploadRequest {
     pub terrain_sdf: Vec<f32>,
     /// Terrain normals to upload.
     pub terrain_normal: Vec<[f32; 2]>,
+    /// Last uploaded terrain version to avoid full-grid rebuilds every frame.
+    pub last_uploaded_terrain_version: Option<u64>,
 }
 
 /// Bevy main-world resource: GPU simulation params for current frame.

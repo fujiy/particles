@@ -3,8 +3,8 @@ use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::ecs::query::QueryItem;
 use bevy::log::warn;
 use bevy::prelude::*;
-use bevy::render::graph::CameraDriverLabel;
 use bevy::render::extract_resource::ExtractResourcePlugin;
+use bevy::render::graph::CameraDriverLabel;
 use bevy::render::render_graph::{
     Node, NodeRunError, RenderGraph, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode,
     ViewNodeRunner,
@@ -421,58 +421,54 @@ fn init_water_dot_gpu_compute_resources(
         entry_point: Some("blur_y_water".into()),
         zero_initialize_workgroup_memory: false,
     });
-    let blur_x_soil_pipeline =
-        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("water_dot_blur_x_soil".into()),
-            layout: vec![BindGroupLayoutDescriptor::new(
-                "water_dot_preprocess_layout",
-                &*entries,
-            )],
-            push_constant_ranges: vec![],
-            shader: shader.clone(),
-            shader_defs: vec![],
-            entry_point: Some("blur_x_soil".into()),
-            zero_initialize_workgroup_memory: false,
-        });
-    let blur_y_soil_pipeline =
-        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("water_dot_blur_y_soil".into()),
-            layout: vec![BindGroupLayoutDescriptor::new(
-                "water_dot_preprocess_layout",
-                &*entries,
-            )],
-            push_constant_ranges: vec![],
-            shader: shader.clone(),
-            shader_defs: vec![],
-            entry_point: Some("blur_y_soil".into()),
-            zero_initialize_workgroup_memory: false,
-        });
-    let blur_x_sand_pipeline =
-        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("water_dot_blur_x_sand".into()),
-            layout: vec![BindGroupLayoutDescriptor::new(
-                "water_dot_preprocess_layout",
-                &*entries,
-            )],
-            push_constant_ranges: vec![],
-            shader: shader.clone(),
-            shader_defs: vec![],
-            entry_point: Some("blur_x_sand".into()),
-            zero_initialize_workgroup_memory: false,
-        });
-    let blur_y_sand_pipeline =
-        pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("water_dot_blur_y_sand".into()),
-            layout: vec![BindGroupLayoutDescriptor::new(
-                "water_dot_preprocess_layout",
-                &*entries,
-            )],
-            push_constant_ranges: vec![],
-            shader,
-            shader_defs: vec![],
-            entry_point: Some("blur_y_sand".into()),
-            zero_initialize_workgroup_memory: false,
-        });
+    let blur_x_soil_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("water_dot_blur_x_soil".into()),
+        layout: vec![BindGroupLayoutDescriptor::new(
+            "water_dot_preprocess_layout",
+            &*entries,
+        )],
+        push_constant_ranges: vec![],
+        shader: shader.clone(),
+        shader_defs: vec![],
+        entry_point: Some("blur_x_soil".into()),
+        zero_initialize_workgroup_memory: false,
+    });
+    let blur_y_soil_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("water_dot_blur_y_soil".into()),
+        layout: vec![BindGroupLayoutDescriptor::new(
+            "water_dot_preprocess_layout",
+            &*entries,
+        )],
+        push_constant_ranges: vec![],
+        shader: shader.clone(),
+        shader_defs: vec![],
+        entry_point: Some("blur_y_soil".into()),
+        zero_initialize_workgroup_memory: false,
+    });
+    let blur_x_sand_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("water_dot_blur_x_sand".into()),
+        layout: vec![BindGroupLayoutDescriptor::new(
+            "water_dot_preprocess_layout",
+            &*entries,
+        )],
+        push_constant_ranges: vec![],
+        shader: shader.clone(),
+        shader_defs: vec![],
+        entry_point: Some("blur_x_sand".into()),
+        zero_initialize_workgroup_memory: false,
+    });
+    let blur_y_sand_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("water_dot_blur_y_sand".into()),
+        layout: vec![BindGroupLayoutDescriptor::new(
+            "water_dot_preprocess_layout",
+            &*entries,
+        )],
+        push_constant_ranges: vec![],
+        shader,
+        shader_defs: vec![],
+        entry_point: Some("blur_y_sand".into()),
+        zero_initialize_workgroup_memory: false,
+    });
 
     commands.insert_resource(WaterDotPreprocessPipelines {
         layout,
@@ -567,13 +563,18 @@ impl Node for WaterDotPreprocessNode {
         };
 
         let particle_count = mpm_buffers.particle_count;
+        static HAD_PARTICLES_PREVIOUS_FRAME: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        let had_particles_previous_frame =
+            HAD_PARTICLES_PREVIOUS_FRAME.load(std::sync::atomic::Ordering::Relaxed);
         let params = resources.params_for(particle_count);
         world.resource::<RenderQueue>().write_buffer(
             &resources.params_buf,
             0,
             bytemuck::bytes_of(&params),
         );
-        let palette_params = palette_uniform_from_active(world.get_resource::<ActivePaletteParams>());
+        let palette_params =
+            palette_uniform_from_active(world.get_resource::<ActivePaletteParams>());
         world.resource::<RenderQueue>().write_buffer(
             &resources.palette_buf,
             0,
@@ -608,6 +609,53 @@ impl Node for WaterDotPreprocessNode {
             );
             return Ok(());
         };
+        if particle_count == 0 && !had_particles_previous_frame {
+            return Ok(());
+        }
+
+        let particle_binding = if particle_count > 0 {
+            mpm_buffers.particle_buf.as_entire_binding()
+        } else {
+            resources.fallback_particle_buf.as_entire_binding()
+        };
+
+        let bind_group: BindGroup = render_context.render_device().create_bind_group(
+            "water_dot_preprocess_bind_group",
+            &pipelines.layout,
+            &BindGroupEntries::sequential((
+                resources.params_buf.as_entire_binding(),
+                particle_binding,
+                resources.density_atomic_water_buf.as_entire_binding(),
+                resources.density_atomic_soil_buf.as_entire_binding(),
+                resources.density_atomic_sand_buf.as_entire_binding(),
+                resources.blur_tmp_buf.as_entire_binding(),
+                resources.blurred_density_water_buf.as_entire_binding(),
+                resources.blurred_density_soil_buf.as_entire_binding(),
+                resources.blurred_density_sand_buf.as_entire_binding(),
+            )),
+        );
+
+        let dot_count = resources.layout.dot_count();
+        let dot_workgroups = dot_count.div_ceil(WORKGROUP_SIZE);
+        let particle_workgroups = particle_count.div_ceil(WORKGROUP_SIZE);
+
+        let encoder = render_context.command_encoder();
+
+        {
+            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                label: Some("water_dot_clear"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(clear_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(dot_workgroups, 1, 1);
+        }
+
+        if particle_count == 0 {
+            HAD_PARTICLES_PREVIOUS_FRAME.store(false, std::sync::atomic::Ordering::Relaxed);
+            return Ok(());
+        }
+
         let Some(splat_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.splat_pipeline)
         else {
             warn_missing_compute_pipeline_once(
@@ -685,45 +733,7 @@ impl Node for WaterDotPreprocessNode {
             return Ok(());
         };
 
-        let particle_binding = if particle_count > 0 {
-            mpm_buffers.particle_buf.as_entire_binding()
-        } else {
-            resources.fallback_particle_buf.as_entire_binding()
-        };
-
-        let bind_group: BindGroup = render_context.render_device().create_bind_group(
-            "water_dot_preprocess_bind_group",
-            &pipelines.layout,
-            &BindGroupEntries::sequential((
-                resources.params_buf.as_entire_binding(),
-                particle_binding,
-                resources.density_atomic_water_buf.as_entire_binding(),
-                resources.density_atomic_soil_buf.as_entire_binding(),
-                resources.density_atomic_sand_buf.as_entire_binding(),
-                resources.blur_tmp_buf.as_entire_binding(),
-                resources.blurred_density_water_buf.as_entire_binding(),
-                resources.blurred_density_soil_buf.as_entire_binding(),
-                resources.blurred_density_sand_buf.as_entire_binding(),
-            )),
-        );
-
-        let dot_count = resources.layout.dot_count();
-        let dot_workgroups = dot_count.div_ceil(WORKGROUP_SIZE);
-        let particle_workgroups = particle_count.div_ceil(WORKGROUP_SIZE);
-
-        let encoder = render_context.command_encoder();
-
         {
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_clear"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(clear_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
-        }
-
-        if particle_count > 0 {
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("water_dot_splat"),
                 timestamp_writes: None,
@@ -792,6 +802,8 @@ impl Node for WaterDotPreprocessNode {
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dot_workgroups, 1, 1);
         }
+
+        HAD_PARTICLES_PREVIOUS_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
 
         Ok(())
     }

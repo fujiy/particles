@@ -76,11 +76,26 @@ impl OverlayParams {
             };
         }
         check!(self.sdf.step_cell_scale, "sdf.step_cell_scale", 0.1, 10.0);
-        check!(self.sdf.cell_radius_scale, "sdf.cell_radius_scale", 0.01, 1.0);
+        check!(
+            self.sdf.cell_radius_scale,
+            "sdf.cell_radius_scale",
+            0.01,
+            1.0
+        );
         check!(self.sdf.range_cell_scale, "sdf.range_cell_scale", 1.0, 30.0);
         check!(self.sdf.negative_fill_z, "sdf.negative_fill_z", 0.0, 1.0);
-        check!(self.grid.object_axis_length_cell_scale, "grid.object_axis_length_cell_scale", 0.1, 5.0);
-        check!(self.grid.object_center_radius_cell_scale, "grid.object_center_radius_cell_scale", 0.01, 0.5);
+        check!(
+            self.grid.object_axis_length_cell_scale,
+            "grid.object_axis_length_cell_scale",
+            0.1,
+            5.0
+        );
+        check!(
+            self.grid.object_center_radius_cell_scale,
+            "grid.object_center_radius_cell_scale",
+            0.01,
+            0.5
+        );
         Ok(())
     }
 }
