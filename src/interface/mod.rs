@@ -54,6 +54,12 @@ const TEST_ASSERT_PANEL_TOP_PX: f32 = 260.0;
 const TEST_ASSERT_PANEL_RIGHT_PX: f32 = 10.0;
 const TEST_ASSERT_PANEL_WIDTH_PX: f32 = 360.0;
 const HUD_PANEL_WIDTH_PX: f32 = 360.0;
+const SCALE_BAR_LEFT_PX: f32 = 14.0;
+const SCALE_BAR_BOTTOM_PX: f32 = 18.0;
+const SCALE_BAR_TARGET_WIDTH_PX: f32 = 140.0;
+const SCALE_BAR_HEIGHT_PX: f32 = 4.0;
+const SCALE_BAR_MIN_WIDTH_PX: f32 = 24.0;
+const SCALE_BAR_LABEL_FONT_PX: f32 = 13.0;
 const STEP_PROFILER_BAR_HEIGHT_PX: f32 = 100.0;
 const STEP_PROFILER_BAR_MS_TO_PX: f32 = 16.0;
 const STEP_PROFILER_PARALLELISM_TO_PX: f32 = 8.0;
@@ -216,6 +222,7 @@ impl Plugin for InterfacePlugin {
                     update_world_tool_tooltip,
                     update_fps_hud_stats,
                     update_simulation_hud,
+                    update_scale_bar,
                     update_step_profiler_panel,
                     update_step_profiler_ideal_parallel,
                     update_step_profiler_tooltip,
@@ -231,6 +238,12 @@ struct SimulationHudFpsText;
 
 #[derive(Component)]
 struct SimulationHudStatsText;
+
+#[derive(Component)]
+struct ScaleBarLine;
+
+#[derive(Component)]
+struct ScaleBarLabelText;
 
 #[derive(Resource, Debug, Default)]
 struct FpsHudStats {
@@ -473,7 +486,7 @@ use input_handlers::{
 use ui_systems::{
     update_fps_hud_stats, update_save_load_dialog, update_save_load_name_input_button_visuals,
     update_save_load_open_button_visuals, update_save_load_reset_button_visuals,
-    update_save_load_slot_button_visuals, update_sim_parallel_button_label,
+    update_save_load_slot_button_visuals, update_scale_bar, update_sim_parallel_button_label,
     update_sim_parallel_button_visuals, update_sim_play_pause_button_label,
     update_sim_play_pause_button_visuals, update_sim_step_button_visuals, update_simulation_hud,
     update_step_profiler_ideal_parallel, update_step_profiler_panel, update_step_profiler_tooltip,

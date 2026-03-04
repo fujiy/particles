@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::*;
+use crate::camera_controller::MainCamera;
 
 pub(super) fn update_world_tool_button_visuals(
     interaction_state: Res<WorldInteractionState>,
@@ -608,6 +609,53 @@ pub(super) fn update_simulation_hud(
         u8::from(terrain_render_diagnostics.terrain_generation_full_refresh_frame),
         terrain_render_diagnostics.terrain_generation_full_refresh_reason_bits,
     );
+}
+
+pub(super) fn update_scale_bar(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_q: Query<&Projection, With<MainCamera>>,
+    mut bar_line: Single<&mut Node, With<ScaleBarLine>>,
+    mut bar_text: Single<&mut Text, With<ScaleBarLabelText>>,
+) {
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let Some(projection) = camera_q.iter().next() else {
+        return;
+    };
+    let Projection::Orthographic(ortho) = projection else {
+        return;
+    };
+
+    let viewport_world_w_m = (ortho.area.max.x - ortho.area.min.x).abs().max(1e-6);
+    let meters_per_pixel = viewport_world_w_m / window.width().max(1.0);
+    let target_world_m = meters_per_pixel * SCALE_BAR_TARGET_WIDTH_PX;
+    let snapped_world_m = snap_scale_bar_world_length(target_world_m);
+    let bar_width_px = (snapped_world_m / meters_per_pixel).max(SCALE_BAR_MIN_WIDTH_PX);
+
+    bar_line.width = px(bar_width_px);
+    bar_text.0 = if snapped_world_m >= 1000.0 {
+        format!("{:.0} km", snapped_world_m / 1000.0)
+    } else {
+        format!("{:.0} m", snapped_world_m)
+    };
+}
+
+fn snap_scale_bar_world_length(target_world_m: f32) -> f32 {
+    let target = target_world_m.max(1.0);
+    let exp = target.log10().floor() as i32;
+    let base = 10.0f32.powi(exp);
+    let candidates = [1.0 * base, 2.0 * base, 5.0 * base, 10.0 * base];
+    candidates
+        .into_iter()
+        .min_by(|a, b| {
+            (a - target)
+                .abs()
+                .partial_cmp(&(b - target).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(1.0)
+        .max(1.0)
 }
 
 pub(super) fn update_step_profiler_panel(

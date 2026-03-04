@@ -63,6 +63,33 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
         });
 
     commands
+        .spawn((Node {
+            position_type: PositionType::Absolute,
+            left: px(SCALE_BAR_LEFT_PX),
+            bottom: px(SCALE_BAR_BOTTOM_PX),
+            flex_direction: FlexDirection::Column,
+            row_gap: px(6.0),
+            ..default()
+        },))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new("10 m"),
+                TextFont::from_font_size(SCALE_BAR_LABEL_FONT_PX),
+                TextColor(Color::srgba(0.94, 0.96, 0.99, 0.96)),
+                ScaleBarLabelText,
+            ));
+            parent.spawn((
+                Node {
+                    width: px(SCALE_BAR_TARGET_WIDTH_PX),
+                    height: px(SCALE_BAR_HEIGHT_PX),
+                    ..default()
+                },
+                BackgroundColor(Color::srgba(0.94, 0.96, 0.99, 0.96)),
+                ScaleBarLine,
+            ));
+        });
+
+    commands
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
