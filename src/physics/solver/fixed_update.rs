@@ -251,66 +251,20 @@ pub(crate) fn step_physics(
                 },
             ];
             if !sim_step.mpm_phases.is_empty() {
-                // MPM water frame: show per-phase breakdown instead of particle_step::other.
-                let mut mpm_accounted_wall_ms = 0.0_f64;
-                let mut mpm_accounted_cpu_ms = 0.0_f64;
+                // MPM water frame: show per-phase breakdown when available.
                 for phase in &sim_step.mpm_phases {
                     if phase.wall_secs <= 0.0 {
                         continue;
                     }
                     let wall_ms = phase.wall_secs * 1000.0;
                     let cpu_ms = phase.cpu_secs * 1000.0;
-                    mpm_accounted_wall_ms += wall_ms;
-                    mpm_accounted_cpu_ms += cpu_ms;
                     step_profiler.segments.push(PhysicsStepProfileSegment {
                         name: phase.name.to_string(),
                         wall_duration_ms: wall_ms,
                         cpu_duration_ms: cpu_ms,
                     });
                 }
-                let mpm_other_ms =
-                    (sim_step.particle_step_secs * 1000.0 - mpm_accounted_wall_ms).max(0.0);
-                let mpm_other_cpu_ms =
-                    (sim_step.particle_step_cpu_secs * 1000.0 - mpm_accounted_cpu_ms).max(0.0);
-                if mpm_other_ms > 0.001 {
-                    step_profiler.segments.push(PhysicsStepProfileSegment {
-                        name: "mpm::other".to_string(),
-                        wall_duration_ms: mpm_other_ms,
-                        cpu_duration_ms: mpm_other_cpu_ms,
-                    });
-                }
-            } else {
-                for phase in sim_step.particle_breakdown.phases() {
-                    if phase.wall_duration_secs <= 0.0 {
-                        continue;
-                    }
-                    step_profiler.segments.push(PhysicsStepProfileSegment {
-                        name: format!("particle_step::{}", phase.name),
-                        wall_duration_ms: phase.wall_duration_secs * 1000.0,
-                        cpu_duration_ms: phase.cpu_duration_secs * 1000.0,
-                    });
-                }
-                let particle_other_ms = ((sim_step.particle_step_secs
-                    - sim_step.particle_breakdown.total_wall_secs())
-                .max(0.0))
-                    * 1000.0;
-                let particle_other_cpu_ms = ((sim_step.particle_step_cpu_secs
-                    - sim_step.particle_breakdown.total_cpu_secs())
-                .max(0.0))
-                    * 1000.0;
-                if particle_other_ms > 0.001 {
-                    step_profiler.segments.push(PhysicsStepProfileSegment {
-                        name: "particle_step::other".to_string(),
-                        wall_duration_ms: particle_other_ms,
-                        cpu_duration_ms: particle_other_cpu_ms,
-                    });
-                }
             }
-            step_profiler.segments.push(PhysicsStepProfileSegment {
-                name: "terrain_fracture_commit".to_string(),
-                wall_duration_ms: sim_step.terrain_fracture_commit_secs * 1000.0,
-                cpu_duration_ms: sim_step.terrain_fracture_commit_cpu_secs * 1000.0,
-            });
             let known_wall_ms: f64 = step_profiler
                 .segments
                 .iter()

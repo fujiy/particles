@@ -36,8 +36,6 @@ pub struct SolverParams {
     pub terrain_load_strain_threshold: f32,
     pub terrain_load_break_duration_seconds: f32,
     pub terrain_load_decay_per_sample: f32,
-    pub neighbor_grid_max_axis_cells: i64,
-    pub neighbor_grid_max_dense_cells: i64,
     pub granular_contact_friction_scale: f32,
     pub granular_granular_contact_friction_boost: f32,
     pub granular_solid_contact_friction_boost: f32,
@@ -52,27 +50,6 @@ pub struct SolverParams {
     pub particle_escape_margin_top_cells: i32,
     pub far_field_edge_inset_m: f32,
     pub neighbor_list_skin_m: f32,
-    // Runtime clamps to at least 1 cell.
-    pub sub_block_size_cells: i32,
-    // Runtime clamps to at least 1 frame.
-    pub sub_block_promote_frames: u16,
-    // Runtime clamps to at least 1 frame.
-    pub sub_block_demote_frames: u16,
-    pub sub_block_min_active_frames: u16,
-    // Runtime clamps to at least 0.
-    pub sub_block_promote_neighbor_radius: i32,
-    pub sub_block_debt_promote_threshold: f32,
-    pub sub_block_mass_flux_promote_threshold: f32,
-    pub sub_block_penetration_promote_threshold_m: f32,
-    // Runtime clamps to at least 1 frame.
-    pub sub_block_contact_promote_frames: u16,
-    // Runtime clamps by `RATE_LEVEL_MAX_SUPPORTED` (current divisor storage limit).
-    pub sub_block_max_level: u8,
-    // Runtime clamps to at least 1e-6 to keep intrusion threshold finite.
-    pub sub_block_level0_max_norm_disp: f32,
-    // Runtime clamps to at least 0.
-    pub sub_block_near_field_extra_chunks: i32,
-
     pub object_shape_stiffness_alpha: f32,
     pub object_shape_iters: usize,
     pub object_local_sdf_samples_per_cell: i32,

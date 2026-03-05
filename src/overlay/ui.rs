@@ -264,15 +264,9 @@ pub(super) fn update_physics_area_overlay_button_label(
         gpu_layout.dims.y.saturating_sub(1),
     );
     for mut label in &mut labels {
-        let sub_block_count = particle_world.sub_block_overlay_samples().len();
-        let max_debt = particle_world
-            .sub_block_overlay_samples()
-            .iter()
-            .map(|sample| sample.debt_ratio)
-            .fold(0.0, f32::max);
         label.0 = if overlay_state.enabled {
             format!(
-                "Physics Area Overlay: ON (A:{} T:{} P:{} SB:{} D:{:.2} GPU:{}x{} nodes {}x{} cells)",
+                "Physics Area Overlay: ON (A:{} T:{} P:{} GPU:{}x{} nodes {}x{} cells)",
                 active_region.active_chunks.len(),
                 render_diagnostics
                     .terrain_updated_chunk_highlight_frames
@@ -280,8 +274,6 @@ pub(super) fn update_physics_area_overlay_button_label(
                 render_diagnostics
                     .particle_updated_chunk_highlight_frames
                     .len(),
-                sub_block_count,
-                max_debt,
                 gpu_layout.dims.x,
                 gpu_layout.dims.y,
                 gpu_cells.x,
@@ -339,16 +331,6 @@ pub(super) fn update_overlay_info_text(
             lines.push(format!(
                 "Physics Chunks: {}",
                 active_region.active_chunks.len()
-            ));
-            let max_debt = particle_world
-                .sub_block_overlay_samples()
-                .iter()
-                .map(|sample| sample.debt_ratio)
-                .fold(0.0, f32::max);
-            lines.push(format!(
-                "Sub-blocks: {} (Debt max {:.2})",
-                particle_world.sub_block_overlay_samples().len(),
-                max_debt,
             ));
             lines.push(format!(
                 "GPU Grid: nodes {}x{} cells {}x{} (single uniform grid, no tiles)",

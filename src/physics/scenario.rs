@@ -1507,10 +1507,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn water_drop_scenario_uses_default_level0_mpm_blocks() {
-        let spec = default_scenario_spec_by_name("water_drop").expect("water_drop must exist");
-        assert_eq!(spec.name, "water_drop");
-    }
-
 }

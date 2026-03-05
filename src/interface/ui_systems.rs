@@ -747,16 +747,11 @@ enum StepProfilerCategory {
 }
 
 fn classify_profiler_segment(step_name: &str) -> StepProfilerCategory {
-    if step_name.starts_with("particle_step::granular_")
-        || step_name.starts_with("particle_step::contact_velocity_response")
-    {
+    if step_name.contains("granular") {
         return StepProfilerCategory::Granular;
     }
     if step_name.starts_with("object_field_")
         || step_name.starts_with("terrain_")
-        || step_name.starts_with("particle_step::shape_")
-        || step_name.starts_with("particle_step::apply_object_reaction")
-        || step_name.starts_with("particle_step::fracture_")
         || step_name == "step_overhead"
     {
         return StepProfilerCategory::Object;

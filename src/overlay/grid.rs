@@ -5,7 +5,6 @@ use bevy::window::PrimaryWindow;
 
 use super::*;
 use crate::physics::gpu_mpm::gpu_resources::world_grid_layout;
-use crate::physics::world::sub_block::{rate_level_from_divisor, sub_block_world_bounds};
 
 #[derive(Component)]
 pub(super) struct SdfOverlayNegativeFillCell;
@@ -236,13 +235,6 @@ pub(super) fn draw_physics_area_overlay(
             }
         }
 
-        draw_sub_block_rate_digits(
-            &mut gizmos,
-            &particle_world,
-            min_chunk - IVec2::splat(halo_chunks),
-            max_chunk + IVec2::splat(halo_chunks),
-        );
-
         for &chunk in render_diagnostics
             .terrain_updated_chunk_highlight_frames
             .keys()
@@ -430,108 +422,6 @@ fn sdf_overlay_negative_fill_color(sdf: f32) -> Color {
         0.10 + 0.12 * depth,
         0.24 + 0.54 * depth,
     )
-}
-
-fn blend_color(from: Color, to: Color, t: f32) -> Color {
-    let t = t.clamp(0.0, 1.0);
-    let from = from.to_srgba();
-    let to = to.to_srgba();
-    Color::srgba(
-        from.red + (to.red - from.red) * t,
-        from.green + (to.green - from.green) * t,
-        from.blue + (to.blue - from.blue) * t,
-        from.alpha + (to.alpha - from.alpha) * t,
-    )
-}
-
-fn draw_sub_block_rate_digits(
-    gizmos: &mut Gizmos,
-    particle_world: &ParticleWorld,
-    min_chunk: IVec2,
-    max_chunk: IVec2,
-) {
-    let sub_block_size_cells = particle_world.sub_block_size_cells();
-    let min_world = min_chunk.as_vec2() * CHUNK_WORLD_SIZE_M;
-    let max_world = (max_chunk + IVec2::ONE).as_vec2() * CHUNK_WORLD_SIZE_M;
-    for sample in particle_world.sub_block_overlay_samples() {
-        let (min, max) = sub_block_world_bounds(sample.coord, sub_block_size_cells);
-        if max.x < min_world.x || min.x > max_world.x || max.y < min_world.y || min.y > max_world.y
-        {
-            continue;
-        }
-        let center = (min + max) * 0.5;
-        let size = ((max.x - min.x).min(max.y - min.y) * 0.28).max(0.06);
-        let color = blend_color(
-            GRID_SUB_BLOCK_LABEL_BASE_COLOR,
-            GRID_SUB_BLOCK_DEBT_HOT_COLOR,
-            sample.debt_ratio,
-        );
-        let level =
-            rate_level_from_divisor(sample.rate_divisor, particle_world.sub_block_max_level());
-        draw_number_stroke(gizmos, level, center, size, color);
-    }
-}
-
-fn draw_number_stroke(gizmos: &mut Gizmos, value: u8, center: Vec2, size: f32, color: Color) {
-    let text = value.to_string();
-    let count = text.len() as f32;
-    let advance = size * 1.15;
-    let start_x = center.x - (count - 1.0) * advance * 0.5;
-    for (index, ch) in text.chars().enumerate() {
-        let Some(digit) = ch.to_digit(10) else {
-            continue;
-        };
-        let digit_center = Vec2::new(start_x + index as f32 * advance, center.y);
-        draw_digit_stroke(gizmos, digit as u8, digit_center, size, color);
-    }
-}
-
-fn draw_digit_stroke(gizmos: &mut Gizmos, digit: u8, center: Vec2, size: f32, color: Color) {
-    let x0 = center.x - size * 0.45;
-    let x1 = center.x + size * 0.45;
-    let y0 = center.y - size * 0.70;
-    let y1 = center.y + size * 0.70;
-    let ym = (y0 + y1) * 0.5;
-    let stroke = |gizmos: &mut Gizmos, a: Vec2, b: Vec2| {
-        gizmos.line_2d(a, b, color);
-    };
-    let draw_segments = |gizmos: &mut Gizmos, segments: [bool; 7]| {
-        if segments[0] {
-            stroke(gizmos, Vec2::new(x0, y1), Vec2::new(x1, y1));
-        }
-        if segments[1] {
-            stroke(gizmos, Vec2::new(x1, y1), Vec2::new(x1, ym));
-        }
-        if segments[2] {
-            stroke(gizmos, Vec2::new(x1, ym), Vec2::new(x1, y0));
-        }
-        if segments[3] {
-            stroke(gizmos, Vec2::new(x0, y0), Vec2::new(x1, y0));
-        }
-        if segments[4] {
-            stroke(gizmos, Vec2::new(x0, ym), Vec2::new(x0, y0));
-        }
-        if segments[5] {
-            stroke(gizmos, Vec2::new(x0, y1), Vec2::new(x0, ym));
-        }
-        if segments[6] {
-            stroke(gizmos, Vec2::new(x0, ym), Vec2::new(x1, ym));
-        }
-    };
-    let segments = match digit {
-        0 => [true, true, true, true, true, true, false],
-        1 => [false, true, true, false, false, false, false],
-        2 => [true, true, false, true, true, false, true],
-        3 => [true, true, true, true, false, false, true],
-        4 => [false, true, true, false, false, true, true],
-        5 => [true, false, true, true, false, true, true],
-        6 => [true, false, true, true, true, true, true],
-        7 => [true, true, true, false, false, false, false],
-        8 => [true, true, true, true, true, true, true],
-        9 => [true, true, true, true, false, true, true],
-        _ => [true, true, true, true, true, true, true],
-    };
-    draw_segments(gizmos, segments);
 }
 
 fn draw_object_pose_axes(gizmos: &mut Gizmos, center: Vec2, theta: f32) {

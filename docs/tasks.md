@@ -49,6 +49,16 @@
   - 2026-03-05: 互換維持していた `water_drop_spatial_lod` シナリオ定義と対応テストを削除。`cargo check` 警告0件・`cargo test --lib` 全通過（70件）を確認。
   - 2026-03-05: `scenario.rs` から未参照化した CPU 実行ループ（`run_scenario_and_write_artifacts`, `run_default_scenarios`, `ScenarioRunOutput`）を削除。併せて未使用化した `assertion_violations_for_step` を削除し、`cargo check` 警告0件を維持。
   - 2026-03-05: CPU粒子ソルバ依存の `world/particle/tests.rs` を撤去（`mod tests;` 削除 + ファイル削除）。`cargo check` 警告0件・`cargo test --lib` 全通過（39件）を確認。
+  - 2026-03-05: `ParticleWorld::step_if_running` を削除（外部参照なしを確認済み）。`cargo check` 警告0件・`cargo test --lib` 全通過（39件）を確認。
+  - 2026-03-05: `scenario.rs` の旧LoD名残テスト `water_drop_scenario_uses_default_level0_mpm_blocks` を削除。`cargo check` 警告0件・`cargo test --lib` 全通過（38件）を確認。
+  - 2026-03-05: `solver/types.rs` から `ParticleStepBreakdown` 依存を撤去（`StepSimulationTiming` の `particle_step_*` / `particle_breakdown` フィールド削除）。`fixed_update.rs` の旧CPU粒子プロファイル分岐（`particle_step::*`, `mpm::other` 算出）も削除し、GPU寄りの最小プロファイル構成へ整理。`cargo check` 警告0件・`cargo test --lib` 全通過（38件）を確認。
+  - 2026-03-05: `ParticleWorld::step_if_running` は復帰差分で再出現していたため再削除。`cargo check` 警告0件・`cargo test --lib` 全通過（38件）を確認。
+  - 2026-03-05: `ParticleWorld` をGPU-first最小APIへ再構成。CPUステップ入口 `step_substeps` を削除し、`solver/particle_step.rs` を削除。あわせて未使用化した `world/neighbor_grid.rs` / `world/particle/helpers.rs` を削除し、`world/mod.rs` から `neighbor_grid` export を撤去。`cargo check` 警告0件・`cargo test --lib` 全通過（38件）を確認。
+  - 2026-03-05: `SolverParams` から未参照の `neighbor_grid_max_axis_cells` / `neighbor_grid_max_dense_cells` を削除（`params_types.rs` / `params_defaults.rs` 反映）。加えて未参照化していた `solver/object.rs` を削除。`cargo check` 警告0件・`cargo test --lib` 全通過（38件）を確認。
+  - 2026-03-05: `ParticleWorld` 最小API化に合わせて未参照公開関数をさらに削減（`spawn_stone_particles_from_cells`, `fracture_particle_to_target_material`, `nominal_particle_draw_radius_m`, `default_particle_mass`）。副作用として発生した未使用定数も整理し、`cargo check` 警告0件・`cargo test --lib` 全通過（38件）を維持。
+  - 2026-03-05: overlay の sub-block 表示経路を削除（`overlay/grid.rs` の sub-block rate digit 描画と補助関数、`overlay/ui.rs` の sub-block 件数/debt 表示）。これに伴い `world/sub_block.rs` を削除し、`world/mod.rs` から `sub_block` export を撤去。`cargo check` 警告0件・`cargo test --lib` 全通過（34件）を確認。
+  - 2026-03-05: `SolverParams` から未使用の `sub_block_*` 設定群（サイズ/容量/負荷閾値）を削除（`params_types.rs` / `params_defaults.rs`）。あわせて `TerrainRenderDiagnostics` に残っていた `particle_updated_sub_block_highlight_frames` を撤去し、step profiler の旧 `particle_step::*` 名称依存分類をGPU現行ステップ名基準へ整理。`cargo check` / `cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（34件）を確認。
+  - 2026-03-05: `StepSimulationTiming` に残っていた CPU 粒子破砕由来の `terrain_fracture_commit_*` 計測を削除し、`fixed_update.rs` の同セグメント出力も撤去。step profiler での分類条件も追随して整理。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（34件）を確認。
 - 完了条件:
   - 設計文書が新方針へ整合し、GPU一本化とCPU撤去の実施手順が定義されている。
 
