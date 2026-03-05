@@ -405,7 +405,7 @@ mod tests {
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!("particles_load_regen_{nanos}.json"));
         let json = format!(
-            "{{\"save_version\":{},\"generator_version\":{},\"simulation\":{{\"running\":false}},\"loaded_chunks\":[{{\"chunk\":[0,0]}}],\"terrain_cells\":[],\"particles\":[],\"objects\":[]}}",
+            "{{\"save_version\":{},\"generator_version\":{},\"simulation\":{{\"running\":false}},\"loaded_chunks\":[{{\"chunk\":[0,0]}}],\"terrain_cells\":[],\"particles\":[]}}",
             SAVE_VERSION, TERRAIN_GENERATOR_VERSION
         );
         fs::write(&path, json).expect("should write temporary save file");
@@ -439,7 +439,7 @@ mod tests {
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!("particles_bad_generator_{nanos}.json"));
         let json = format!(
-            "{{\"save_version\":{},\"generator_version\":{},\"simulation\":{{\"running\":false}},\"loaded_chunks\":[],\"terrain_cells\":[],\"particles\":[],\"objects\":[]}}",
+            "{{\"save_version\":{},\"generator_version\":{},\"simulation\":{{\"running\":false}},\"loaded_chunks\":[],\"terrain_cells\":[],\"particles\":[]}}",
             SAVE_VERSION,
             TERRAIN_GENERATOR_VERSION + 1
         );

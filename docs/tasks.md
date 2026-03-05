@@ -65,6 +65,7 @@
   - 2026-03-05: `ObjectWorld` を完全撤去。`world/mod.rs` から `object` module export を削除し、`world/object.rs` を削除。`physics/mod.rs` の resource 登録、`runtime/main/interface/scenario/save_load` の `ObjectWorld` 引数・依存を全撤去して、GPU粒子+地形のみの実行経路へ整理。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
   - 2026-03-05: シナリオ定義から旧剛体入力 `ScenarioSpec.objects` / `ObjectSpawnSpec` を削除。`objects_drop` は同等の stone solid 粒子配置へ置換し、`apply_scenario_spec` は `free_particles` のみ生成する形へ簡素化。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
   - 2026-03-05: `save_load` の旧剛体互換フィールド `objects` を削除（`SaveSnapshot.objects` / `ObjectSnapshot` / object整合性検証）。セーブ読込は未知フィールド無視で後方互換を維持。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
+  - 2026-03-05: `save_load` テスト用JSONに残っていた `\"objects\":[]` を削除し、現行スナップショット構造と整合。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
 - 完了条件:
   - 設計文書が新方針へ整合し、GPU一本化とCPU撤去の実施手順が定義されている。
 
