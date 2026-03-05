@@ -29,8 +29,6 @@ struct SaveSnapshot {
     loaded_chunks: Vec<ChunkSnapshot>,
     terrain_cells: Vec<TerrainCellSnapshot>,
     particles: Vec<ParticleSnapshot>,
-    #[serde(default)]
-    objects: Vec<ObjectSnapshot>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,15 +57,6 @@ struct ParticleSnapshot {
     position: [f32; 2],
     velocity: [f32; 2],
     material: SaveParticleMaterial,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ObjectSnapshot {
-    id: u32,
-    particle_indices: Vec<usize>,
-    rest_local: Vec<[f32; 2]>,
-    shape_stiffness_alpha: f32,
-    shape_iters: usize,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -244,7 +233,6 @@ pub fn save_to_path(
                 material: material.into(),
             })
             .collect(),
-        objects: Vec::new(),
     };
 
     let json = serde_json::to_string_pretty(&snapshot)
@@ -392,27 +380,6 @@ fn validate_snapshot(snapshot: &SaveSnapshot) -> Result<(), String> {
             || !particle.velocity[1].is_finite()
         {
             return Err(format!("particle {index} contains non-finite values"));
-        }
-    }
-
-    let mut seen_ids = HashSet::new();
-    for object in &snapshot.objects {
-        if !seen_ids.insert(object.id) {
-            return Err(format!("duplicate object id: {}", object.id));
-        }
-        if object.particle_indices.len() != object.rest_local.len() {
-            return Err(format!(
-                "object {} has mismatched particle/rest counts",
-                object.id
-            ));
-        }
-        for &particle_index in &object.particle_indices {
-            if particle_index >= snapshot.particles.len() {
-                return Err(format!(
-                    "object {} references out-of-range particle index {}",
-                    object.id, particle_index
-                ));
-            }
         }
     }
 
