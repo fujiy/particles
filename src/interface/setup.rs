@@ -28,31 +28,6 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 SimulationHudFpsText,
             ));
             parent.spawn((
-                Text::new("Physics Step: -- ms"),
-                TextFont::from_font_size(13.0),
-                TextColor(Color::WHITE),
-                StepProfilerMsText,
-            ));
-            parent.spawn((
-                Text::new("Ideal cpu/wall(block/color): --"),
-                TextFont::from_font_size(12.0),
-                TextColor(Color::srgba(0.78, 0.88, 1.00, 1.0)),
-                StepProfilerIdealParallelText,
-            ));
-            parent.spawn((
-                Node {
-                    width: percent(100.0),
-                    height: px(STEP_PROFILER_BAR_HEIGHT_PX),
-                    align_items: AlignItems::End,
-                    overflow: Overflow::clip_x(),
-                    border: UiRect::all(px(1.0)),
-                    ..default()
-                },
-                BackgroundColor(Color::srgba(0.10, 0.12, 0.16, 0.95)),
-                BorderColor::all(BUTTON_BORDER_OFF),
-                StepProfilerBarTrack,
-            ));
-            parent.spawn((
                 Text::new(
                     "Sim: --\nWater(L): --\nStone(S): --\nStone(G): --\nSoil(S): --\nSoil(G): --\nSand(S): --\nSand(G): --",
                 ),
@@ -86,29 +61,6 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 },
                 BackgroundColor(Color::srgba(0.94, 0.96, 0.99, 0.96)),
                 ScaleBarLine,
-            ));
-        });
-
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                display: Display::None,
-                left: px(0.0),
-                top: px(0.0),
-                padding: UiRect::axes(px(8.0), px(4.0)),
-                ..default()
-            },
-            BackgroundColor(TOOLTIP_BG_COLOR),
-            GlobalZIndex(TOOLTIP_GLOBAL_Z_INDEX),
-            StepProfilerTooltip,
-        ))
-        .with_children(|parent| {
-            parent.spawn((
-                Text::new(""),
-                TextFont::from_font_size(13.0),
-                TextColor(Color::WHITE),
-                StepProfilerTooltipText,
             ));
         });
 
@@ -165,30 +117,6 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                         Text::new("Step"),
                         TextFont::from_font_size(14.0),
                         TextColor(Color::WHITE),
-                    ));
-                });
-
-            parent
-                .spawn((
-                    Button,
-                    Node {
-                        width: px(120.0),
-                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
-                        align_items: AlignItems::Center,
-                        justify_content: JustifyContent::Center,
-                        border: UiRect::all(px(2.0)),
-                        ..default()
-                    },
-                    BackgroundColor(BUTTON_BG_OFF),
-                    BorderColor::all(BUTTON_BORDER_OFF),
-                    SimParallelButton,
-                ))
-                .with_children(|button| {
-                    button.spawn((
-                        Text::new("Parallel: ON"),
-                        TextFont::from_font_size(14.0),
-                        TextColor(Color::WHITE),
-                        SimParallelButtonText,
                     ));
                 });
 

@@ -246,12 +246,10 @@ pub(super) fn update_sdf_overlay_button_label(
 pub(super) fn update_physics_area_overlay_button_label(
     overlay_state: Res<PhysicsAreaOverlayState>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
-    active_region: Res<PhysicsActiveRegion>,
     mut labels: Query<&mut Text, With<PhysicsAreaOverlayToggleButtonLabel>>,
 ) {
     if !overlay_state.is_changed()
         && !render_diagnostics.is_changed()
-        && !active_region.is_changed()
     {
         return;
     }
@@ -264,8 +262,7 @@ pub(super) fn update_physics_area_overlay_button_label(
     for mut label in &mut labels {
         label.0 = if overlay_state.enabled {
             format!(
-                "Physics Area Overlay: ON (A:{} T:{} P:{} GPU:{}x{} nodes {}x{} cells)",
-                active_region.active_chunks.len(),
+                "Physics Area Overlay: ON (T:{} P:{} GPU:{}x{} nodes {}x{} cells)",
                 render_diagnostics
                     .terrain_updated_chunk_highlight_frames
                     .len(),
@@ -304,14 +301,12 @@ pub(super) fn update_overlay_info_text(
     tile_overlay_state: Res<TileOverlayState>,
     sdf_overlay_state: Res<SdfOverlayState>,
     physics_overlay_state: Res<PhysicsAreaOverlayState>,
-    active_region: Res<PhysicsActiveRegion>,
     terrain_world: Res<TerrainWorld>,
     mut labels: Query<&mut Text, With<OverlayInfoText>>,
 ) {
     if !tile_overlay_state.is_changed()
         && !sdf_overlay_state.is_changed()
         && !physics_overlay_state.is_changed()
-        && !active_region.is_changed()
         && !terrain_world.is_changed()
     {
         return;
@@ -324,10 +319,6 @@ pub(super) fn update_overlay_info_text(
     for mut label in &mut labels {
         let mut lines = Vec::new();
         if physics_overlay_state.enabled {
-            lines.push(format!(
-                "Physics Chunks: {}",
-                active_region.active_chunks.len()
-            ));
             lines.push(format!(
                 "GPU Grid: nodes {}x{} cells {}x{} (single uniform grid, no tiles)",
                 gpu_layout.dims.x, gpu_layout.dims.y, gpu_cells.x, gpu_cells.y

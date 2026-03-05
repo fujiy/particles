@@ -85,15 +85,10 @@ pub(super) fn draw_sdf_overlay(
     mut commands: Commands,
     mut gizmos: Gizmos,
     overlay_state: Res<SdfOverlayState>,
-    active_region: Res<PhysicsActiveRegion>,
-    region_settings: Res<PhysicsRegionSettings>,
     terrain_world: Res<TerrainWorld>,
     negative_fill_cells: Query<Entity, With<SdfOverlayNegativeFillCell>>,
 ) {
-    let needs_rebuild = overlay_state.is_changed()
-        || active_region.is_changed()
-        || region_settings.is_changed()
-        || terrain_world.is_changed();
+    let needs_rebuild = overlay_state.is_changed() || terrain_world.is_changed();
 
     if !overlay_state.enabled {
         for entity in &negative_fill_cells {
@@ -102,9 +97,7 @@ pub(super) fn draw_sdf_overlay(
         return;
     }
 
-    let Some((world_min, world_max)) =
-        sdf_overlay_world_bounds(&active_region, &region_settings, &terrain_world)
-    else {
+    let Some((world_min, world_max)) = sdf_overlay_world_bounds(&terrain_world) else {
         for entity in &negative_fill_cells {
             commands.entity(entity).despawn();
         }
@@ -159,120 +152,26 @@ pub(super) fn draw_sdf_overlay(
 pub(super) fn draw_physics_area_overlay(
     mut gizmos: Gizmos,
     overlay_state: Res<PhysicsAreaOverlayState>,
-    active_region: Res<PhysicsActiveRegion>,
-    region_settings: Res<PhysicsRegionSettings>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
 ) {
     if !overlay_state.enabled {
         return;
     }
 
-    let active_world_bounds = if let (Some(min_chunk), Some(max_chunk)) =
-        (active_region.chunk_min, active_region.chunk_max)
+    for &chunk in render_diagnostics
+        .terrain_updated_chunk_highlight_frames
+        .keys()
     {
-        let min_x = min_chunk.x as f32 * CHUNK_WORLD_SIZE_M;
-        let max_x = (max_chunk.x + 1) as f32 * CHUNK_WORLD_SIZE_M;
-        let min_y = min_chunk.y as f32 * CHUNK_WORLD_SIZE_M;
-        let max_y = (max_chunk.y + 1) as f32 * CHUNK_WORLD_SIZE_M;
-        Some((
-            min_chunk,
-            max_chunk,
-            Vec2::new(min_x, min_y),
-            Vec2::new(max_x, max_y),
-        ))
-    } else {
-        None
-    };
-
-    if let Some((min_chunk, max_chunk, world_min, world_max)) = active_world_bounds {
-        let min_x = world_min.x;
-        let max_x = world_max.x;
-        let min_y = world_min.y;
-        let max_y = world_max.y;
-
-        let neighbor_step = WATER_KERNEL_RADIUS_M;
-        let min_neighbor_x = (min_x / neighbor_step).floor() as i32;
-        let max_neighbor_x = (max_x / neighbor_step).ceil() as i32;
-        let min_neighbor_y = (min_y / neighbor_step).floor() as i32;
-        let max_neighbor_y = (max_y / neighbor_step).ceil() as i32;
-
-        for gx in min_neighbor_x..=max_neighbor_x {
-            let x = gx as f32 * neighbor_step;
-            gizmos.line_2d(
-                Vec2::new(x, min_y),
-                Vec2::new(x, max_y),
-                GRID_NEIGHBOR_COLOR,
-            );
-        }
-        for gy in min_neighbor_y..=max_neighbor_y {
-            let y = gy as f32 * neighbor_step;
-            gizmos.line_2d(
-                Vec2::new(min_x, y),
-                Vec2::new(max_x, y),
-                GRID_NEIGHBOR_COLOR,
-            );
-        }
-
-        for &chunk in &active_region.active_chunks {
-            draw_chunk_outline(&mut gizmos, chunk, GRID_ACTIVE_CHUNK_COLOR);
-        }
-
-        let halo_chunks = region_settings.active_halo_chunks.max(0);
-        if halo_chunks > 0 {
-            let halo_min = min_chunk - IVec2::splat(halo_chunks);
-            let halo_max = max_chunk + IVec2::splat(halo_chunks);
-            for y in halo_min.y..=halo_max.y {
-                for x in halo_min.x..=halo_max.x {
-                    let chunk = IVec2::new(x, y);
-                    if x >= min_chunk.x && x <= max_chunk.x && y >= min_chunk.y && y <= max_chunk.y
-                    {
-                        continue;
-                    }
-                    draw_chunk_outline(&mut gizmos, chunk, GRID_HALO_CHUNK_COLOR);
-                }
-            }
-        }
-
-        for &chunk in render_diagnostics
-            .terrain_updated_chunk_highlight_frames
-            .keys()
-        {
-            if chunk.x < min_chunk.x
-                || chunk.x > max_chunk.x
-                || chunk.y < min_chunk.y
-                || chunk.y > max_chunk.y
-            {
-                continue;
-            }
-            draw_chunk_outline(&mut gizmos, chunk, GRID_TERRAIN_UPDATED_COLOR);
-        }
-        for &chunk in render_diagnostics
-            .particle_updated_chunk_highlight_frames
-            .keys()
-        {
-            if chunk.x < min_chunk.x
-                || chunk.x > max_chunk.x
-                || chunk.y < min_chunk.y
-                || chunk.y > max_chunk.y
-            {
-                continue;
-            }
-            draw_chunk_outline(&mut gizmos, chunk, GRID_PARTICLE_UPDATED_COLOR);
-        }
-
-        draw_rect_outline(
-            &mut gizmos,
-            Vec2::new(min_x, min_y),
-            Vec2::new(max_x, max_y),
-            GRID_PHYSICS_REGION_COLOR,
-        );
-
+        draw_chunk_outline(&mut gizmos, chunk, GRID_TERRAIN_UPDATED_COLOR);
+    }
+    for &chunk in render_diagnostics
+        .particle_updated_chunk_highlight_frames
+        .keys()
+    {
+        draw_chunk_outline(&mut gizmos, chunk, GRID_PARTICLE_UPDATED_COLOR);
     }
 
-    draw_gpu_grid_overlay(
-        &mut gizmos,
-        active_world_bounds.map(|(_, _, min, max)| (min, max)),
-    );
+    draw_gpu_grid_overlay(&mut gizmos, None);
 }
 
 fn draw_rect_outline(gizmos: &mut Gizmos, min: Vec2, max: Vec2, color: Color) {
@@ -343,19 +242,8 @@ fn clipped_rect(min: Vec2, max: Vec2, clip_rect: Option<(Vec2, Vec2)>) -> Option
 }
 
 fn sdf_overlay_world_bounds(
-    active_region: &PhysicsActiveRegion,
-    region_settings: &PhysicsRegionSettings,
     terrain_world: &TerrainWorld,
 ) -> Option<(Vec2, Vec2)> {
-    if let (Some(min_chunk), Some(max_chunk)) = (active_region.chunk_min, active_region.chunk_max) {
-        let halo_chunks = region_settings.active_halo_chunks.max(0);
-        let overlay_min_chunk = min_chunk - IVec2::splat(halo_chunks);
-        let overlay_max_chunk = max_chunk + IVec2::splat(halo_chunks);
-        return Some((
-            overlay_min_chunk.as_vec2() * CHUNK_WORLD_SIZE_M,
-            (overlay_max_chunk + IVec2::ONE).as_vec2() * CHUNK_WORLD_SIZE_M,
-        ));
-    }
     let positions = terrain_world.static_particle_positions();
     if positions.is_empty() {
         return None;

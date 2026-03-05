@@ -121,28 +121,6 @@ pub(super) fn update_sim_step_button_visuals(
     }
 }
 
-pub(super) fn update_sim_parallel_button_visuals(
-    parallel_settings: Res<SimulationParallelSettings>,
-    mut buttons: Query<
-        (&Interaction, &mut BackgroundColor, &mut BorderColor),
-        (With<Button>, With<SimParallelButton>),
-    >,
-) {
-    for (interaction, mut bg, mut border_color) in &mut buttons {
-        let selected = parallel_settings.enabled;
-        *bg = match *interaction {
-            Interaction::Pressed => BUTTON_BG_PRESS.into(),
-            Interaction::Hovered => BUTTON_BG_HOVER.into(),
-            Interaction::None => toggle_button_bg(selected),
-        };
-        *border_color = if selected {
-            BorderColor::all(BUTTON_BORDER_ON)
-        } else {
-            BorderColor::all(BUTTON_BORDER_OFF)
-        };
-    }
-}
-
 pub(super) fn update_sim_play_pause_button_label(
     sim_state: Res<SimulationState>,
     mut labels: Query<&mut Text, With<SimPlayPauseButtonText>>,
@@ -155,22 +133,6 @@ pub(super) fn update_sim_play_pause_button_label(
             "Pause".to_string()
         } else {
             "Play".to_string()
-        };
-    }
-}
-
-pub(super) fn update_sim_parallel_button_label(
-    parallel_settings: Res<SimulationParallelSettings>,
-    mut labels: Query<&mut Text, With<SimParallelButtonText>>,
-) {
-    if !parallel_settings.is_changed() {
-        return;
-    }
-    for mut label in &mut labels {
-        label.0 = if parallel_settings.enabled {
-            "Parallel: ON".to_string()
-        } else {
-            "Parallel: OFF".to_string()
         };
     }
 }
@@ -672,127 +634,4 @@ fn snap_scale_bar_world_length(target_world_m: f32) -> f32 {
         })
         .unwrap_or(1.0)
         .max(1.0)
-}
-
-pub(super) fn update_step_profiler_panel(
-    mut commands: Commands,
-    profiler: Res<PhysicsStepProfiler>,
-    solver_params: Res<SolverParams>,
-    mut label_text: Single<&mut Text, With<StepProfilerMsText>>,
-    bar_track_entity: Single<Entity, With<StepProfilerBarTrack>>,
-    children_query: Query<&Children>,
-) {
-    if !profiler.is_changed() {
-        return;
-    }
-    if profiler.total_duration_ms > 0.0 {
-        let baseline_frame_ms = solver_params.fixed_dt as f64 * 1000.0;
-        let physics_load_percent = profiler.total_duration_ms / baseline_frame_ms * 100.0;
-        label_text.0 = format!(
-            "Physics Step: {:.2} ms ({:.1}%)",
-            profiler.total_duration_ms, physics_load_percent
-        );
-    } else {
-        label_text.0 = "Physics Step: -- ms (--%)".to_string();
-    }
-
-    clear_children_recursive(&mut commands, *bar_track_entity, &children_query);
-    let mut fluid_index = 0usize;
-    let mut granular_index = 0usize;
-    let mut object_index = 0usize;
-    commands.entity(*bar_track_entity).with_children(|parent| {
-        for segment in &profiler.segments {
-            if segment.wall_duration_ms <= 0.0 {
-                continue;
-            }
-            let category = classify_profiler_segment(&segment.name);
-            let color = match category {
-                StepProfilerCategory::Fluid => {
-                    let color =
-                        STEP_PROFILER_FLUID_COLORS[fluid_index % STEP_PROFILER_FLUID_COLORS.len()];
-                    fluid_index += 1;
-                    color
-                }
-                StepProfilerCategory::Granular => {
-                    let color = STEP_PROFILER_GRANULAR_COLORS
-                        [granular_index % STEP_PROFILER_GRANULAR_COLORS.len()];
-                    granular_index += 1;
-                    color
-                }
-                StepProfilerCategory::Object => {
-                    let color = STEP_PROFILER_OBJECT_COLORS
-                        [object_index % STEP_PROFILER_OBJECT_COLORS.len()];
-                    object_index += 1;
-                    color
-                }
-            };
-            parent.spawn((
-                Button,
-                Node {
-                    width: px(
-                        (segment.wall_duration_ms as f32 * STEP_PROFILER_BAR_MS_TO_PX).max(1.0),
-                    ),
-                    height: px(((segment.cpu_duration_ms as f32
-                        / segment.wall_duration_ms.max(1e-6) as f32)
-                        .clamp(0.05, STEP_PROFILER_MAX_PARALLELISM_DISPLAY))
-                        * STEP_PROFILER_PARALLELISM_TO_PX),
-                    ..default()
-                },
-                BackgroundColor(color),
-                StepProfilerBarSegment {
-                    step_name: segment.name.clone(),
-                    wall_duration_ms: segment.wall_duration_ms,
-                    cpu_duration_ms: segment.cpu_duration_ms,
-                },
-            ));
-        }
-    });
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StepProfilerCategory {
-    Fluid,
-    Granular,
-    Object,
-}
-
-fn classify_profiler_segment(step_name: &str) -> StepProfilerCategory {
-    if step_name.contains("granular") {
-        return StepProfilerCategory::Granular;
-    }
-    if step_name.starts_with("terrain_")
-        || step_name == "step_overhead"
-    {
-        return StepProfilerCategory::Object;
-    }
-    StepProfilerCategory::Fluid
-}
-
-pub(super) fn update_step_profiler_tooltip(
-    window: Single<&Window, With<PrimaryWindow>>,
-    hovered: Query<(&Interaction, &StepProfilerBarSegment), With<Button>>,
-    mut tooltip_node: Single<&mut Node, With<StepProfilerTooltip>>,
-    mut tooltip_text: Single<&mut Text, With<StepProfilerTooltipText>>,
-) {
-    let hovered_segment = hovered
-        .iter()
-        .find(|(interaction, _)| **interaction == Interaction::Hovered)
-        .map(|(_, segment)| segment.clone());
-    let Some(segment) = hovered_segment else {
-        tooltip_node.display = Display::None;
-        return;
-    };
-
-    let Some(cursor) = window.cursor_position() else {
-        tooltip_node.display = Display::None;
-        return;
-    };
-    tooltip_node.display = Display::Flex;
-    tooltip_node.left = px(cursor.x + STEP_PROFILER_TOOLTIP_OFFSET_X);
-    tooltip_node.top = px(cursor.y + STEP_PROFILER_TOOLTIP_OFFSET_Y);
-    let parallelism = segment.cpu_duration_ms / segment.wall_duration_ms.max(1e-6);
-    tooltip_text.0 = format!(
-        "{}\nwall: {:.2} ms\ncpu: {:.2} ms\ncpu/wall: {:.2}",
-        segment.step_name, segment.wall_duration_ms, segment.cpu_duration_ms, parallelism
-    );
 }

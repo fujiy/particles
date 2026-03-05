@@ -242,40 +242,6 @@ impl TerrainWorld {
         self.ensure_chunk_mut(chunk_coord);
     }
 
-    pub fn unload_pristine_chunks_outside_radius(&mut self, center_chunk: IVec2, keep_radius: i32) {
-        let keep_radius = keep_radius.max(0);
-        let unload_targets: Vec<IVec2> = self
-            .chunks
-            .iter()
-            .filter_map(|(&chunk_coord, chunk)| {
-                let dx = (chunk_coord.x - center_chunk.x).abs();
-                let dy = (chunk_coord.y - center_chunk.y).abs();
-                if dx <= keep_radius && dy <= keep_radius {
-                    return None;
-                }
-                let is_pristine = if self.generation_enabled {
-                    self.generated_base_chunks
-                        .get(&chunk_coord)
-                        .map(|base| chunk.is_pristine_with_base(base))
-                        .unwrap_or(false)
-                } else {
-                    chunk.is_empty()
-                };
-                if is_pristine { Some(chunk_coord) } else { None }
-            })
-            .collect();
-
-        if unload_targets.is_empty() {
-            return;
-        }
-        for chunk_coord in unload_targets {
-            self.chunks.remove(&chunk_coord);
-            self.dirty_chunks.remove(&chunk_coord);
-        }
-        self.terrain_version = self.terrain_version.wrapping_add(1);
-        self.static_particles_dirty = true;
-    }
-
     #[allow(dead_code)]
     pub fn get_cell(&mut self, global_cell: IVec2) -> TerrainCell {
         let (chunk_coord, local_cell) = global_to_chunk_local(global_cell);
@@ -763,25 +729,6 @@ mod tests {
             .unwrap_or(f32::NEG_INFINITY);
         assert!(d_inside < 0.0);
         assert!(d_above > 0.0);
-    }
-
-    #[test]
-    fn unload_pristine_chunks_outside_radius_keeps_modified_chunks() {
-        let mut terrain = TerrainWorld::default();
-        terrain.set_generation_enabled(false);
-        terrain.ensure_chunk_loaded(IVec2::new(0, 0));
-        terrain.ensure_chunk_loaded(IVec2::new(5, 0));
-
-        terrain.unload_pristine_chunks_outside_radius(IVec2::new(0, 0), 1);
-        assert!(terrain.chunk(IVec2::new(5, 0)).is_none());
-
-        terrain.ensure_chunk_loaded(IVec2::new(5, 0));
-        let modified_cell = IVec2::new(5 * CHUNK_SIZE_I32, 0);
-        let modified = TerrainCell::stone();
-        assert!(terrain.set_cell(modified_cell, modified));
-
-        terrain.unload_pristine_chunks_outside_radius(IVec2::new(0, 0), 1);
-        assert!(terrain.chunk(IVec2::new(5, 0)).is_some());
     }
 
     #[test]

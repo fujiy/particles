@@ -18,9 +18,8 @@ use crate::physics::solver::mpm_water::{
 use crate::physics::state::{
     LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest, ReplaySaveArtifactRequest,
     ReplayState, ResetSimulationRequest, SaveMapRequest, SimulationState,
-    TerrainStreamingSettings,
 };
-use crate::physics::world::terrain::{CHUNK_SIZE_I32, TerrainWorld, world_to_cell};
+use crate::physics::world::terrain::TerrainWorld;
 
 fn material_from_phase(phase_id: u32) -> Option<ParticleMaterial> {
     match phase_id as u8 {
@@ -117,34 +116,6 @@ pub(crate) fn handle_sim_controls(
             slot_name: save_load::DEFAULT_QUICK_SAVE_SLOT.to_string(),
         });
     }
-}
-
-pub(crate) fn stream_terrain_around_camera(
-    mut terrain_world: ResMut<TerrainWorld>,
-    replay_state: Res<ReplayState>,
-    streaming_settings: Res<TerrainStreamingSettings>,
-    camera_transforms: Query<&Transform, With<Camera2d>>,
-    mut last_center_chunk: Local<Option<IVec2>>,
-) {
-    if replay_state.enabled || !streaming_settings.enabled || !terrain_world.generation_enabled() {
-        *last_center_chunk = None;
-        return;
-    }
-    let Some(camera_transform) = camera_transforms.iter().next() else {
-        *last_center_chunk = None;
-        return;
-    };
-    let center_cell = world_to_cell(camera_transform.translation.truncate());
-    let center_chunk = IVec2::new(
-        center_cell.x.div_euclid(CHUNK_SIZE_I32),
-        center_cell.y.div_euclid(CHUNK_SIZE_I32),
-    );
-    if last_center_chunk.is_some_and(|prev| prev == center_chunk) {
-        return;
-    }
-    *last_center_chunk = Some(center_chunk);
-    let keep_radius = streaming_settings.load_radius_chunks.max(0) + 1;
-    terrain_world.unload_pristine_chunks_outside_radius(center_chunk, keep_radius);
 }
 
 pub(crate) fn handle_replay_requests(

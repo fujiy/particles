@@ -14,14 +14,12 @@ use bevy::prelude::*;
 
 use self::solver::{
     apply_save_load_requests, apply_sim_reset, handle_replay_requests, handle_sim_controls,
-    initialize_default_world, params_types::SolverParams, stream_terrain_around_camera,
+    initialize_default_world, params_types::SolverParams,
 };
 use self::state::{
-    LoadDefaultWorldRequest, LoadMapRequest, PhysicsActiveRegion,
-    PhysicsRegionSettings, PhysicsStepProfiler, ReplayLoadScenarioRequest,
+    LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest,
     ReplaySaveArtifactRequest, ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet,
-    SimulationParallelSettings, SimulationState,
-    TerrainStreamingSettings,
+    SimulationState,
 };
 use self::world::terrain::TerrainWorld;
 use crate::physics::material::MaterialParams;
@@ -44,12 +42,7 @@ impl Plugin for PhysicsPlugin {
             )
             .init_resource::<TerrainWorld>()
             .init_resource::<SimulationState>()
-            .init_resource::<SimulationParallelSettings>()
-            .init_resource::<PhysicsRegionSettings>()
-            .init_resource::<PhysicsActiveRegion>()
-            .init_resource::<TerrainStreamingSettings>()
             .init_resource::<ReplayState>()
-            .init_resource::<PhysicsStepProfiler>()
             .init_resource::<SolverParams>()
             .init_resource::<MaterialParams>()
             .add_message::<ResetSimulationRequest>()
@@ -64,7 +57,6 @@ impl Plugin for PhysicsPlugin {
                 (
                     handle_sim_controls,
                     apply_sim_reset,
-                    stream_terrain_around_camera,
                     handle_replay_requests,
                     apply_save_load_requests,
                 )

@@ -8,10 +8,9 @@ use crate::physics::save_load;
 use crate::physics::scenario::{
     count_solid_cells, default_scenario_names, default_scenario_spec_by_name,
 };
-use crate::physics::solver::params_types::SolverParams;
 use crate::physics::state::{
-    LoadDefaultWorldRequest, LoadMapRequest, PhysicsStepProfiler, ReplayLoadScenarioRequest,
-    ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationParallelSettings,
+    LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest,
+    ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet,
     SimulationState,
 };
 use crate::physics::material::ParticleMaterial;
@@ -56,27 +55,6 @@ const SCALE_BAR_TARGET_WIDTH_PX: f32 = 140.0;
 const SCALE_BAR_HEIGHT_PX: f32 = 4.0;
 const SCALE_BAR_MIN_WIDTH_PX: f32 = 24.0;
 const SCALE_BAR_LABEL_FONT_PX: f32 = 13.0;
-const STEP_PROFILER_BAR_HEIGHT_PX: f32 = 100.0;
-const STEP_PROFILER_BAR_MS_TO_PX: f32 = 16.0;
-const STEP_PROFILER_PARALLELISM_TO_PX: f32 = 8.0;
-const STEP_PROFILER_MAX_PARALLELISM_DISPLAY: f32 = 12.0;
-const STEP_PROFILER_TOOLTIP_OFFSET_X: f32 = 12.0;
-const STEP_PROFILER_TOOLTIP_OFFSET_Y: f32 = 18.0;
-const STEP_PROFILER_FLUID_COLORS: [Color; 3] = [
-    Color::srgba(0.21, 0.66, 0.95, 0.95),
-    Color::srgba(0.32, 0.74, 0.98, 0.95),
-    Color::srgba(0.14, 0.58, 0.88, 0.95),
-];
-const STEP_PROFILER_GRANULAR_COLORS: [Color; 3] = [
-    Color::srgba(0.96, 0.66, 0.24, 0.95),
-    Color::srgba(0.93, 0.57, 0.18, 0.95),
-    Color::srgba(0.98, 0.74, 0.30, 0.95),
-];
-const STEP_PROFILER_OBJECT_COLORS: [Color; 3] = [
-    Color::srgba(0.42, 0.79, 0.41, 0.95),
-    Color::srgba(0.33, 0.70, 0.33, 0.95),
-    Color::srgba(0.52, 0.86, 0.51, 0.95),
-];
 const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
 const TOOL_BREAK_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
 const TOOL_HOVER_HIGHLIGHT_TERRAIN_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
@@ -182,7 +160,6 @@ impl Plugin for InterfacePlugin {
                     handle_save_load_reset_button_interaction,
                     handle_sim_play_pause_button_interaction,
                     handle_sim_step_button_interaction,
-                    handle_sim_parallel_button_interaction,
                     handle_save_load_name_input_button_interaction,
                     handle_save_load_dialog_buttons,
                     handle_save_load_slot_button_interaction,
@@ -202,9 +179,7 @@ impl Plugin for InterfacePlugin {
                     update_save_load_reset_button_visuals,
                     update_sim_play_pause_button_visuals,
                     update_sim_step_button_visuals,
-                    update_sim_parallel_button_visuals,
                     update_sim_play_pause_button_label,
-                    update_sim_parallel_button_label,
                     update_save_load_name_input_button_visuals,
                     update_save_load_slot_button_visuals,
                     update_save_load_dialog,
@@ -213,8 +188,6 @@ impl Plugin for InterfacePlugin {
                     update_fps_hud_stats,
                     update_simulation_hud,
                     update_scale_bar,
-                    update_step_profiler_panel,
-                    update_step_profiler_tooltip,
                 )
                     .chain()
                     .in_set(SimUpdateSet::Ui),
@@ -400,12 +373,6 @@ struct SimPlayPauseButtonText;
 struct SimStepButton;
 
 #[derive(Component)]
-struct SimParallelButton;
-
-#[derive(Component)]
-struct SimParallelButtonText;
-
-#[derive(Component)]
 struct SaveLoadDialogRoot;
 
 #[derive(Component)]
@@ -447,46 +414,21 @@ struct TestAssertTitleText;
 #[derive(Component)]
 struct TestAssertList;
 
-#[derive(Component)]
-struct StepProfilerMsText;
-
-#[derive(Component)]
-struct StepProfilerIdealParallelText;
-
-#[derive(Component)]
-struct StepProfilerBarTrack;
-
-#[derive(Component, Clone)]
-struct StepProfilerBarSegment {
-    step_name: String,
-    wall_duration_ms: f64,
-    cpu_duration_ms: f64,
-}
-
-#[derive(Component)]
-struct StepProfilerTooltip;
-
-#[derive(Component)]
-struct StepProfilerTooltipText;
-
 use setup::setup_simulation_ui;
 
 use input_handlers::{
     handle_save_load_dialog_buttons, handle_save_load_name_input_button_interaction,
     handle_save_load_open_button_interaction, handle_save_load_reset_button_interaction,
     handle_save_load_slot_button_interaction, handle_save_load_text_input,
-    handle_sim_parallel_button_interaction, handle_sim_play_pause_button_interaction,
-    handle_sim_step_button_interaction, handle_world_tool_button_interaction,
-    sync_save_load_ime_state,
+    handle_sim_play_pause_button_interaction, handle_sim_step_button_interaction,
+    handle_world_tool_button_interaction, sync_save_load_ime_state,
 };
 
 use ui_systems::{
     update_fps_hud_stats, update_save_load_dialog, update_save_load_name_input_button_visuals,
     update_save_load_open_button_visuals, update_save_load_reset_button_visuals,
-    update_save_load_slot_button_visuals, update_scale_bar, update_sim_parallel_button_label,
-    update_sim_parallel_button_visuals, update_sim_play_pause_button_label,
+    update_save_load_slot_button_visuals, update_scale_bar, update_sim_play_pause_button_label,
     update_sim_play_pause_button_visuals, update_sim_step_button_visuals, update_simulation_hud,
-    update_step_profiler_panel, update_step_profiler_tooltip,
     update_test_assert_panel, update_world_tool_button_visuals, update_world_tool_tooltip,
 };
 

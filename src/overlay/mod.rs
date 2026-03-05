@@ -6,8 +6,7 @@ use bevy::render::render_graph::ViewNodeRunner;
 use bevy::render::render_resource::SpecializedRenderPipelines;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
-use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, water_kernel_radius_m};
-use crate::physics::state::{PhysicsActiveRegion, PhysicsRegionSettings, SimUpdateSet};
+use crate::physics::state::SimUpdateSet;
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainWorld,
 };
@@ -17,20 +16,15 @@ const BUTTON_BG_OFF: Color = Color::srgba(0.17, 0.18, 0.22, 0.95);
 const BUTTON_BG_ON: Color = Color::srgba(0.16, 0.30, 0.46, 0.95);
 const BUTTON_BG_HOVER: Color = Color::srgba(0.24, 0.25, 0.30, 0.98);
 const BUTTON_BG_PRESS: Color = Color::srgba(0.38, 0.40, 0.48, 0.98);
-const GRID_NEIGHBOR_COLOR: Color = Color::srgba(0.27, 0.75, 0.98, 0.28);
 const GRID_CHUNK_BOUNDARY_COLOR: Color = Color::srgba(0.80, 0.86, 0.93, 0.22);
 const GRID_CACHED_CHUNK_COLOR: Color = Color::srgba(0.32, 0.86, 0.98, 0.62);
 const GRID_MODIFIED_CHUNK_COLOR: Color = Color::srgba(0.99, 0.43, 0.22, 0.95);
-const GRID_ACTIVE_CHUNK_COLOR: Color = Color::srgba(1.00, 0.08, 0.78, 0.95);
-const GRID_HALO_CHUNK_COLOR: Color = Color::srgba(0.16, 0.88, 0.60, 0.72);
-const GRID_PHYSICS_REGION_COLOR: Color = Color::srgba(0.96, 0.72, 0.12, 0.98);
 const GRID_TERRAIN_UPDATED_COLOR: Color = Color::srgba(0.13, 0.85, 0.92, 1.00);
 const GRID_PARTICLE_UPDATED_COLOR: Color = Color::srgba(0.76, 0.56, 0.98, 1.00);
 const TILE_BUTTON_BOTTOM_PX: f32 = 88.0;
 const SDF_BUTTON_BOTTOM_PX: f32 = 126.0;
 const PHYSICS_AREA_BUTTON_BOTTOM_PX: f32 = 50.0;
 const PARTICLE_BUTTON_BOTTOM_PX: f32 = 12.0;
-const WATER_KERNEL_RADIUS_M: f32 = water_kernel_radius_m(DEFAULT_MATERIAL_PARAMS);
 const TERRAIN_SDF_OVERLAY_STEP_M: f32 = CELL_SIZE_M;
 const TERRAIN_SDF_OVERLAY_CELL_RADIUS_M: f32 = CELL_SIZE_M * 0.45;
 const TERRAIN_SDF_OVERLAY_RANGE_M: f32 = CELL_SIZE_M * 6.0;

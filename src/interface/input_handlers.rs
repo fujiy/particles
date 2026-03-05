@@ -80,20 +80,6 @@ pub(super) fn handle_sim_step_button_interaction(
     }
 }
 
-pub(super) fn handle_sim_parallel_button_interaction(
-    mut interactions: Query<
-        &Interaction,
-        (Changed<Interaction>, With<SimParallelButton>, With<Button>),
-    >,
-    mut parallel_settings: ResMut<SimulationParallelSettings>,
-) {
-    for interaction in &mut interactions {
-        if *interaction == Interaction::Pressed {
-            parallel_settings.enabled = !parallel_settings.enabled;
-        }
-    }
-}
-
 pub(super) fn handle_save_load_name_input_button_interaction(
     mut interactions: Query<
         &Interaction,
