@@ -19,7 +19,7 @@ pub(super) fn setup_overlay_ui(mut commands: Commands) {
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("Tile Overlay: OFF"),
+                Text::new("Chunk Overlay: OFF"),
                 TextFont::from_font_size(14.0),
                 TextColor(Color::WHITE),
                 TileOverlayToggleButtonLabel,
@@ -200,27 +200,29 @@ pub(super) fn handle_sdf_overlay_button(
 
 pub(super) fn update_tile_overlay_button_label(
     overlay_state: Res<TileOverlayState>,
-    render_diagnostics: Res<TerrainRenderDiagnostics>,
+    terrain_world: Res<TerrainWorld>,
+    generated_chunk_cache: Res<TerrainGeneratedChunkCache>,
     mut labels: Query<&mut Text, With<TileOverlayToggleButtonLabel>>,
 ) {
-    if !overlay_state.is_changed() && !render_diagnostics.is_changed() {
+    if !overlay_state.is_changed()
+        && !terrain_world.is_changed()
+        && !generated_chunk_cache.is_changed()
+    {
         return;
     }
 
+    let loaded_chunks = terrain_world.loaded_chunk_coords().len();
+    let cached_chunks = generated_chunk_cache.cached_chunk_coords().len();
+    let modified_chunks = terrain_world.override_chunk_coords().len();
+
     for mut label in &mut labels {
-        let lod_tile_count = render_diagnostics
-            .visible_tiles
-            .iter()
-            .filter(|tile| tile.span_chunks > 1)
-            .count();
         label.0 = if overlay_state.enabled {
             format!(
-                "Tile Overlay: ON (Tiles:{} LOD:{})",
-                render_diagnostics.visible_tiles.len(),
-                lod_tile_count,
+                "Chunk Overlay: ON (Loaded:{} Cached:{} Modified:{})",
+                loaded_chunks, cached_chunks, modified_chunks,
             )
         } else {
-            "Tile Overlay: OFF".to_string()
+            "Chunk Overlay: OFF".to_string()
         };
     }
 }
@@ -313,7 +315,7 @@ pub(super) fn update_overlay_info_text(
     sdf_overlay_state: Res<SdfOverlayState>,
     physics_overlay_state: Res<PhysicsAreaOverlayState>,
     active_region: Res<PhysicsActiveRegion>,
-    render_diagnostics: Res<TerrainRenderDiagnostics>,
+    terrain_world: Res<TerrainWorld>,
     particle_world: Res<ParticleWorld>,
     mut labels: Query<&mut Text, With<OverlayInfoText>>,
 ) {
@@ -321,7 +323,7 @@ pub(super) fn update_overlay_info_text(
         && !sdf_overlay_state.is_changed()
         && !physics_overlay_state.is_changed()
         && !active_region.is_changed()
-        && !render_diagnostics.is_changed()
+        && !terrain_world.is_changed()
         && !particle_world.is_changed()
     {
         return;
@@ -354,15 +356,11 @@ pub(super) fn update_overlay_info_text(
             ));
         }
         if tile_overlay_state.enabled {
-            let lod_tile_count = render_diagnostics
-                .visible_tiles
-                .iter()
-                .filter(|tile| tile.span_chunks > 1)
-                .count();
+            let loaded_chunks = terrain_world.loaded_chunk_coords().len();
+            let modified_chunks = terrain_world.override_chunk_coords().len();
             lines.push(format!(
-                "Render Tiles: {} (LOD: {})",
-                render_diagnostics.visible_tiles.len(),
-                lod_tile_count
+                "Render Chunks: {} (Modified: {})",
+                loaded_chunks, modified_chunks
             ));
         }
         if sdf_overlay_state.enabled {

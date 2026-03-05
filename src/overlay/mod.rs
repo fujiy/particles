@@ -13,15 +13,16 @@ use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainWorld,
 };
-use crate::render::{TerrainRenderDiagnostics, WaterDotGpuLabel};
+use crate::render::{TerrainGeneratedChunkCache, TerrainRenderDiagnostics};
 
 const BUTTON_BG_OFF: Color = Color::srgba(0.17, 0.18, 0.22, 0.95);
 const BUTTON_BG_ON: Color = Color::srgba(0.16, 0.30, 0.46, 0.95);
 const BUTTON_BG_HOVER: Color = Color::srgba(0.24, 0.25, 0.30, 0.98);
 const BUTTON_BG_PRESS: Color = Color::srgba(0.38, 0.40, 0.48, 0.98);
 const GRID_NEIGHBOR_COLOR: Color = Color::srgba(0.27, 0.75, 0.98, 0.28);
-const GRID_FULL_TILE_COLOR: Color = Color::srgba(0.78, 0.84, 0.92, 0.34);
-const GRID_LOD_CHUNK_COLOR: Color = Color::srgba(0.84, 0.84, 0.86, 0.36);
+const GRID_CHUNK_BOUNDARY_COLOR: Color = Color::srgba(0.80, 0.86, 0.93, 0.22);
+const GRID_CACHED_CHUNK_COLOR: Color = Color::srgba(0.32, 0.86, 0.98, 0.62);
+const GRID_MODIFIED_CHUNK_COLOR: Color = Color::srgba(0.99, 0.43, 0.22, 0.95);
 const GRID_ACTIVE_CHUNK_COLOR: Color = Color::srgba(1.00, 0.08, 0.78, 0.95);
 const GRID_HALO_CHUNK_COLOR: Color = Color::srgba(0.16, 0.88, 0.60, 0.72);
 const GRID_PHYSICS_REGION_COLOR: Color = Color::srgba(0.96, 0.72, 0.12, 0.98);
@@ -57,11 +58,13 @@ impl Plugin for OverlayPlugin {
             .init_resource::<TileOverlayState>()
             .init_resource::<SdfOverlayState>()
             .init_resource::<PhysicsAreaOverlayState>()
+            .init_resource::<OverlayVisibilityOverrides>()
             .add_plugins(ExtractResourcePlugin::<ParticleOverlayState>::default())
             .add_systems(Startup, setup_overlay_ui)
             .add_systems(
                 Update,
                 (
+                    apply_overlay_visibility_overrides,
                     handle_tile_overlay_button,
                     handle_sdf_overlay_button,
                     handle_physics_area_overlay_button,
@@ -108,7 +111,6 @@ impl Plugin for OverlayPlugin {
                 Core2d,
                 (
                     Node2d::MainTransparentPass,
-                    WaterDotGpuLabel,
                     ParticleOverlayGpuLabel,
                     Node2d::EndMainPass,
                 ),
@@ -135,6 +137,35 @@ struct TileOverlayState {
 impl Default for TileOverlayState {
     fn default() -> Self {
         Self { enabled: false }
+    }
+}
+
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct OverlayVisibilityOverrides {
+    pub chunk: Option<bool>,
+    pub sdf: Option<bool>,
+    pub physics_area: Option<bool>,
+    pub particle: Option<bool>,
+}
+
+fn apply_overlay_visibility_overrides(
+    mut overrides: ResMut<OverlayVisibilityOverrides>,
+    mut tile_overlay_state: ResMut<TileOverlayState>,
+    mut sdf_overlay_state: ResMut<SdfOverlayState>,
+    mut physics_overlay_state: ResMut<PhysicsAreaOverlayState>,
+    mut particle_overlay_state: ResMut<ParticleOverlayState>,
+) {
+    if let Some(v) = overrides.chunk.take() {
+        tile_overlay_state.enabled = v;
+    }
+    if let Some(v) = overrides.sdf.take() {
+        sdf_overlay_state.enabled = v;
+    }
+    if let Some(v) = overrides.physics_area.take() {
+        physics_overlay_state.enabled = v;
+    }
+    if let Some(v) = overrides.particle.take() {
+        particle_overlay_state.enabled = v;
     }
 }
 

@@ -33,9 +33,10 @@ struct ComposeParams {
 
 @group(0) @binding(0) var<uniform> view:    View;
 @group(0) @binding(1) var<uniform> params:  ComposeParams;
-@group(0) @binding(2) var          near_tex: texture_2d<u32>;
-@group(0) @binding(3) var          far_tex:  texture_2d<u32>;
-@group(0) @binding(4) var          back_tex: texture_2d<u32>;
+@group(0) @binding(2) var          near_base_tex: texture_2d<u32>;
+@group(0) @binding(3) var          near_override_tex: texture_2d<u32>;
+@group(0) @binding(4) var          far_tex:  texture_2d<u32>;
+@group(0) @binding(5) var          back_tex: texture_2d<u32>;
 
 // ── Vertex (full-screen quad) ─────────────────────────────────────────────────
 
@@ -296,18 +297,32 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     color = layer_over(color, far_layer.rgb, far_layer.a);
 
     // Near overlays Far when enabled.
-    let near_logical = world_cell - vec2<i32>(params.near_origin_x, params.near_origin_y);
-    let near_size = vec2<i32>(textureDimensions(near_tex));
-    if params.near_enabled != 0u
-        && near_logical.x >= 0 && near_logical.y >= 0
-        && near_logical.x < near_size.x && near_logical.y < near_size.y {
-        let tc = vec2<i32>(
-            positive_mod(near_logical.x + params.ring_offset_x, near_size.x),
-            positive_mod(near_logical.y + params.ring_offset_y, near_size.y),
-        );
-        let near_material = textureLoad(near_tex, tc, 0).r;
-        if near_material != 0u {
-            color = terrain_color(near_material, dot.x, dot.y, params.palette_seed);
+    if params.near_enabled != 0u {
+        let near_logical = world_cell - vec2<i32>(params.near_origin_x, params.near_origin_y);
+        let near_size = vec2<i32>(textureDimensions(near_base_tex));
+        if near_logical.x >= 0 && near_logical.y >= 0
+            && near_logical.x < near_size.x && near_logical.y < near_size.y {
+            let tc = vec2<i32>(
+                positive_mod(near_logical.x + params.ring_offset_x, near_size.x),
+                positive_mod(near_logical.y + params.ring_offset_y, near_size.y),
+            );
+            let near_override = textureLoad(near_override_tex, tc, 0).r;
+            let near_material = select(
+                textureLoad(near_base_tex, tc, 0).r,
+                near_override,
+                near_override != 65535u,
+            );
+            let has_override = near_override != 65535u;
+            // Priority:
+            // 1) override exists: authoritative for solid; empty keeps Back/Far visible.
+            // 2) no override: draw base Near only when solid; empty keeps Back/Far.
+            if has_override {
+                if near_material != 0u {
+                    color = terrain_color(near_material, dot.x, dot.y, params.palette_seed);
+                }
+            } else if near_material != 0u {
+                color = terrain_color(near_material, dot.x, dot.y, params.palette_seed);
+            }
         }
     }
 

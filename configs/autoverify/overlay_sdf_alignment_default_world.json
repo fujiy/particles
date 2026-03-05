@@ -1,0 +1,17 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "default_world",
+    "output_path": "artifacts/autoverify/overlay_sdf_alignment_default_world.png",
+    "warmup_frames": 180,
+    "max_wait_after_capture_frames": 240,
+    "run_simulation": false,
+    "overlay": {
+      "chunk": false,
+      "sdf": true,
+      "physics_area": false,
+      "particle": false
+    },
+    "camera_scale": 0.65
+  }
+}

@@ -602,12 +602,18 @@ pub(super) fn update_simulation_hud(
         .filter(|&&m| matches!(m, ParticleMaterial::SandGranular))
         .count();
     hud_texts.p1().0 = format!(
-        "Sim: {sim_status}\nTerrainGen/frame: {:>7} (d={:>4},{:>4} full={} r=0x{:02X})\nWater(L): {water_count}\nStone(S): {stone_solid_count}\nStone(G): {stone_granular_count}\nSoil(S): {soil_solid_count}\nSoil(G): {soil_granular_count}\nSand(S): {sand_solid_count}\nSand(G): {sand_granular_count}",
+        "Sim: {sim_status}\nTerrainGen/frame: {:>7} (d={:>4},{:>4} full={} r=0x{:02X})\nTerrainOvr/frame: runs={:>5} cells={:>6} pending={:>5} done={:>5.1}%\nTerrainOvr/total: runs={:>7} cells={:>8}\nWater(L): {water_count}\nStone(S): {stone_solid_count}\nStone(G): {stone_granular_count}\nSoil(S): {soil_solid_count}\nSoil(G): {soil_granular_count}\nSand(S): {sand_solid_count}\nSand(G): {sand_granular_count}",
         terrain_render_diagnostics.terrain_generation_eval_count_frame,
         terrain_render_diagnostics.terrain_generation_origin_delta_x_frame,
         terrain_render_diagnostics.terrain_generation_origin_delta_y_frame,
         u8::from(terrain_render_diagnostics.terrain_generation_full_refresh_frame),
         terrain_render_diagnostics.terrain_generation_full_refresh_reason_bits,
+        terrain_render_diagnostics.terrain_override_runs_frame,
+        terrain_render_diagnostics.terrain_override_cells_frame,
+        terrain_render_diagnostics.terrain_override_pending_runs,
+        terrain_render_diagnostics.terrain_override_budget_completion_frame * 100.0,
+        terrain_render_diagnostics.terrain_override_runs_total,
+        terrain_render_diagnostics.terrain_override_cells_total,
     );
 }
 

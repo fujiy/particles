@@ -1,0 +1,17 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "default_world",
+    "output_path": "artifacts/autoverify/terrain_edit_delete_tool.png",
+    "warmup_frames": 45,
+    "max_wait_after_capture_frames": 240,
+    "run_simulation": false,
+    "terrain_ops": [
+      {
+        "op": "delete_rect",
+        "min_cell": [-8, -2],
+        "max_cell": [8, 2]
+      }
+    ]
+  }
+}

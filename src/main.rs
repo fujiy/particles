@@ -6,12 +6,14 @@ use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_inspector_egui::bevy_egui::EguiPlugin;
 use particles::camera_controller::CameraControllerPlugin;
 use particles::interface::InterfacePlugin;
-use particles::overlay::OverlayPlugin;
+use particles::overlay::{OverlayPlugin, OverlayVisibilityOverrides};
 use particles::params::{ActivePhysicsParams, ParamsPlugin};
 use particles::physics::PhysicsPlugin;
 use particles::physics::gpu_mpm::GpuMpmPlugin;
 use particles::physics::gpu_mpm::gpu_resources::{MpmGpuControl, world_grid_layout};
 use particles::physics::gpu_mpm::sync::apply_gpu_readback;
+use particles::physics::material::{DEFAULT_MATERIAL_PARAMS, terrain_boundary_radius_m};
+use particles::physics::save_load;
 use particles::physics::scenario::{default_scenario_spec_by_name, evaluate_scenario_state};
 use particles::physics::solver::mpm_water::is_mpm_managed_particle;
 use particles::physics::state::{ReplayLoadScenarioRequest, ReplayState, SimulationState};
@@ -20,7 +22,9 @@ use particles::physics::world::continuum::{
 };
 use particles::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use particles::physics::world::particle::{ParticleMaterial, ParticleWorld};
-use particles::physics::world::terrain::{CELL_SIZE_M, TerrainCell, TerrainWorld, world_to_cell};
+use particles::physics::world::terrain::{
+    CELL_SIZE_M, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,
+};
 use particles::render::{TerrainGpuPlugin, TerrainRenderDiagnostics, WaterDotGpuPlugin};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -89,12 +93,63 @@ struct ScreenshotAutoVerifyConfig {
     enabled: Option<bool>,
     scenario_name: Option<String>,
     output_path: Option<String>,
+    report_path: Option<String>,
     warmup_frames: Option<u32>,
     max_wait_after_capture_frames: Option<u32>,
     run_simulation: Option<bool>,
     camera_scale: Option<f32>,
     camera_center_x: Option<f32>,
     camera_center_y: Option<f32>,
+    overlay: Option<ScreenshotOverlayConfig>,
+    #[serde(default)]
+    terrain_ops: Vec<TerrainAutoVerifyOpConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct ScreenshotOverlayConfig {
+    chunk: Option<bool>,
+    sdf: Option<bool>,
+    physics_area: Option<bool>,
+    particle: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+enum TerrainAutoVerifyOpConfig {
+    DeleteRect {
+        min_cell: [i32; 2],
+        max_cell: [i32; 2],
+    },
+    SolidRect {
+        min_cell: [i32; 2],
+        max_cell: [i32; 2],
+        material: String,
+    },
+    SaveSnapshot {
+        path: String,
+    },
+    LoadSnapshot {
+        path: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+enum TerrainAutoVerifyOp {
+    DeleteRect {
+        min_cell: IVec2,
+        max_cell: IVec2,
+    },
+    SolidRect {
+        min_cell: IVec2,
+        max_cell: IVec2,
+        material: TerrainMaterial,
+    },
+    SaveSnapshot {
+        path: String,
+    },
+    LoadSnapshot {
+        path: String,
+    },
 }
 
 impl MpmAutoVerifyState {
@@ -195,6 +250,7 @@ struct ScreenshotVerifyState {
     skip_scenario_load: bool,
     run_simulation: bool,
     output_path: String,
+    report_path: String,
     warmup_frames: u32,
     max_wait_after_capture_frames: u32,
     scenario_requested: bool,
@@ -204,6 +260,18 @@ struct ScreenshotVerifyState {
     camera_scale: Option<f32>,
     camera_center: Option<Vec2>,
     camera_scale_applied: bool,
+    overlay_chunk: Option<bool>,
+    overlay_sdf: Option<bool>,
+    overlay_physics_area: Option<bool>,
+    overlay_particle: Option<bool>,
+    overlay_applied: bool,
+    terrain_ops: Vec<TerrainAutoVerifyOp>,
+    terrain_ops_applied: bool,
+    terrain_override_payload_runs_total: u64,
+    terrain_override_expanded_cells_total: u64,
+    terrain_override_pending_runs_max: u32,
+    terrain_override_budget_completion_sum: f64,
+    terrain_override_budget_completion_samples: u32,
 }
 
 impl ScreenshotVerifyState {
@@ -225,6 +293,16 @@ impl ScreenshotVerifyState {
             .or_else(|| std::env::var("PARTICLES_AUTOVERIFY_SCREENSHOT_OUT").ok())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "artifacts/water_drop_gpu_render.png".to_string());
+        let report_path = config
+            .report_path
+            .clone()
+            .or_else(|| std::env::var("PARTICLES_AUTOVERIFY_SCREENSHOT_REPORT_OUT").ok())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| {
+                let mut report = Path::new(&output_path).to_path_buf();
+                report.set_extension("json");
+                report.to_string_lossy().to_string()
+            });
         let warmup_frames = config
             .warmup_frames
             .or_else(|| {
@@ -271,12 +349,18 @@ impl ScreenshotVerifyState {
             (Some(x), Some(y)) if x.is_finite() && y.is_finite() => Some(Vec2::new(x, y)),
             _ => None,
         };
+        let terrain_ops = parse_terrain_autoverify_ops(&config.terrain_ops);
+        let overlay_chunk = config.overlay.as_ref().and_then(|o| o.chunk);
+        let overlay_sdf = config.overlay.as_ref().and_then(|o| o.sdf);
+        let overlay_physics_area = config.overlay.as_ref().and_then(|o| o.physics_area);
+        let overlay_particle = config.overlay.as_ref().and_then(|o| o.particle);
         Self {
             enabled,
             scenario_name,
             skip_scenario_load,
             run_simulation,
             output_path,
+            report_path,
             warmup_frames,
             max_wait_after_capture_frames,
             scenario_requested: false,
@@ -286,6 +370,18 @@ impl ScreenshotVerifyState {
             camera_scale,
             camera_center,
             camera_scale_applied: false,
+            overlay_chunk,
+            overlay_sdf,
+            overlay_physics_area,
+            overlay_particle,
+            overlay_applied: false,
+            terrain_ops,
+            terrain_ops_applied: false,
+            terrain_override_payload_runs_total: 0,
+            terrain_override_expanded_cells_total: 0,
+            terrain_override_pending_runs_max: 0,
+            terrain_override_budget_completion_sum: 0.0,
+            terrain_override_budget_completion_samples: 0,
         }
     }
 }
@@ -334,6 +430,18 @@ struct MpmAutoVerifyReport {
     granular_particle_count_diag: usize,
     granular_invalid_f_count_diag: usize,
     failed_assertions: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ScreenshotAutoVerifyReport {
+    scenario: String,
+    screenshot_path: String,
+    terrain_override_payload_runs_total: u64,
+    terrain_override_expanded_cells_total: u64,
+    terrain_override_pending_runs_max: u32,
+    terrain_override_budget_completion_avg: f32,
+    terrain_override_budget_completion_avg_percent: f32,
+    terrain_override_budget_completion_sampled_frames: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -572,6 +680,57 @@ fn parse_particle_material_name(raw: &str) -> Option<ParticleMaterial> {
         "sandgranular" | "sand_granular" | "sand" => Some(ParticleMaterial::SandGranular),
         _ => None,
     }
+}
+
+fn parse_terrain_material_name(raw: &str) -> Option<TerrainMaterial> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "stone" | "rock" => Some(TerrainMaterial::Stone),
+        "soil" | "dirt" => Some(TerrainMaterial::Soil),
+        "sand" => Some(TerrainMaterial::Sand),
+        _ => None,
+    }
+}
+
+fn parse_terrain_autoverify_ops(
+    config_ops: &[TerrainAutoVerifyOpConfig],
+) -> Vec<TerrainAutoVerifyOp> {
+    let mut ops = Vec::new();
+    for op in config_ops {
+        match op {
+            TerrainAutoVerifyOpConfig::DeleteRect { min_cell, max_cell } => {
+                ops.push(TerrainAutoVerifyOp::DeleteRect {
+                    min_cell: IVec2::new(min_cell[0], min_cell[1]),
+                    max_cell: IVec2::new(max_cell[0], max_cell[1]),
+                });
+            }
+            TerrainAutoVerifyOpConfig::SolidRect {
+                min_cell,
+                max_cell,
+                material,
+            } => {
+                let Some(parsed) = parse_terrain_material_name(material) else {
+                    bevy::log::warn!(
+                        "[autoverify] unknown terrain material '{}'; skipping SolidRect op",
+                        material
+                    );
+                    continue;
+                };
+                ops.push(TerrainAutoVerifyOp::SolidRect {
+                    min_cell: IVec2::new(min_cell[0], min_cell[1]),
+                    max_cell: IVec2::new(max_cell[0], max_cell[1]),
+                    material: parsed,
+                });
+            }
+            TerrainAutoVerifyOpConfig::SaveSnapshot { path } => {
+                ops.push(TerrainAutoVerifyOp::SaveSnapshot { path: path.clone() });
+            }
+            TerrainAutoVerifyOpConfig::LoadSnapshot { path } => {
+                ops.push(TerrainAutoVerifyOp::LoadSnapshot { path: path.clone() });
+            }
+        }
+    }
+    ops
 }
 
 fn collect_tracked_positions(
@@ -999,6 +1158,51 @@ fn run_mpm_autoverify(
     autoverify_hard_exit(&mut exit_writer, if passed { 0 } else { 6 });
 }
 
+fn apply_terrain_autoverify_ops(
+    ops: &[TerrainAutoVerifyOp],
+    terrain_world: &mut TerrainWorld,
+    particle_world: &mut ParticleWorld,
+    object_world: &mut ObjectWorld,
+    sim_state: &mut SimulationState,
+) -> Result<(), String> {
+    let mut terrain_cell_changed = false;
+    for op in ops {
+        match op {
+            TerrainAutoVerifyOp::DeleteRect { min_cell, max_cell } => {
+                terrain_world.fill_rect(*min_cell, *max_cell, TerrainCell::Empty);
+                terrain_cell_changed = true;
+            }
+            TerrainAutoVerifyOp::SolidRect {
+                min_cell,
+                max_cell,
+                material,
+            } => {
+                terrain_world.fill_rect(*min_cell, *max_cell, TerrainCell::solid(*material));
+                terrain_cell_changed = true;
+            }
+            TerrainAutoVerifyOp::SaveSnapshot { path } => save_load::save_to_path(
+                path,
+                terrain_world,
+                particle_world,
+                object_world,
+                sim_state,
+            )?,
+            TerrainAutoVerifyOp::LoadSnapshot { path } => save_load::load_from_path(
+                path,
+                terrain_world,
+                particle_world,
+                object_world,
+                sim_state,
+            )?,
+        }
+    }
+    if terrain_cell_changed {
+        terrain_world
+            .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
+    }
+    Ok(())
+}
+
 fn run_screenshot_autoverify(
     mut commands: Commands,
     mut state: ResMut<ScreenshotVerifyState>,
@@ -1006,6 +1210,12 @@ fn run_screenshot_autoverify(
     mut scenario_writer: MessageWriter<ReplayLoadScenarioRequest>,
     mut exit_writer: MessageWriter<bevy::app::AppExit>,
     mut camera_query: Query<(&mut Projection, &mut Transform), With<Camera2d>>,
+    mut terrain_world: ResMut<TerrainWorld>,
+    mut particle_world: ResMut<ParticleWorld>,
+    mut object_world: ResMut<ObjectWorld>,
+    mut overlay_visibility_overrides: ResMut<OverlayVisibilityOverrides>,
+    replay_state: Res<ReplayState>,
+    terrain_render_diagnostics: Res<TerrainRenderDiagnostics>,
 ) {
     if !state.enabled {
         return;
@@ -1015,19 +1225,75 @@ fn run_screenshot_autoverify(
         if let Some(parent) = Path::new(&state.output_path).parent() {
             let _ = fs::create_dir_all(parent);
         }
+        if let Some(parent) = Path::new(&state.report_path).parent() {
+            let _ = fs::create_dir_all(parent);
+        }
         let _ = fs::remove_file(&state.output_path);
+        let _ = fs::remove_file(&state.report_path);
         if !state.skip_scenario_load {
             scenario_writer.write(ReplayLoadScenarioRequest {
                 scenario_name: state.scenario_name.clone(),
             });
         }
+        state.terrain_override_payload_runs_total = 0;
+        state.terrain_override_expanded_cells_total = 0;
+        state.terrain_override_pending_runs_max = 0;
+        state.terrain_override_budget_completion_sum = 0.0;
+        state.terrain_override_budget_completion_samples = 0;
+        state.overlay_applied = false;
         sim_state.running = state.run_simulation;
         sim_state.step_once = false;
         state.scenario_requested = true;
         return;
     }
 
+    if !state.skip_scenario_load
+        && replay_state.scenario_name.as_deref() != Some(state.scenario_name.as_str())
+    {
+        return;
+    }
+
+    if !state.terrain_ops_applied {
+        if let Err(error) = apply_terrain_autoverify_ops(
+            &state.terrain_ops,
+            &mut terrain_world,
+            &mut particle_world,
+            &mut object_world,
+            &mut sim_state,
+        ) {
+            bevy::log::error!("[autoverify] failed to apply terrain ops: {error}");
+            autoverify_hard_exit(&mut exit_writer, 8);
+        }
+        state.terrain_ops_applied = true;
+    }
+
+    if !state.overlay_applied {
+        overlay_visibility_overrides.chunk = state.overlay_chunk;
+        overlay_visibility_overrides.sdf = state.overlay_sdf;
+        overlay_visibility_overrides.physics_area = state.overlay_physics_area;
+        overlay_visibility_overrides.particle = state.overlay_particle;
+        state.overlay_applied = true;
+    }
+
     if !state.capture_requested {
+        state.terrain_override_payload_runs_total = state
+            .terrain_override_payload_runs_total
+            .saturating_add(terrain_render_diagnostics.terrain_override_runs_frame as u64);
+        state.terrain_override_expanded_cells_total = state
+            .terrain_override_expanded_cells_total
+            .saturating_add(terrain_render_diagnostics.terrain_override_cells_frame as u64);
+        state.terrain_override_pending_runs_max = state
+            .terrain_override_pending_runs_max
+            .max(terrain_render_diagnostics.terrain_override_pending_runs);
+        let frame_has_override_work = terrain_render_diagnostics.terrain_override_runs_frame > 0
+            || terrain_render_diagnostics.terrain_override_pending_runs > 0;
+        if frame_has_override_work {
+            state.terrain_override_budget_completion_sum +=
+                terrain_render_diagnostics.terrain_override_budget_completion_frame as f64;
+            state.terrain_override_budget_completion_samples = state
+                .terrain_override_budget_completion_samples
+                .saturating_add(1);
+        }
         // Keep simulation advancing even if scenario load reset it to paused.
         sim_state.running = state.run_simulation;
         sim_state.step_once = false;
@@ -1064,6 +1330,24 @@ fn run_screenshot_autoverify(
         .map(|meta| meta.len() > 0)
         .unwrap_or(false);
     if ready {
+        let budget_completion_avg = if state.terrain_override_budget_completion_samples == 0 {
+            1.0
+        } else {
+            (state.terrain_override_budget_completion_sum
+                / state.terrain_override_budget_completion_samples as f64) as f32
+        };
+        let report = ScreenshotAutoVerifyReport {
+            scenario: state.scenario_name.clone(),
+            screenshot_path: state.output_path.clone(),
+            terrain_override_payload_runs_total: state.terrain_override_payload_runs_total,
+            terrain_override_expanded_cells_total: state.terrain_override_expanded_cells_total,
+            terrain_override_pending_runs_max: state.terrain_override_pending_runs_max,
+            terrain_override_budget_completion_avg: budget_completion_avg,
+            terrain_override_budget_completion_avg_percent: budget_completion_avg * 100.0,
+            terrain_override_budget_completion_sampled_frames: state
+                .terrain_override_budget_completion_samples,
+        };
+        write_report(&state.report_path, &report);
         state.enabled = false;
         autoverify_hard_exit(&mut exit_writer, 0);
     }

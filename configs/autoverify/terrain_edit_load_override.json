@@ -1,0 +1,31 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "default_world",
+    "output_path": "artifacts/autoverify/terrain_edit_load_override.png",
+    "warmup_frames": 45,
+    "max_wait_after_capture_frames": 240,
+    "run_simulation": false,
+    "terrain_ops": [
+      {
+        "op": "solid_rect",
+        "min_cell": [-6, 9],
+        "max_cell": [6, 13],
+        "material": "soil"
+      },
+      {
+        "op": "save_snapshot",
+        "path": "/tmp/particles_terrain_edit_load_override.json"
+      },
+      {
+        "op": "delete_rect",
+        "min_cell": [-6, 9],
+        "max_cell": [6, 13]
+      },
+      {
+        "op": "load_snapshot",
+        "path": "/tmp/particles_terrain_edit_load_override.json"
+      }
+    ]
+  }
+}

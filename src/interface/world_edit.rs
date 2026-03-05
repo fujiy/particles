@@ -4,6 +4,9 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::*;
+use crate::render::TerrainGeneratedChunkCache;
+
+const TOOL_PREFETCH_RADIUS_CHUNKS: i32 = 1;
 
 pub(super) fn handle_world_interactions(
     time: Res<Time>,
@@ -18,7 +21,9 @@ pub(super) fn handle_world_interactions(
     save_load_ui_state: Res<SaveLoadUiState>,
     mut particle_world: ResMut<ParticleWorld>,
     mut terrain_world: ResMut<TerrainWorld>,
+    mut generated_chunk_cache: ResMut<TerrainGeneratedChunkCache>,
     mut object_world: ResMut<ObjectWorld>,
+    mut prefetched_tool: Local<Option<WorldTool>>,
 ) {
     if save_load_ui_state.mode.is_some() {
         let selected_tool = interaction_state.selected_tool;
@@ -67,6 +72,23 @@ pub(super) fn handle_world_interactions(
         .any(|interaction| *interaction != Interaction::None);
     let cursor_world = cursor_world_position(&windows, &camera_query);
     let selected_tool = interaction_state.selected_tool;
+    if selected_tool.is_none() {
+        *prefetched_tool = None;
+    }
+    if let (Some(tool), Some(cursor_world)) = (selected_tool, cursor_world) {
+        if Some(tool) != *prefetched_tool {
+            if tool_uses_generated_chunk_data(tool) {
+                let center_cell = world_to_cell(cursor_world);
+                let center_chunk = IVec2::new(
+                    center_cell.x.div_euclid(CHUNK_SIZE_I32),
+                    center_cell.y.div_euclid(CHUNK_SIZE_I32),
+                );
+                generated_chunk_cache
+                    .enqueue_prefetch_square(center_chunk, TOOL_PREFETCH_RADIUS_CHUNKS);
+            }
+            *prefetched_tool = Some(tool);
+        }
+    }
 
     if !left_pressed || blocked_by_pan || blocked_by_ui || cursor_world.is_none() {
         finalize_stone_stroke(
@@ -102,11 +124,6 @@ pub(super) fn handle_world_interactions(
             let mut spawn_cells = Vec::new();
             let mut last_cell = interaction_state.last_water_spawn_cell;
             stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
-                let chunk = IVec2::new(
-                    cell.x.div_euclid(CHUNK_SIZE_I32),
-                    cell.y.div_euclid(CHUNK_SIZE_I32),
-                );
-                terrain_world.ensure_chunk_loaded(chunk);
                 if last_cell != Some(cell) {
                     spawn_cells.push(cell);
                     last_cell = Some(cell);
@@ -129,37 +146,38 @@ pub(super) fn handle_world_interactions(
             interaction_state.last_water_spawn_cell = None;
             interaction_state.last_granular_spawn_cell = None;
             let terrain_material = tool.terrain_material().unwrap_or(TerrainMaterial::Stone);
-            interaction_state.stone_stroke.active = true;
+            interaction_state.stone_stroke.active = false;
+            interaction_state.stone_stroke.generated_cells.clear();
+            interaction_state.stone_stroke.candidate_cells.clear();
             stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
                 let chunk = IVec2::new(
                     cell.x.div_euclid(CHUNK_SIZE_I32),
                     cell.y.div_euclid(CHUNK_SIZE_I32),
                 );
-                terrain_world.ensure_chunk_loaded(chunk);
-                interaction_state.stone_stroke.generated_cells.insert(cell);
+                if !ensure_chunk_ready_for_edit(
+                    &mut terrain_world,
+                    &mut generated_chunk_cache,
+                    chunk,
+                ) {
+                    return;
+                }
+                terrain_changed |=
+                    terrain_world.set_cell(cell, TerrainCell::solid(terrain_material));
                 particle_world.wake_particles_in_radius(
                     cell_to_world_center(cell),
                     solver_params.wake_radius_m,
                 );
             });
-            terrain_changed |= update_stone_stroke_partition(
-                &mut interaction_state.stone_stroke,
-                &mut terrain_world,
-                terrain_material,
-            );
         }
         Some(tool) if tool.is_granular() => {
             interaction_state.last_water_spawn_cell = None;
-            interaction_state.stone_stroke.active = true;
+            interaction_state.stone_stroke.active = false;
+            interaction_state.stone_stroke.generated_cells.clear();
+            interaction_state.stone_stroke.candidate_cells.clear();
             if let Some(material) = tool.material() {
                 let mut spawn_cells = Vec::new();
                 let mut last_cell = interaction_state.last_granular_spawn_cell;
                 stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
-                    let chunk = IVec2::new(
-                        cell.x.div_euclid(CHUNK_SIZE_I32),
-                        cell.y.div_euclid(CHUNK_SIZE_I32),
-                    );
-                    terrain_world.ensure_chunk_loaded(chunk);
                     if last_cell != Some(cell) {
                         spawn_cells.push(cell);
                         last_cell = Some(cell);
@@ -191,28 +209,31 @@ pub(super) fn handle_world_interactions(
             );
             let mut had_particle_removal = false;
             let mut removed_terrain_cells = HashSet::new();
-            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
+            stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
+                let point = cell_to_world_center(cell);
                 let removal = particle_world
                     .remove_particles_in_radius_with_map(point, TOOL_DELETE_BRUSH_RADIUS_M);
                 if removal.removed_count > 0 {
                     had_particle_removal = true;
                     object_world.apply_particle_remap(&removal.old_to_new, particle_world.masses());
                 }
-                removed_terrain_cells.extend(remove_terrain_cells_in_radius(
+                let chunk = IVec2::new(
+                    cell.x.div_euclid(CHUNK_SIZE_I32),
+                    cell.y.div_euclid(CHUNK_SIZE_I32),
+                );
+                if !ensure_chunk_ready_for_edit(
                     &mut terrain_world,
-                    point,
-                    TOOL_DELETE_BRUSH_RADIUS_M,
-                ));
+                    &mut generated_chunk_cache,
+                    chunk,
+                ) {
+                    return;
+                }
+                if terrain_world.set_cell(cell, TerrainCell::Empty) {
+                    removed_terrain_cells.insert(cell);
+                }
                 particle_world.wake_particles_in_radius(point, solver_params.wake_radius_m);
             });
             terrain_changed |= !removed_terrain_cells.is_empty();
-            if !removed_terrain_cells.is_empty() {
-                terrain_changed |= particle_world.detach_terrain_components_after_cell_removal(
-                    &mut terrain_world,
-                    &mut object_world,
-                    &removed_terrain_cells,
-                );
-            }
             if had_particle_removal {
                 particle_world.postprocess_objects_after_topology_edit(&mut object_world);
             }
@@ -235,6 +256,7 @@ pub(super) fn handle_world_interactions(
                 detached_particles.extend(fractured);
                 removed_terrain_cells.extend(break_terrain_solids_in_radius(
                     &mut terrain_world,
+                    &mut generated_chunk_cache,
                     &mut particle_world,
                     point,
                     TOOL_BREAK_BRUSH_RADIUS_M,
@@ -283,6 +305,42 @@ pub(super) fn handle_world_interactions(
     }
 
     interaction_state.last_drag_world = Some(cursor_world);
+}
+
+pub(super) fn draw_world_tool_hover_highlight(
+    mut gizmos: Gizmos,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    interaction_state: Res<WorldInteractionState>,
+    save_load_ui_state: Res<SaveLoadUiState>,
+) {
+    if save_load_ui_state.mode.is_some() {
+        return;
+    }
+    let Some(tool) = interaction_state.selected_tool else {
+        return;
+    };
+    if !tool.uses_cell_hover_highlight() {
+        return;
+    }
+    let Some(cursor_world) = cursor_world_position(&windows, &camera_query) else {
+        return;
+    };
+
+    let cell = world_to_cell(cursor_world);
+    let center = cell_to_world_center(cell);
+    let half = CELL_SIZE_M * 0.5;
+    let min = center - Vec2::splat(half);
+    let max = center + Vec2::splat(half);
+    let color = match tool {
+        WorldTool::Delete => TOOL_HOVER_HIGHLIGHT_DELETE_COLOR,
+        WorldTool::Break => TOOL_HOVER_HIGHLIGHT_BREAK_COLOR,
+        _ => TOOL_HOVER_HIGHLIGHT_TERRAIN_COLOR,
+    };
+    gizmos.line_2d(Vec2::new(min.x, min.y), Vec2::new(max.x, min.y), color);
+    gizmos.line_2d(Vec2::new(max.x, min.y), Vec2::new(max.x, max.y), color);
+    gizmos.line_2d(Vec2::new(max.x, max.y), Vec2::new(min.x, max.y), color);
+    gizmos.line_2d(Vec2::new(min.x, max.y), Vec2::new(min.x, min.y), color);
 }
 
 fn update_stone_stroke_partition(
@@ -479,38 +537,30 @@ fn append_4_connected_segment(from: IVec2, to: IVec2, mut emit: impl FnMut(IVec2
     }
 }
 
-fn remove_terrain_cells_in_radius(
+fn tool_uses_generated_chunk_data(tool: WorldTool) -> bool {
+    tool.terrain_material().is_some() || matches!(tool, WorldTool::Delete | WorldTool::Break)
+}
+
+fn ensure_chunk_ready_for_edit(
     terrain_world: &mut TerrainWorld,
-    center: Vec2,
-    radius: f32,
-) -> HashSet<IVec2> {
-    let min_cell = world_to_cell(center - Vec2::splat(radius));
-    let max_cell = world_to_cell(center + Vec2::splat(radius));
-    let radius2 = radius * radius;
-    let mut removed = HashSet::new();
-
-    for y in min_cell.y..=max_cell.y {
-        for x in min_cell.x..=max_cell.x {
-            let cell = IVec2::new(x, y);
-            let chunk = IVec2::new(
-                cell.x.div_euclid(CHUNK_SIZE_I32),
-                cell.y.div_euclid(CHUNK_SIZE_I32),
-            );
-            terrain_world.ensure_chunk_loaded(chunk);
-            if cell_to_world_center(cell).distance_squared(center) > radius2 {
-                continue;
-            }
-            if terrain_world.set_cell(cell, TerrainCell::Empty) {
-                removed.insert(cell);
-            }
-        }
+    generated_chunk_cache: &mut TerrainGeneratedChunkCache,
+    chunk_coord: IVec2,
+) -> bool {
+    if !terrain_world.generation_enabled() {
+        terrain_world.ensure_chunk_loaded(chunk_coord);
+        return true;
     }
-
-    removed
+    if let Some(material_ids) = generated_chunk_cache.material_ids_for_chunk(chunk_coord) {
+        terrain_world.load_generated_chunk_from_material_ids(chunk_coord, material_ids);
+        return true;
+    }
+    generated_chunk_cache.enqueue_chunk_request(chunk_coord);
+    false
 }
 
 fn break_terrain_solids_in_radius(
     terrain_world: &mut TerrainWorld,
+    generated_chunk_cache: &mut TerrainGeneratedChunkCache,
     particle_world: &mut ParticleWorld,
     center: Vec2,
     radius: f32,
@@ -520,6 +570,8 @@ fn break_terrain_solids_in_radius(
     let radius2 = radius * radius;
     let mut removed = HashSet::new();
     let mut spawn_cells_by_material = HashMap::<ParticleMaterial, Vec<IVec2>>::new();
+    let mut ready_chunks = HashSet::new();
+    let mut missing_chunks = HashSet::new();
 
     for y in min_cell.y..=max_cell.y {
         for x in min_cell.x..=max_cell.x {
@@ -528,7 +580,17 @@ fn break_terrain_solids_in_radius(
                 cell.x.div_euclid(CHUNK_SIZE_I32),
                 cell.y.div_euclid(CHUNK_SIZE_I32),
             );
-            terrain_world.ensure_chunk_loaded(chunk);
+            if !ready_chunks.contains(&chunk) {
+                if missing_chunks.contains(&chunk) {
+                    continue;
+                }
+                if ensure_chunk_ready_for_edit(terrain_world, generated_chunk_cache, chunk) {
+                    ready_chunks.insert(chunk);
+                } else {
+                    missing_chunks.insert(chunk);
+                    continue;
+                }
+            }
             if cell_to_world_center(cell).distance_squared(center) > radius2 {
                 continue;
             }

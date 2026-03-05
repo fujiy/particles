@@ -932,9 +932,9 @@ impl Plugin for WaterDotGpuPlugin {
             .add_render_graph_edges(
                 Core2d,
                 (
-                    Node2d::MainTransparentPass,
+                    Node2d::StartMainPass,
                     WaterDotGpuLabel,
-                    Node2d::EndMainPass,
+                    Node2d::MainTransparentPass,
                 ),
             );
 

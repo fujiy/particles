@@ -1,4 +1,7 @@
+use std::collections::HashSet;
+
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 
 use super::*;
 use crate::physics::gpu_mpm::gpu_resources::world_grid_layout;
@@ -10,20 +13,73 @@ pub(super) struct SdfOverlayNegativeFillCell;
 pub(super) fn draw_tile_overlay(
     mut gizmos: Gizmos,
     overlay_state: Res<TileOverlayState>,
-    render_diagnostics: Res<TerrainRenderDiagnostics>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    terrain_world: Res<TerrainWorld>,
+    generated_chunk_cache: Res<TerrainGeneratedChunkCache>,
 ) {
     if !overlay_state.enabled {
         return;
     }
 
-    for tile in &render_diagnostics.visible_tiles {
-        let color = if tile.span_chunks <= 1 {
-            GRID_FULL_TILE_COLOR
-        } else {
-            GRID_LOD_CHUNK_COLOR
-        };
-        draw_chunk_rect_outline(&mut gizmos, tile.origin_chunk, tile.span_chunks, color);
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let Some((camera, camera_transform)) = camera_query.iter().next() else {
+        return;
+    };
+    let Some(world_minmax) = camera_view_world_bounds(window, camera, camera_transform) else {
+        return;
+    };
+    let (world_min, world_max) = world_minmax;
+    let min_chunk = IVec2::new(
+        (world_min.x / CHUNK_WORLD_SIZE_M).floor() as i32,
+        (world_min.y / CHUNK_WORLD_SIZE_M).floor() as i32,
+    );
+    let max_chunk = IVec2::new(
+        (world_max.x / CHUNK_WORLD_SIZE_M).floor() as i32,
+        (world_max.y / CHUNK_WORLD_SIZE_M).floor() as i32,
+    );
+
+    let mut visible_chunks = HashSet::new();
+    for y in min_chunk.y..=max_chunk.y {
+        for x in min_chunk.x..=max_chunk.x {
+            visible_chunks.insert(IVec2::new(x, y));
+        }
     }
+
+    for &chunk in &visible_chunks {
+        draw_chunk_outline(&mut gizmos, chunk, GRID_CHUNK_BOUNDARY_COLOR);
+    }
+
+    for chunk in generated_chunk_cache.cached_chunk_coords() {
+        if visible_chunks.contains(&chunk) {
+            draw_chunk_outline(&mut gizmos, chunk, GRID_CACHED_CHUNK_COLOR);
+        }
+    }
+
+    for chunk in terrain_world.override_chunk_coords() {
+        if visible_chunks.contains(&chunk) {
+            draw_chunk_outline(&mut gizmos, chunk, GRID_MODIFIED_CHUNK_COLOR);
+        }
+    }
+}
+
+fn camera_view_world_bounds(
+    window: &Window,
+    camera: &Camera,
+    camera_transform: &GlobalTransform,
+) -> Option<(Vec2, Vec2)> {
+    let world_a = camera
+        .viewport_to_world_2d(camera_transform, Vec2::new(0.0, 0.0))
+        .ok()?;
+    let world_b = camera
+        .viewport_to_world_2d(camera_transform, Vec2::new(window.width(), window.height()))
+        .ok()?;
+    Some((
+        Vec2::new(world_a.x.min(world_b.x), world_a.y.min(world_b.y)),
+        Vec2::new(world_a.x.max(world_b.x), world_a.y.max(world_b.y)),
+    ))
 }
 
 pub(super) fn draw_sdf_overlay(

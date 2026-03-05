@@ -86,6 +86,9 @@ const DRAG_VELOCITY_GAIN: f32 = 0.9;
 const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
 const TOOL_DELETE_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
 const TOOL_BREAK_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
+const TOOL_HOVER_HIGHLIGHT_TERRAIN_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
+const TOOL_HOVER_HIGHLIGHT_BREAK_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
+const TOOL_HOVER_HIGHLIGHT_DELETE_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
 const STONE_STROKE_NEIGHBOR_OFFSETS: [IVec2; 4] = [
     IVec2::new(1, 0),
     IVec2::new(-1, 0),
@@ -229,6 +232,10 @@ impl Plugin for InterfacePlugin {
                 )
                     .chain()
                     .in_set(SimUpdateSet::Ui),
+            )
+            .add_systems(
+                Update,
+                draw_world_tool_hover_highlight.in_set(SimUpdateSet::Overlay),
             );
     }
 }
@@ -315,6 +322,10 @@ impl WorldTool {
             self,
             Self::StoneGranular | Self::SoilGranular | Self::SandGranular
         )
+    }
+
+    fn uses_cell_hover_highlight(self) -> bool {
+        self.terrain_material().is_some() || matches!(self, Self::Break | Self::Delete)
     }
 }
 
@@ -493,7 +504,7 @@ use ui_systems::{
     update_test_assert_panel, update_world_tool_button_visuals, update_world_tool_tooltip,
 };
 
-use world_edit::handle_world_interactions;
+use world_edit::{draw_world_tool_hover_highlight, handle_world_interactions};
 
 fn toggle_button_bg(enabled: bool) -> BackgroundColor {
     if enabled {

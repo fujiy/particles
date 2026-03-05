@@ -1,0 +1,16 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "default_world",
+    "output_path": "artifacts/autoverify/overlay_visibility_default_world.png",
+    "warmup_frames": 45,
+    "max_wait_after_capture_frames": 240,
+    "run_simulation": false,
+    "overlay": {
+      "chunk": true,
+      "sdf": true,
+      "physics_area": true,
+      "particle": false
+    }
+  }
+}
