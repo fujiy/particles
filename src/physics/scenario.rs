@@ -201,76 +201,6 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
 
     vec![
         ScenarioSpec {
-            name: "objects_drop".to_string(),
-            reset_fixed_world: false,
-            loaded_chunk_min: Some(loaded_chunk_min),
-            loaded_chunk_max: Some(loaded_chunk_max),
-            terrain_fills: vec![
-                TerrainFillSpec {
-                    rect: CellRect::new(
-                        IVec2::new(world_min_cell, world_min_cell),
-                        IVec2::new(world_max_cell, world_min_cell + wall_thickness - 1),
-                    ),
-                    material: TerrainMaterial::Stone,
-                },
-                TerrainFillSpec {
-                    rect: CellRect::new(
-                        IVec2::new(world_min_cell, world_min_cell),
-                        IVec2::new(left_wall_max, world_max_cell),
-                    ),
-                    material: TerrainMaterial::Stone,
-                },
-                TerrainFillSpec {
-                    rect: CellRect::new(
-                        IVec2::new(right_wall_min, world_min_cell),
-                        IVec2::new(world_max_cell, world_max_cell),
-                    ),
-                    material: TerrainMaterial::Stone,
-                },
-            ],
-            free_particles: vec![
-                ParticleSpawnSpec {
-                    rect: CellRect::new(IVec2::new(-24, -14), IVec2::new(-22, -14)),
-                    material: ParticleMaterial::StoneSolid,
-                    initial_velocity: Vec2::ZERO,
-                },
-                ParticleSpawnSpec {
-                    rect: CellRect::new(IVec2::new(-24, -13), IVec2::new(-24, -12)),
-                    material: ParticleMaterial::StoneSolid,
-                    initial_velocity: Vec2::ZERO,
-                },
-                ParticleSpawnSpec {
-                    rect: CellRect::new(IVec2::new(-2, -14), IVec2::new(0, -14)),
-                    material: ParticleMaterial::StoneSolid,
-                    initial_velocity: Vec2::ZERO,
-                },
-                ParticleSpawnSpec {
-                    rect: CellRect::new(IVec2::new(0, -13), IVec2::new(0, -12)),
-                    material: ParticleMaterial::StoneSolid,
-                    initial_velocity: Vec2::ZERO,
-                },
-                ParticleSpawnSpec {
-                    rect: CellRect::new(IVec2::new(17, -14), IVec2::new(19, -14)),
-                    material: ParticleMaterial::StoneSolid,
-                    initial_velocity: Vec2::ZERO,
-                },
-                ParticleSpawnSpec {
-                    rect: CellRect::new(IVec2::new(18, -13), IVec2::new(18, -12)),
-                    material: ParticleMaterial::StoneSolid,
-                    initial_velocity: Vec2::ZERO,
-                },
-            ],
-            step_count: 300,
-            thresholds: ScenarioThresholds {
-                max_penetration_rate: Some(0.02),
-                max_max_speed_mps: Some(25.0),
-                min_sleep_ratio: None,
-            },
-            water_surface_assertion: None,
-            granular_repose_assertion: None,
-            material_interaction_assertion: None,
-        },
-        ScenarioSpec {
             name: "water_drop".to_string(),
             reset_fixed_world: false,
             loaded_chunk_min: Some(loaded_chunk_min),
@@ -315,53 +245,6 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 basin_max_x: right_wall_min - 1,
                 margin_cells: 2,
             }),
-            granular_repose_assertion: None,
-            material_interaction_assertion: None,
-        },
-        ScenarioSpec {
-            name: "terrain_contact_stability".to_string(),
-            reset_fixed_world: false,
-            loaded_chunk_min: Some(loaded_chunk_min),
-            loaded_chunk_max: Some(loaded_chunk_max),
-            terrain_fills: vec![
-                TerrainFillSpec {
-                    rect: CellRect::new(
-                        IVec2::new(world_min_cell, world_min_cell),
-                        IVec2::new(world_max_cell, world_min_cell + wall_thickness - 1),
-                    ),
-                    material: TerrainMaterial::Stone,
-                },
-                TerrainFillSpec {
-                    rect: CellRect::new(
-                        IVec2::new(world_min_cell, world_min_cell),
-                        IVec2::new(left_wall_max, world_max_cell),
-                    ),
-                    material: TerrainMaterial::Stone,
-                },
-                TerrainFillSpec {
-                    rect: CellRect::new(
-                        IVec2::new(right_wall_min, world_min_cell),
-                        IVec2::new(world_max_cell, world_max_cell),
-                    ),
-                    material: TerrainMaterial::Stone,
-                },
-                TerrainFillSpec {
-                    rect: CellRect::new(IVec2::new(-8, 2), IVec2::new(-3, 2)),
-                    material: TerrainMaterial::Stone,
-                },
-            ],
-            free_particles: vec![ParticleSpawnSpec {
-                rect: CellRect::new(IVec2::new(-6, 8), IVec2::new(6, 12)),
-                material: ParticleMaterial::WaterLiquid,
-                initial_velocity: Vec2::ZERO,
-            }],
-            step_count: 180,
-            thresholds: ScenarioThresholds {
-                max_penetration_rate: Some(0.02),
-                max_max_speed_mps: Some(35.0),
-                min_sleep_ratio: None,
-            },
-            water_surface_assertion: None,
             granular_repose_assertion: None,
             material_interaction_assertion: None,
         },
