@@ -16,7 +16,7 @@ use crate::physics::state::{
     ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationParallelSettings,
     SimulationState,
 };
-use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
+use crate::physics::world::object::ObjectWorld;
 use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,

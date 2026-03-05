@@ -11,7 +11,7 @@ use super::material::{
 };
 use super::solver::params_defaults::DEFAULT_SOLVER_PARAMS;
 use super::world::object::{
-    OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectPhysicsField, ObjectWorld,
+    OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectWorld,
 };
 use super::world::particle::{ParticleActivityState, ParticleWorld};
 use super::world::terrain::world_to_cell;
@@ -543,7 +543,6 @@ pub fn apply_scenario_spec(
     terrain: &mut TerrainWorld,
     particles: &mut ParticleWorld,
     objects: &mut ObjectWorld,
-    object_field: &mut ObjectPhysicsField,
 ) -> Result<(), String> {
     if spec.reset_fixed_world {
         terrain.set_generation_enabled(true);
@@ -582,21 +581,12 @@ pub fn apply_scenario_spec(
 
     objects.clear();
     for object_spawn in &spec.objects {
-        let indices = particles.spawn_material_particles_from_cells(
+        let _ = particles.spawn_material_particles_from_cells(
             &object_spawn.cells,
             object_spawn.material,
             object_spawn.initial_velocity,
         );
-        objects.create_object(
-            indices,
-            particles.positions(),
-            particles.masses(),
-            object_spawn.shape_stiffness_alpha,
-            object_spawn.shape_iters,
-        );
     }
-    object_field.clear();
-    objects.update_physics_field(particles.positions(), particles.masses(), object_field);
     Ok(())
 }
 
@@ -606,7 +596,6 @@ pub fn write_scenario_artifacts_for_state(
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
     objects: &ObjectWorld,
-    object_field: &ObjectPhysicsField,
 ) -> Result<PathBuf, String> {
     write_scenario_artifacts_for_state_with_options(
         spec,
@@ -614,7 +603,6 @@ pub fn write_scenario_artifacts_for_state(
         terrain,
         particles,
         objects,
-        object_field,
         ScenarioArtifactOptions::from_env(),
     )
 }
@@ -625,10 +613,9 @@ pub fn write_scenario_artifacts_for_state_with_options(
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
     objects: &ObjectWorld,
-    object_field: &ObjectPhysicsField,
     options: ScenarioArtifactOptions,
 ) -> Result<PathBuf, String> {
-    let metrics = compute_metrics(spec, step_count, terrain, particles, objects, object_field);
+    let metrics = compute_metrics(spec, step_count, terrain, particles, objects);
     let artifact_dir = artifact_dir_for_scenario(&spec.name);
     fs::create_dir_all(&artifact_dir)
         .map_err(|error| format!("failed to create artifact directory: {error}"))?;
@@ -668,9 +655,8 @@ pub fn evaluate_scenario_state(
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
     objects: &ObjectWorld,
-    object_field: &ObjectPhysicsField,
 ) -> (ScenarioMetrics, Vec<ScenarioAssertionResult>) {
-    let metrics = compute_metrics(spec, step_count, terrain, particles, objects, object_field);
+    let metrics = compute_metrics(spec, step_count, terrain, particles, objects);
     let assertions = evaluate_assertions_with_context(
         spec,
         step_count,
@@ -690,7 +676,6 @@ fn compute_metrics(
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
     objects: &ObjectWorld,
-    object_field: &ObjectPhysicsField,
 ) -> ScenarioMetrics {
     let mut max_speed = 0.0f32;
     for &velocity in &particles.vel {
@@ -705,8 +690,7 @@ fn compute_metrics(
         .count();
 
     let mut terrain_penetration_count = 0usize;
-    let mut object_penetration_count = 0usize;
-    let mut candidates = Vec::new();
+    let object_penetration_count = 0usize;
 
     for (index, &position) in particles.positions().iter().enumerate() {
         if let Some((distance, _)) = terrain.sample_signed_distance_and_normal(position) {
@@ -715,24 +699,8 @@ fn compute_metrics(
             }
         }
 
-        let mut penetrated_object = false;
-        object_field.gather_candidate_object_ids(position, &mut candidates);
-        let owner = objects.object_of_particle(index);
-        for &object_id in &candidates {
-            if owner == Some(object_id) {
-                continue;
-            }
-            let Some(sample) = objects.evaluate_object_sdf(object_id, position) else {
-                continue;
-            };
-            if sample.distance_m < -DEFAULT_PENETRATION_EPSILON_M {
-                penetrated_object = true;
-                break;
-            }
-        }
-        if penetrated_object {
-            object_penetration_count += 1;
-        }
+        let _ = index;
+        let _ = position;
     }
 
     let particle_denominator = particle_count.max(1) as f32;
@@ -1458,7 +1426,7 @@ fn activity_label(state: ParticleActivityState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{apply_scenario_spec, default_scenario_spec_by_name, parse_toggle_value};
-    use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
+    use crate::physics::world::object::ObjectWorld;
     use crate::physics::world::particle::ParticleWorld;
     use crate::physics::world::terrain::{TerrainCell, TerrainWorld};
     use bevy::prelude::IVec2;
@@ -1490,15 +1458,8 @@ mod tests {
         let mut terrain = TerrainWorld::default();
         let mut particles = ParticleWorld::default();
         let mut objects = ObjectWorld::default();
-        let mut object_field = ObjectPhysicsField::default();
-        apply_scenario_spec(
-            &spec,
-            &mut terrain,
-            &mut particles,
-            &mut objects,
-            &mut object_field,
-        )
-        .expect("scenario apply should succeed");
+        apply_scenario_spec(&spec, &mut terrain, &mut particles, &mut objects)
+            .expect("scenario apply should succeed");
 
         assert!(!terrain.generation_enabled());
         assert_eq!(

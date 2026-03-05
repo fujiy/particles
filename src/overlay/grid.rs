@@ -162,8 +162,7 @@ pub(super) fn draw_physics_area_overlay(
     active_region: Res<PhysicsActiveRegion>,
     region_settings: Res<PhysicsRegionSettings>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
-    object_world: Res<ObjectWorld>,
-    particle_world: Res<ParticleWorld>,
+    _particle_world: Res<ParticleWorld>,
 ) {
     if !overlay_state.enabled {
         return;
@@ -269,43 +268,12 @@ pub(super) fn draw_physics_area_overlay(
             GRID_PHYSICS_REGION_COLOR,
         );
 
-        let particle_positions = particle_world.positions();
-        let particle_masses = particle_world.masses();
-        for object in object_world.objects() {
-            if let Some((center, theta)) =
-                object_pose_for_overlay(object, particle_positions, particle_masses)
-            {
-                draw_object_grid_cells(&mut gizmos, object, center, theta);
-                draw_object_pose_axes(&mut gizmos, center, theta);
-            }
-        }
     }
 
     draw_gpu_grid_overlay(
         &mut gizmos,
         active_world_bounds.map(|(_, _, min, max)| (min, max)),
     );
-}
-
-fn draw_object_grid_cells(gizmos: &mut Gizmos, object: &ObjectData, center: Vec2, theta: f32) {
-    let cos_t = theta.cos();
-    let sin_t = theta.sin();
-    let half = CELL_SIZE_M * 0.5;
-
-    for local_center in &object.rest_local {
-        let corners = [
-            Vec2::new(local_center.x - half, local_center.y - half),
-            Vec2::new(local_center.x + half, local_center.y - half),
-            Vec2::new(local_center.x + half, local_center.y + half),
-            Vec2::new(local_center.x - half, local_center.y + half),
-        ];
-        let world = corners
-            .map(|p| center + Vec2::new(cos_t * p.x - sin_t * p.y, sin_t * p.x + cos_t * p.y));
-        gizmos.line_2d(world[0], world[1], GRID_OBJECT_COLOR);
-        gizmos.line_2d(world[1], world[2], GRID_OBJECT_COLOR);
-        gizmos.line_2d(world[2], world[3], GRID_OBJECT_COLOR);
-        gizmos.line_2d(world[3], world[0], GRID_OBJECT_COLOR);
-    }
 }
 
 fn draw_rect_outline(gizmos: &mut Gizmos, min: Vec2, max: Vec2, color: Color) {
@@ -424,65 +392,6 @@ fn sdf_overlay_negative_fill_color(sdf: f32) -> Color {
     )
 }
 
-fn draw_object_pose_axes(gizmos: &mut Gizmos, center: Vec2, theta: f32) {
-    let cos_t = theta.cos();
-    let sin_t = theta.sin();
-    let local_x = Vec2::new(cos_t, sin_t);
-    let local_y = Vec2::new(-sin_t, cos_t);
-    let x_end = center + local_x * GRID_OBJECT_AXIS_LENGTH_M;
-    let y_end = center + local_y * GRID_OBJECT_AXIS_LENGTH_M;
-    gizmos.line_2d(center, x_end, GRID_OBJECT_LOCAL_X_COLOR);
-    gizmos.line_2d(center, y_end, GRID_OBJECT_LOCAL_Y_COLOR);
-    gizmos.circle_2d(
-        center,
-        GRID_OBJECT_CENTER_RADIUS_M,
-        GRID_OBJECT_CENTER_COLOR,
-    );
-}
-
-fn object_pose_for_overlay(
-    object: &ObjectData,
-    positions: &[Vec2],
-    masses: &[f32],
-) -> Option<(Vec2, f32)> {
-    if object.particle_indices.is_empty() || object.rest_local.is_empty() {
-        return None;
-    }
-
-    let mut mass_sum = 0.0;
-    let mut center = Vec2::ZERO;
-    for &index in &object.particle_indices {
-        if index >= positions.len() || index >= masses.len() {
-            continue;
-        }
-        let mass = masses[index];
-        mass_sum += mass;
-        center += positions[index] * mass;
-    }
-    if mass_sum <= 1e-6 {
-        return None;
-    }
-    center /= mass_sum;
-
-    let mut a00 = 0.0;
-    let mut a01 = 0.0;
-    let mut a10 = 0.0;
-    let mut a11 = 0.0;
-    for (slot, &index) in object.particle_indices.iter().enumerate() {
-        if slot >= object.rest_local.len() || index >= positions.len() || index >= masses.len() {
-            continue;
-        }
-        let mass = masses[index];
-        let p = positions[index] - center;
-        let q = object.rest_local[slot];
-        a00 += mass * p.x * q.x;
-        a01 += mass * p.x * q.y;
-        a10 += mass * p.y * q.x;
-        a11 += mass * p.y * q.y;
-    }
-    let theta = (a10 - a01).atan2(a00 + a11);
-    Some((center, theta))
-}
 fn draw_chunk_outline(gizmos: &mut Gizmos, chunk: IVec2, color: Color) {
     draw_chunk_rect_outline(gizmos, chunk, 1, color);
 }

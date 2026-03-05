@@ -220,7 +220,6 @@ pub(super) fn update_test_assert_panel(
     terrain: Res<TerrainWorld>,
     particles: Res<ParticleWorld>,
     objects: Res<ObjectWorld>,
-    object_field: Res<ObjectPhysicsField>,
     mut panel_node: Single<&mut Node, With<TestAssertPanelRoot>>,
     title_entity: Single<Entity, With<TestAssertTitleText>>,
     list_entity: Single<Entity, With<TestAssertList>>,
@@ -249,7 +248,6 @@ pub(super) fn update_test_assert_panel(
         &terrain,
         &particles,
         &objects,
-        &object_field,
     );
     let overall_ok = assertions.iter().filter(|row| row.active).all(|row| row.ok);
 
@@ -750,8 +748,7 @@ fn classify_profiler_segment(step_name: &str) -> StepProfilerCategory {
     if step_name.contains("granular") {
         return StepProfilerCategory::Granular;
     }
-    if step_name.starts_with("object_field_")
-        || step_name.starts_with("terrain_")
+    if step_name.starts_with("terrain_")
         || step_name == "step_overhead"
     {
         return StepProfilerCategory::Object;

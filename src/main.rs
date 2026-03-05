@@ -20,7 +20,7 @@ use particles::physics::state::{ReplayLoadScenarioRequest, ReplayState, Simulati
 use particles::physics::world::continuum::{
     ContinuumParticleWorld, MATERIAL_ID_GRANULAR_SAND, MATERIAL_ID_GRANULAR_SOIL,
 };
-use particles::physics::world::object::{ObjectPhysicsField, ObjectWorld};
+use particles::physics::world::object::ObjectWorld;
 use particles::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use particles::physics::world::terrain::{
     CELL_SIZE_M, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,
@@ -818,7 +818,6 @@ fn run_mpm_autoverify(
     active_physics_params: Res<ActivePhysicsParams>,
     terrain_world: Res<TerrainWorld>,
     object_world: Res<ObjectWorld>,
-    object_field: Res<ObjectPhysicsField>,
     mut sim_state: ResMut<SimulationState>,
     mut gpu_control: ResMut<MpmGpuControl>,
     mut scenario_writer: MessageWriter<ReplayLoadScenarioRequest>,
@@ -1055,7 +1054,6 @@ fn run_mpm_autoverify(
             &terrain_world,
             &particle_world,
             &object_world,
-            &object_field,
         );
         max_speed_mps = metrics.max_speed_mps;
         for row in assertions {

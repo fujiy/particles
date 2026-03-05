@@ -22,7 +22,6 @@ pub(super) fn handle_world_interactions(
     mut particle_world: ResMut<ParticleWorld>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut generated_chunk_cache: ResMut<TerrainGeneratedChunkCache>,
-    mut object_world: ResMut<ObjectWorld>,
     mut prefetched_tool: Local<Option<WorldTool>>,
 ) {
     if save_load_ui_state.mode.is_some() {
@@ -31,7 +30,6 @@ pub(super) fn handle_world_interactions(
             &mut interaction_state.stone_stroke,
             selected_tool,
             &mut particle_world,
-            &mut object_world,
             &solver_params,
         );
         interaction_state.last_drag_world = None;
@@ -95,7 +93,6 @@ pub(super) fn handle_world_interactions(
             &mut interaction_state.stone_stroke,
             selected_tool,
             &mut particle_world,
-            &mut object_world,
             &solver_params,
         );
         interaction_state.last_drag_world = None;
@@ -118,7 +115,6 @@ pub(super) fn handle_world_interactions(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
                 &mut particle_world,
-                &mut object_world,
                 &solver_params,
             );
             let mut spawn_cells = Vec::new();
@@ -204,7 +200,6 @@ pub(super) fn handle_world_interactions(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
                 &mut particle_world,
-                &mut object_world,
                 &solver_params,
             );
             let mut had_particle_removal = false;
@@ -215,7 +210,6 @@ pub(super) fn handle_world_interactions(
                     .remove_particles_in_radius_with_map(point, TOOL_DELETE_BRUSH_RADIUS_M);
                 if removal.removed_count > 0 {
                     had_particle_removal = true;
-                    object_world.apply_particle_remap(&removal.old_to_new, particle_world.masses());
                 }
                 let chunk = IVec2::new(
                     cell.x.div_euclid(CHUNK_SIZE_I32),
@@ -235,7 +229,7 @@ pub(super) fn handle_world_interactions(
             });
             terrain_changed |= !removed_terrain_cells.is_empty();
             if had_particle_removal {
-                particle_world.postprocess_objects_after_topology_edit(&mut object_world);
+                let _ = had_particle_removal;
             }
         }
         Some(WorldTool::Break) => {
@@ -245,7 +239,6 @@ pub(super) fn handle_world_interactions(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
                 &mut particle_world,
-                &mut object_world,
                 &solver_params,
             );
             let mut detached_particles = HashSet::new();
@@ -264,14 +257,10 @@ pub(super) fn handle_world_interactions(
                 particle_world.wake_particles_in_radius(point, solver_params.wake_radius_m);
             });
             terrain_changed |= !removed_terrain_cells.is_empty();
-            if !detached_particles.is_empty() {
-                particle_world
-                    .detach_and_postprocess_objects(&mut object_world, &detached_particles);
-            }
+            let _ = detached_particles;
             if !removed_terrain_cells.is_empty() {
                 terrain_changed |= particle_world.detach_terrain_components_after_cell_removal(
                     &mut terrain_world,
-                    &mut object_world,
                     &removed_terrain_cells,
                 );
             }
@@ -284,7 +273,6 @@ pub(super) fn handle_world_interactions(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
                 &mut particle_world,
-                &mut object_world,
                 &solver_params,
             );
             let velocity_delta = stroke_velocity * DRAG_VELOCITY_GAIN;
@@ -347,7 +335,6 @@ fn finalize_stone_stroke(
     stroke: &mut StoneStrokeState,
     selected_tool: Option<WorldTool>,
     particle_world: &mut ParticleWorld,
-    object_world: &mut ObjectWorld,
     solver_params: &SolverParams,
 ) {
     if !stroke.active {
@@ -366,19 +353,9 @@ fn finalize_stone_stroke(
                 stroke.candidate_cells.clear();
                 return;
             };
-            let particle_indices =
-                particle_world.spawn_material_particles_from_cells(&cells, material, Vec2::ZERO);
-
-            if tool.terrain_material().is_some() {
-                let _ = object_world.create_object(
-                    particle_indices,
-                    particle_world.positions(),
-                    particle_world.masses(),
-                    solver_params.object_shape_stiffness_alpha,
-                    solver_params.object_shape_iters,
-                );
-                particle_world.postprocess_objects_after_topology_edit(object_world);
-            }
+            let _ = solver_params;
+            let _ = tool.terrain_material();
+            let _ = particle_world.spawn_material_particles_from_cells(&cells, material, Vec2::ZERO);
         }
     }
 

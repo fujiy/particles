@@ -8,7 +8,6 @@ use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, water_kernel_radius_m};
 use crate::physics::state::{PhysicsActiveRegion, PhysicsRegionSettings, SimUpdateSet};
-use crate::physics::world::object::{ObjectData, ObjectWorld};
 use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainWorld,
@@ -28,17 +27,11 @@ const GRID_HALO_CHUNK_COLOR: Color = Color::srgba(0.16, 0.88, 0.60, 0.72);
 const GRID_PHYSICS_REGION_COLOR: Color = Color::srgba(0.96, 0.72, 0.12, 0.98);
 const GRID_TERRAIN_UPDATED_COLOR: Color = Color::srgba(0.13, 0.85, 0.92, 1.00);
 const GRID_PARTICLE_UPDATED_COLOR: Color = Color::srgba(0.76, 0.56, 0.98, 1.00);
-const GRID_OBJECT_COLOR: Color = Color::srgba(0.92, 0.36, 0.12, 0.70);
-const GRID_OBJECT_CENTER_COLOR: Color = Color::srgba(0.98, 0.98, 0.98, 0.90);
-const GRID_OBJECT_LOCAL_X_COLOR: Color = Color::srgba(0.95, 0.26, 0.21, 0.95);
-const GRID_OBJECT_LOCAL_Y_COLOR: Color = Color::srgba(0.18, 0.80, 0.44, 0.95);
 const TILE_BUTTON_BOTTOM_PX: f32 = 88.0;
 const SDF_BUTTON_BOTTOM_PX: f32 = 126.0;
 const PHYSICS_AREA_BUTTON_BOTTOM_PX: f32 = 50.0;
 const PARTICLE_BUTTON_BOTTOM_PX: f32 = 12.0;
 const WATER_KERNEL_RADIUS_M: f32 = water_kernel_radius_m(DEFAULT_MATERIAL_PARAMS);
-const GRID_OBJECT_AXIS_LENGTH_M: f32 = CELL_SIZE_M * 1.6;
-const GRID_OBJECT_CENTER_RADIUS_M: f32 = CELL_SIZE_M * 0.12;
 const TERRAIN_SDF_OVERLAY_STEP_M: f32 = CELL_SIZE_M;
 const TERRAIN_SDF_OVERLAY_CELL_RADIUS_M: f32 = CELL_SIZE_M * 0.45;
 const TERRAIN_SDF_OVERLAY_RANGE_M: f32 = CELL_SIZE_M * 6.0;

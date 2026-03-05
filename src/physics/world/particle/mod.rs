@@ -6,7 +6,6 @@ use crate::physics::material::{
 };
 use crate::physics::solver::params_defaults::DEFAULT_SOLVER_PARAMS;
 use crate::physics::solver::params_types::SolverParams;
-use crate::physics::world::object::ObjectWorld;
 use crate::physics::world::terrain::{CELL_SIZE_M, CHUNK_SIZE_I32, TerrainWorld, cell_to_world_center};
 
 pub use crate::physics::material::ParticleMaterial;
@@ -262,21 +261,10 @@ impl ParticleWorld {
     pub fn detach_terrain_components_after_cell_removal(
         &mut self,
         _terrain: &mut TerrainWorld,
-        _object_world: &mut ObjectWorld,
         _removed_cells: &HashSet<IVec2>,
     ) -> bool {
         // GPU-first path: terrain detach to rigid objects is deferred.
         false
-    }
-
-    pub fn postprocess_objects_after_topology_edit(&mut self, _object_world: &mut ObjectWorld) {}
-
-    pub fn detach_and_postprocess_objects(
-        &mut self,
-        object_world: &mut ObjectWorld,
-        detached_particles: &HashSet<usize>,
-    ) {
-        object_world.split_objects_after_detach(detached_particles, self.positions(), self.masses());
     }
 
     pub(crate) fn resize_work_buffers(&mut self) {
