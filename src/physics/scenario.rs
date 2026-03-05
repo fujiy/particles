@@ -135,14 +135,6 @@ pub struct WaterSurfaceAssertionSpec {
 pub struct ScenarioSpec {
     pub name: String,
     pub reset_fixed_world: bool,
-    pub mpm_force_single_block: bool,
-    pub mpm_block_divisions: Option<UVec2>,
-    /// 空間LoD: `(block_origin_node, level, block_cell_dims)` のリスト。
-    /// 指定時は `mpm_force_single_block` / `mpm_block_divisions` より優先される。
-    /// level L のblockは `h_b = CELL_SIZE_M * 2^L` の空間解像度を持つ。
-    /// blockノード数は `block_cell_dims + 1`（境界ノード共有）として構築される。
-    /// `block_cell_dims` が `UVec2::ZERO` の場合はデフォルト (`DEFAULT_MPM_BLOCK_NODE_SPAN`) を使う。
-    pub mpm_level_map: Vec<(IVec2, u8, UVec2)>,
     pub loaded_chunk_min: Option<IVec2>,
     pub loaded_chunk_max: Option<IVec2>,
     pub terrain_fills: Vec<TerrainFillSpec>,
@@ -153,13 +145,6 @@ pub struct ScenarioSpec {
     pub water_surface_assertion: Option<WaterSurfaceAssertionSpec>,
     pub granular_repose_assertion: Option<GranularReposeAssertionSpec>,
     pub material_interaction_assertion: Option<MaterialInteractionAssertionSpec>,
-}
-
-#[derive(Clone, Debug)]
-pub struct ScenarioRunOutput {
-    pub metrics: ScenarioMetrics,
-    pub violations: Vec<String>,
-    pub artifact_dir: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -249,8 +234,6 @@ struct FinalStateJson {
 pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
     let world_min_cell: i32 = -32;
     let world_max_cell: i32 = 31;
-    let lod_block_dims = UVec2::new(16, 16);
-    let block_coloring_block_dims = UVec2::new(16, 16);
     let loaded_chunk_min = IVec2::new(
         world_min_cell.div_euclid(CHUNK_SIZE_I32),
         world_min_cell.div_euclid(CHUNK_SIZE_I32),
@@ -267,9 +250,6 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
         ScenarioSpec {
             name: "objects_drop".to_string(),
             reset_fixed_world: false,
-            mpm_force_single_block: false,
-            mpm_block_divisions: None,
-            mpm_level_map: Vec::new(),
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -341,9 +321,6 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
         ScenarioSpec {
             name: "water_drop".to_string(),
             reset_fixed_world: false,
-            mpm_force_single_block: false,
-            mpm_block_divisions: None,
-            mpm_level_map: Vec::new(),
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -390,80 +367,9 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
             granular_repose_assertion: None,
             material_interaction_assertion: None,
         },
-        // water_drop_spatial_lod: 空間LoDが有効なwater_dropシナリオ。
-        //
-        // 方針:
-        // - block形状は全levelで 16x16 cells の正方形に統一する（=> 17x17 nodes）。
-        // - block境界はtile (chunk) 境界に揃える。
-        // - level 0 (fine) は中央2x2、level 1 (coarse) はその外周リングを担当する。
-        ScenarioSpec {
-            name: "water_drop_spatial_lod".to_string(),
-            reset_fixed_world: false,
-            mpm_force_single_block: false,
-            mpm_block_divisions: None,
-            mpm_level_map: vec![
-                // Level 0 fine: 中央 8m x 8m を 2x2 block で表現。
-                (IVec2::new(-16, -16), 0, lod_block_dims),
-                (IVec2::new(0, -16), 0, lod_block_dims),
-                (IVec2::new(-16, 0), 0, lod_block_dims),
-                (IVec2::new(0, 0), 0, lod_block_dims),
-                // Level 1 coarse: 外周リング (3x3 の中央を除いた8 block)。
-                (IVec2::new(-24, -24), 1, lod_block_dims),
-                (IVec2::new(-8, -24), 1, lod_block_dims),
-                (IVec2::new(8, -24), 1, lod_block_dims),
-                (IVec2::new(-24, -8), 1, lod_block_dims),
-                (IVec2::new(8, -8), 1, lod_block_dims),
-                (IVec2::new(-24, 8), 1, lod_block_dims),
-                (IVec2::new(-8, 8), 1, lod_block_dims),
-                (IVec2::new(8, 8), 1, lod_block_dims),
-            ],
-            loaded_chunk_min: Some(IVec2::new(-1, -1)),
-            loaded_chunk_max: Some(IVec2::new(0, 0)),
-            terrain_fills: vec![
-                TerrainFillSpec {
-                    rect: CellRect::new(
-                        IVec2::new(world_min_cell, world_min_cell),
-                        IVec2::new(world_max_cell, world_min_cell + wall_thickness - 1),
-                    ),
-                    material: TerrainMaterial::Stone,
-                },
-                TerrainFillSpec {
-                    rect: CellRect::new(
-                        IVec2::new(world_min_cell, world_min_cell),
-                        IVec2::new(left_wall_max, world_max_cell),
-                    ),
-                    material: TerrainMaterial::Stone,
-                },
-                TerrainFillSpec {
-                    rect: CellRect::new(
-                        IVec2::new(right_wall_min, world_min_cell),
-                        IVec2::new(world_max_cell, world_max_cell),
-                    ),
-                    material: TerrainMaterial::Stone,
-                },
-            ],
-            free_particles: vec![ParticleSpawnSpec {
-                rect: CellRect::new(IVec2::new(-10, -2), IVec2::new(10, 14)),
-                material: ParticleMaterial::WaterLiquid,
-                initial_velocity: Vec2::ZERO,
-            }],
-            objects: Vec::new(),
-            step_count: 300,
-            thresholds: ScenarioThresholds {
-                max_penetration_rate: Some(0.10),
-                max_max_speed_mps: Some(30.0),
-                min_sleep_ratio: None,
-            },
-            water_surface_assertion: None,
-            granular_repose_assertion: None,
-            material_interaction_assertion: None,
-        },
         ScenarioSpec {
             name: "terrain_contact_stability".to_string(),
             reset_fixed_world: false,
-            mpm_force_single_block: false,
-            mpm_block_divisions: None,
-            mpm_level_map: Vec::new(),
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -512,9 +418,6 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
         ScenarioSpec {
             name: "soil_repose_drop".to_string(),
             reset_fixed_world: false,
-            mpm_force_single_block: false,
-            mpm_block_divisions: None,
-            mpm_level_map: Vec::new(),
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -565,9 +468,6 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
         ScenarioSpec {
             name: "sand_water_interaction_drop".to_string(),
             reset_fixed_world: false,
-            mpm_force_single_block: false,
-            mpm_block_divisions: None,
-            mpm_level_map: Vec::new(),
             loaded_chunk_min: Some(loaded_chunk_min),
             loaded_chunk_max: Some(loaded_chunk_max),
             terrain_fills: vec![
@@ -622,56 +522,7 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 require_primary_below_secondary: true,
             }),
         },
-        // block_coloring_experiment:
-        // - 空間LoDのblock彩色実験専用
-        // - 地形/粒子なし
-        // - level 3 blockを8x8敷き詰めて開始
-        ScenarioSpec {
-            name: "block_coloring_experiment".to_string(),
-            reset_fixed_world: false,
-            mpm_force_single_block: false,
-            mpm_block_divisions: None,
-            mpm_level_map: build_block_coloring_experiment_level_map(
-                3,
-                8,
-                block_coloring_block_dims,
-            ),
-            loaded_chunk_min: Some(IVec2::new(-1, -1)),
-            loaded_chunk_max: Some(IVec2::new(0, 0)),
-            terrain_fills: Vec::new(),
-            free_particles: Vec::new(),
-            objects: Vec::new(),
-            step_count: 600,
-            thresholds: ScenarioThresholds {
-                max_penetration_rate: None,
-                max_max_speed_mps: None,
-                min_sleep_ratio: None,
-            },
-            water_surface_assertion: None,
-            granular_repose_assertion: None,
-            material_interaction_assertion: None,
-        },
     ]
-}
-
-fn build_block_coloring_experiment_level_map(
-    level: u8,
-    side_block_count: i32,
-    block_cell_dims: UVec2,
-) -> Vec<(IVec2, u8, UVec2)> {
-    let side_block_count = side_block_count.max(1);
-    let span_x = block_cell_dims.x.max(1) as i32;
-    let span_y = block_cell_dims.y.max(1) as i32;
-    let start_x = -(side_block_count / 2) * span_x;
-    let start_y = -(side_block_count / 2) * span_y;
-    let mut level_map = Vec::with_capacity((side_block_count * side_block_count) as usize);
-    for by in 0..side_block_count {
-        for bx in 0..side_block_count {
-            let origin = IVec2::new(start_x + bx * span_x, start_y + by * span_y);
-            level_map.push((origin, level, block_cell_dims));
-        }
-    }
-    level_map
 }
 
 pub fn default_scenario_names() -> Vec<String> {
@@ -788,96 +639,6 @@ pub fn write_scenario_artifacts_for_state_with_options(
         write_final_state_png(&artifact_dir.join("final_state.png"), terrain, particles)?;
     }
     Ok(artifact_dir)
-}
-
-pub fn run_scenario_and_write_artifacts(spec: &ScenarioSpec) -> Result<ScenarioRunOutput, String> {
-    let mut terrain = TerrainWorld::default();
-    let mut particles = ParticleWorld::default();
-    let mut objects = ObjectWorld::default();
-    let mut object_field = ObjectPhysicsField::default();
-    apply_scenario_spec(
-        spec,
-        &mut terrain,
-        &mut particles,
-        &mut objects,
-        &mut object_field,
-    )?;
-    let baseline_particle_count = particles.particle_count();
-    let baseline_solid_cell_count = count_solid_cells(&terrain);
-    let mut violations = Vec::new();
-
-    // Replay UI evaluates assertions from step 0; mirror that behavior in scenario tests.
-    objects.update_physics_field(particles.positions(), particles.masses(), &mut object_field);
-    let metrics_step0 = compute_metrics(spec, 0, &terrain, &particles, &objects, &object_field);
-    let assertions_step0 = evaluate_assertions_with_context(
-        spec,
-        0,
-        &metrics_step0,
-        &terrain,
-        &particles,
-        baseline_particle_count,
-        baseline_solid_cell_count,
-        count_solid_cells(&terrain),
-    );
-    violations.extend(assertion_violations_for_step(0, assertions_step0));
-
-    for step in 1..=spec.step_count {
-        objects.update_physics_field(particles.positions(), particles.masses(), &mut object_field);
-        terrain
-            .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
-        particles.step_if_running(&terrain, &object_field, &mut objects, true);
-        if particles.apply_pending_terrain_fractures(&mut terrain, &mut objects) {
-            terrain.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(
-                DEFAULT_MATERIAL_PARAMS,
-            ));
-        }
-        objects.update_physics_field(particles.positions(), particles.masses(), &mut object_field);
-        let step_metrics =
-            compute_metrics(spec, step, &terrain, &particles, &objects, &object_field);
-        let step_assertions = evaluate_assertions_with_context(
-            spec,
-            step,
-            &step_metrics,
-            &terrain,
-            &particles,
-            baseline_particle_count,
-            baseline_solid_cell_count,
-            count_solid_cells(&terrain),
-        );
-        violations.extend(assertion_violations_for_step(step, step_assertions));
-    }
-
-    objects.update_physics_field(particles.positions(), particles.masses(), &mut object_field);
-    let metrics = compute_metrics(
-        spec,
-        spec.step_count,
-        &terrain,
-        &particles,
-        &objects,
-        &object_field,
-    );
-    let artifact_dir = write_scenario_artifacts_for_state(
-        spec,
-        spec.step_count,
-        &terrain,
-        &particles,
-        &objects,
-        &object_field,
-    )?;
-
-    Ok(ScenarioRunOutput {
-        metrics,
-        violations,
-        artifact_dir,
-    })
-}
-
-pub fn run_default_scenarios() -> Result<Vec<ScenarioRunOutput>, String> {
-    let mut outputs = Vec::new();
-    for spec in default_scenario_specs() {
-        outputs.push(run_scenario_and_write_artifacts(&spec)?);
-    }
-    Ok(outputs)
 }
 
 pub fn count_solid_cells(terrain: &TerrainWorld) -> usize {
@@ -1324,22 +1085,6 @@ fn evaluate_assertions_with_context(
     rows
 }
 
-fn assertion_violations_for_step(
-    step: usize,
-    assertions: Vec<ScenarioAssertionResult>,
-) -> Vec<String> {
-    assertions
-        .into_iter()
-        .filter(|assertion| assertion.active && !assertion.ok)
-        .map(|assertion| {
-            format!(
-                "step={} {} {} (actual: {}, condition: {})",
-                step, assertion.label, assertion.expected, assertion.actual, assertion.condition
-            )
-        })
-        .collect()
-}
-
 fn initial_water_cell_count(spec: &ScenarioSpec) -> usize {
     spec.free_particles
         .iter()
@@ -1715,8 +1460,8 @@ mod tests {
     use super::{apply_scenario_spec, default_scenario_spec_by_name, parse_toggle_value};
     use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
     use crate::physics::world::particle::ParticleWorld;
-    use crate::physics::world::terrain::{CHUNK_SIZE_I32, TerrainCell, TerrainWorld};
-    use bevy::prelude::{IVec2, UVec2};
+    use crate::physics::world::terrain::{TerrainCell, TerrainWorld};
+    use bevy::prelude::IVec2;
 
     #[test]
     fn parse_toggle_value_true_variants() {
@@ -1765,62 +1510,7 @@ mod tests {
     #[test]
     fn water_drop_scenario_uses_default_level0_mpm_blocks() {
         let spec = default_scenario_spec_by_name("water_drop").expect("water_drop must exist");
-        assert!(!spec.mpm_force_single_block);
-        assert_eq!(spec.mpm_block_divisions, None);
-        assert!(spec.mpm_level_map.is_empty());
+        assert_eq!(spec.name, "water_drop");
     }
 
-    #[test]
-    fn water_drop_spatial_lod_blocks_are_uniform_square_and_tile_aligned() {
-        let spec = default_scenario_spec_by_name("water_drop_spatial_lod")
-            .expect("water_drop_spatial_lod must exist");
-        assert!(!spec.mpm_level_map.is_empty());
-
-        let expected_dims = spec.mpm_level_map[0].2;
-        assert!(spec.mpm_level_map.iter().any(|(_, level, _)| *level == 1));
-
-        for (origin, level, dims) in &spec.mpm_level_map {
-            assert_eq!(dims.x, dims.y, "block dims must be square");
-            assert_eq!(*dims, expected_dims, "all levels must use same cell dims");
-
-            let cell_scale = 1_i32 << (*level as i32);
-            let min_cell = *origin * cell_scale;
-            let max_cell_exclusive = (*origin + dims.as_ivec2()) * cell_scale;
-            assert_eq!(
-                min_cell.x.rem_euclid(CHUNK_SIZE_I32),
-                0,
-                "min x boundary must align to chunk"
-            );
-            assert_eq!(
-                min_cell.y.rem_euclid(CHUNK_SIZE_I32),
-                0,
-                "min y boundary must align to chunk"
-            );
-            assert_eq!(
-                max_cell_exclusive.x.rem_euclid(CHUNK_SIZE_I32),
-                0,
-                "max x boundary must align to chunk"
-            );
-            assert_eq!(
-                max_cell_exclusive.y.rem_euclid(CHUNK_SIZE_I32),
-                0,
-                "max y boundary must align to chunk"
-            );
-        }
-    }
-
-    #[test]
-    fn block_coloring_experiment_has_expected_initial_level_map() {
-        let spec = default_scenario_spec_by_name("block_coloring_experiment")
-            .expect("block_coloring_experiment must exist");
-        assert_eq!(spec.terrain_fills.len(), 0);
-        assert_eq!(spec.free_particles.len(), 0);
-        assert_eq!(spec.objects.len(), 0);
-        assert_eq!(spec.mpm_level_map.len(), 8 * 8);
-        assert!(
-            spec.mpm_level_map
-                .iter()
-                .all(|(_, level, dims)| { *level == 3 && *dims == UVec2::new(16, 16) })
-        );
-    }
 }

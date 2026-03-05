@@ -26,11 +26,6 @@ pub(super) fn particle_grid_axis(particles_per_cell: u32) -> u32 {
     }
 }
 
-pub(crate) fn pack_pair_key(i: usize, j: usize) -> u64 {
-    let (a, b) = if i <= j { (i, j) } else { (j, i) };
-    ((a as u64) << 32) | b as u64
-}
-
 pub(super) fn resolve_terrain_contact_cell(
     position: Vec2,
     signed_distance: f32,

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -341,86 +341,6 @@ pub(super) fn draw_world_tool_hover_highlight(
     gizmos.line_2d(Vec2::new(max.x, min.y), Vec2::new(max.x, max.y), color);
     gizmos.line_2d(Vec2::new(max.x, max.y), Vec2::new(min.x, max.y), color);
     gizmos.line_2d(Vec2::new(min.x, max.y), Vec2::new(min.x, min.y), color);
-}
-
-fn update_stone_stroke_partition(
-    stroke: &mut StoneStrokeState,
-    terrain_world: &mut TerrainWorld,
-    terrain_material: TerrainMaterial,
-) -> bool {
-    if stroke.generated_cells.is_empty() {
-        stroke.candidate_cells.clear();
-        return false;
-    }
-
-    let terrain_connected = collect_terrain_connected_stroke_cells(stroke, terrain_world);
-    let mut terrain_changed = false;
-    for &cell in &terrain_connected {
-        terrain_changed |= terrain_world.set_cell(cell, TerrainCell::solid(terrain_material));
-    }
-
-    stroke.candidate_cells.clear();
-    for &cell in &stroke.generated_cells {
-        if !terrain_connected.contains(&cell) {
-            stroke.candidate_cells.insert(cell);
-        }
-    }
-    terrain_changed
-}
-
-fn collect_terrain_connected_stroke_cells(
-    stroke: &StoneStrokeState,
-    terrain_world: &TerrainWorld,
-) -> HashSet<IVec2> {
-    let mut connected = HashSet::new();
-    let mut queue = VecDeque::new();
-
-    for &cell in &stroke.generated_cells {
-        if is_stroke_cell_connected_to_frozen_terrain(cell, stroke, terrain_world) {
-            connected.insert(cell);
-            queue.push_back(cell);
-        }
-    }
-
-    while let Some(cell) = queue.pop_front() {
-        for offset in STONE_STROKE_NEIGHBOR_OFFSETS {
-            let next = cell + offset;
-            if !stroke.generated_cells.contains(&next) || connected.contains(&next) {
-                continue;
-            }
-            connected.insert(next);
-            queue.push_back(next);
-        }
-    }
-
-    connected
-}
-
-fn is_stroke_cell_connected_to_frozen_terrain(
-    cell: IVec2,
-    stroke: &StoneStrokeState,
-    terrain_world: &TerrainWorld,
-) -> bool {
-    if matches!(
-        terrain_world.get_loaded_cell_or_empty(cell),
-        TerrainCell::Solid { .. }
-    ) {
-        return true;
-    }
-
-    for offset in STONE_STROKE_NEIGHBOR_OFFSETS {
-        let neighbor = cell + offset;
-        if stroke.generated_cells.contains(&neighbor) {
-            continue;
-        }
-        if matches!(
-            terrain_world.get_loaded_cell_or_empty(neighbor),
-            TerrainCell::Solid { .. }
-        ) {
-            return true;
-        }
-    }
-    false
 }
 
 fn finalize_stone_stroke(

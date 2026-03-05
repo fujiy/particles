@@ -16,7 +16,6 @@ use crate::physics::state::{
     ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationParallelSettings,
     SimulationState,
 };
-use crate::physics::world::grid::{GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use crate::physics::world::terrain::{
@@ -89,12 +88,6 @@ const TOOL_BREAK_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
 const TOOL_HOVER_HIGHLIGHT_TERRAIN_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
 const TOOL_HOVER_HIGHLIGHT_BREAK_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
 const TOOL_HOVER_HIGHLIGHT_DELETE_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
-const STONE_STROKE_NEIGHBOR_OFFSETS: [IVec2; 4] = [
-    IVec2::new(1, 0),
-    IVec2::new(-1, 0),
-    IVec2::new(0, 1),
-    IVec2::new(0, -1),
-];
 type MaterialPattern8 = [[bool; TOOLBAR_ICON_GRID_SIZE]; TOOLBAR_ICON_GRID_SIZE];
 
 const MATERIAL_PATTERN_LIQUID: MaterialPattern8 = [
@@ -227,7 +220,6 @@ impl Plugin for InterfacePlugin {
                     update_simulation_hud,
                     update_scale_bar,
                     update_step_profiler_panel,
-                    update_step_profiler_ideal_parallel,
                     update_step_profiler_tooltip,
                 )
                     .chain()
@@ -500,7 +492,7 @@ use ui_systems::{
     update_save_load_slot_button_visuals, update_scale_bar, update_sim_parallel_button_label,
     update_sim_parallel_button_visuals, update_sim_play_pause_button_label,
     update_sim_play_pause_button_visuals, update_sim_step_button_visuals, update_simulation_hud,
-    update_step_profiler_ideal_parallel, update_step_profiler_panel, update_step_profiler_tooltip,
+    update_step_profiler_panel, update_step_profiler_tooltip,
     update_test_assert_panel, update_world_tool_button_visuals, update_world_tool_tooltip,
 };
 

@@ -643,13 +643,6 @@ impl ParticleWorld {
         dt_sub * divisor as f32
     }
 
-    pub(crate) fn particle_execution_dt_substep(&self, index: usize) -> f32 {
-        self.particle_execution_dt_substep
-            .get(index)
-            .copied()
-            .unwrap_or(0.0)
-    }
-
     pub fn sub_block_dirty_frame(&self) -> u64 {
         self.sub_block_dirty_frame
     }
@@ -3725,6 +3718,3 @@ struct TerrainDetachSpawnPlan {
     angular_velocity: f32,
     angular_origin: Vec2,
 }
-
-#[cfg(test)]
-mod tests;

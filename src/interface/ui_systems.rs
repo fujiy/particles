@@ -739,40 +739,6 @@ pub(super) fn update_step_profiler_panel(
     });
 }
 
-pub(super) fn update_step_profiler_ideal_parallel(
-    grid_hierarchy: Res<GridHierarchy>,
-    mpm_block_index_table: Res<MpmBlockIndexTable>,
-    mut label_text: Single<&mut Text, With<StepProfilerIdealParallelText>>,
-) {
-    let block_count = mpm_block_index_table
-        .block_count()
-        .min(grid_hierarchy.block_count());
-    let mut active_block_count = 0usize;
-    let mut color_seen = std::collections::BTreeSet::<u16>::new();
-    for block_index in 0..block_count {
-        if mpm_block_index_table
-            .support_indices(block_index)
-            .is_empty()
-        {
-            continue;
-        }
-        active_block_count += 1;
-        if let Some(block) = grid_hierarchy.blocks().get(block_index) {
-            color_seen.insert(block.color_class());
-        }
-    }
-    if active_block_count == 0 {
-        label_text.0 = "Ideal cpu/wall(block/color): --".to_string();
-        return;
-    }
-    let color_count = color_seen.len().max(1);
-    let indicator = active_block_count as f64 / color_count as f64;
-    label_text.0 = format!(
-        "Ideal cpu/wall(block/color): {:.4} ({} / {})",
-        indicator, active_block_count, color_count
-    );
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StepProfilerCategory {
     Fluid,

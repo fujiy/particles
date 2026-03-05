@@ -38,6 +38,17 @@
   - [x] 旧CPU連続体コードの削除順序（依存関係と撤去単位）を設計する。
   - [x] GPUバッファレイアウト（particle/grid/active tile/metrics）を確定する。
   - [ ] 不要になったCPU実装を削除し、関連テストとドキュメント参照を整理する。
+- 進捗:
+  - 2026-03-05: 未使用コード整理として `interface/world_edit` の未参照ストローク分割関数群、`ParticleWorld::particle_execution_dt_substep`、`pack_pair_key` を削除。併せて `solver/mpm_water.rs` と `solver/terrain_boundary.rs` の `#[cfg(test)]` ブロック、および `tests/physics_scenarios.rs` を削除。
+  - 2026-03-05: CPU MPM撤去を前進。`solver/mpm_water.rs` を GPU同期で必要な最小API（`is_mpm_managed_particle`, `rebuild_continuum_from_particle_world`, `sync_continuum_to_particle_world`）へ縮退し、CPU MPMステップ実装と `world/kernel.rs` を削除。
+  - 2026-03-05: 警告駆動の機械的削減を継続。未使用化していた `solver/terrain_boundary.rs` を最小Resource（`clear()`のみ）へ縮退し、`cargo check` 警告0件を確認。
+  - 2026-03-05: `TerrainBoundarySampler` を完全撤去（`solver/mod.rs` からモジュール削除 + `terrain_boundary.rs` 削除）。あわせて `step_simulation_once` でCPU粒子ステップ/地形破砕commitを実行しない形へ変更し、固定更新経路をGPU専用寄りへ寄せた。`cargo check` 警告0件・`cargo test --lib` 全通過を確認。
+  - 2026-03-05: `GridHierarchy/MpmBlockIndexTable` のランタイム依存を撤去。`physics/mod.rs` のresource登録から削除し、`fixed_update.rs` / `runtime.rs` のgrid初期化・block coloring実験経路を削除。UIの `update_step_profiler_ideal_parallel` も削除。さらに未参照化した `world/grid.rs` を削除。`cargo check` 警告0件・`cargo test --lib` 全通過（72件）を確認。
+  - 2026-03-05: シナリオ定義に残っていた `block_coloring_experiment` を削除（`scenario.rs` の spec + helper + test）。空間LoD/block coloring実験の残骸をさらに整理。
+  - 2026-03-05: `ScenarioSpec` から block/LoD 専用メタデータ（`mpm_force_single_block`, `mpm_block_divisions`, `mpm_level_map`）を撤去。`water_drop_spatial_lod` は地形・粒子構成のみ保持する互換シナリオとして残し、関連テストを更新。`cargo check` 警告0件・`cargo test --lib` 全通過（71件）を確認。
+  - 2026-03-05: 互換維持していた `water_drop_spatial_lod` シナリオ定義と対応テストを削除。`cargo check` 警告0件・`cargo test --lib` 全通過（70件）を確認。
+  - 2026-03-05: `scenario.rs` から未参照化した CPU 実行ループ（`run_scenario_and_write_artifacts`, `run_default_scenarios`, `ScenarioRunOutput`）を削除。併せて未使用化した `assertion_violations_for_step` を削除し、`cargo check` 警告0件を維持。
+  - 2026-03-05: CPU粒子ソルバ依存の `world/particle/tests.rs` を撤去（`mod tests;` 削除 + ファイル削除）。`cargo check` 警告0件・`cargo test --lib` 全通過（39件）を確認。
 - 完了条件:
   - 設計文書が新方針へ整合し、GPU一本化とCPU撤去の実施手順が定義されている。
 

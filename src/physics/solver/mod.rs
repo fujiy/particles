@@ -4,7 +4,6 @@ pub(crate) mod params_defaults;
 pub(crate) mod params_types;
 mod runtime;
 mod step;
-pub(crate) mod terrain_boundary;
 mod types;
 
 pub(crate) use fixed_update::{finalize_frame_metrics, initialize_default_world, step_physics};
