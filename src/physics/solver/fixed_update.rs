@@ -24,6 +24,7 @@ use crate::physics::world::grid::{GridBlock, GridHierarchy, MpmBlockIndexTable};
 use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::{ParticleActivityState, ParticleWorld};
 use crate::physics::world::terrain::{TerrainWorld, world_to_cell};
+use crate::render::TerrainGeneratedChunkCache;
 
 const BLOCK_COLORING_EXPERIMENT_SCENARIO: &str = "block_coloring_experiment";
 const BLOCK_COLORING_EXPERIMENT_INTERVAL_SECS: f32 = 1.0;
@@ -46,7 +47,8 @@ pub(crate) fn initialize_default_world(
     particle_world.set_solver_params(*solver_params);
     particle_world.set_material_params(*material_params);
     let terrain_boundary_radius_m = terrain_boundary_radius_m(*material_params);
-    terrain_world.reset_fixed_world();
+    terrain_world.set_generation_enabled(true);
+    terrain_world.clear();
     terrain_world.rebuild_static_particles_if_dirty(terrain_boundary_radius_m);
     *particle_world = ParticleWorld::default();
     continuum_world.clear();
@@ -72,6 +74,7 @@ pub(crate) fn step_physics(
     mut active_region: ResMut<PhysicsActiveRegion>,
     mut replay_state: ResMut<ReplayState>,
     mut terrain_world: ResMut<TerrainWorld>,
+    mut generated_chunk_cache: ResMut<TerrainGeneratedChunkCache>,
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
     mpm_resources: (ResMut<GridHierarchy>, ResMut<MpmBlockIndexTable>),
@@ -198,7 +201,12 @@ pub(crate) fn step_physics(
         let halo_chunks = region_settings.active_halo_chunks.max(0);
         let load_min_chunk = min_chunk - IVec2::splat(halo_chunks);
         let load_max_chunk = max_chunk + IVec2::splat(halo_chunks);
-        ensure_chunks_loaded_in_rect(&mut terrain_world, load_min_chunk, load_max_chunk);
+        ensure_chunks_loaded_in_rect(
+            &mut terrain_world,
+            &mut generated_chunk_cache,
+            load_min_chunk,
+            load_max_chunk,
+        );
         particle_world.set_active_chunk_region_bounds(Some(min_chunk), Some(max_chunk));
         active_region.active_chunks = active_chunks;
         active_region.chunk_min = Some(min_chunk);
@@ -371,12 +379,25 @@ pub(crate) fn finalize_frame_metrics(mut perf_metrics: ResMut<SimulationPerfMetr
 
 fn ensure_chunks_loaded_in_rect(
     terrain_world: &mut TerrainWorld,
+    generated_chunk_cache: &mut TerrainGeneratedChunkCache,
     min_chunk: IVec2,
     max_chunk: IVec2,
 ) {
     for y in min_chunk.y..=max_chunk.y {
         for x in min_chunk.x..=max_chunk.x {
-            terrain_world.ensure_chunk_loaded(IVec2::new(x, y));
+            let chunk_coord = IVec2::new(x, y);
+            if terrain_world.chunk(chunk_coord).is_some() {
+                continue;
+            }
+            if !terrain_world.generation_enabled() {
+                terrain_world.ensure_chunk_loaded(chunk_coord);
+                continue;
+            }
+            if let Some(material_ids) = generated_chunk_cache.material_ids_for_chunk(chunk_coord) {
+                terrain_world.load_generated_chunk_from_material_ids(chunk_coord, material_ids);
+            } else {
+                generated_chunk_cache.enqueue_chunk_request(chunk_coord);
+            }
         }
     }
 }

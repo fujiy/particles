@@ -67,11 +67,6 @@ pub(crate) fn stream_terrain_around_camera(
         *last_center_chunk = None;
         return;
     }
-    if !sim_state.running && !sim_state.step_once {
-        // Keep paused camera motion lightweight; streaming will catch up on resume/step.
-        *last_center_chunk = None;
-        return;
-    }
     let Some(camera_transform) = camera_transforms.iter().next() else {
         *last_center_chunk = None;
         return;
@@ -85,13 +80,8 @@ pub(crate) fn stream_terrain_around_camera(
         return;
     }
     *last_center_chunk = Some(center_chunk);
-    let radius = streaming_settings.load_radius_chunks.max(0);
-    for y in (center_chunk.y - radius)..=(center_chunk.y + radius) {
-        for x in (center_chunk.x - radius)..=(center_chunk.x + radius) {
-            terrain_world.ensure_chunk_loaded(IVec2::new(x, y));
-        }
-    }
-    terrain_world.unload_pristine_chunks_outside_radius(center_chunk, radius + 1);
+    let keep_radius = streaming_settings.load_radius_chunks.max(0) + 1;
+    terrain_world.unload_pristine_chunks_outside_radius(center_chunk, keep_radius);
 }
 
 pub(crate) fn handle_replay_requests(
@@ -298,7 +288,8 @@ pub(crate) fn apply_sim_reset(
         }
     }
 
-    terrain_world.reset_fixed_world();
+    terrain_world.set_generation_enabled(true);
+    terrain_world.clear();
     terrain_world.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(*material_params));
     *particle_world = ParticleWorld::default();
     continuum_world.clear();

@@ -696,7 +696,7 @@ pub fn apply_scenario_spec(
 ) -> Result<(), String> {
     if spec.reset_fixed_world {
         terrain.set_generation_enabled(true);
-        terrain.reset_fixed_world();
+        terrain.clear();
     } else {
         terrain.set_generation_enabled(false);
         terrain.clear();

@@ -21,10 +21,9 @@ use crate::physics::state::{ReplayState, SimulationState};
 use crate::physics::world::constants::CELL_SIZE_M;
 use crate::physics::world::continuum::ContinuumParticleWorld;
 use crate::physics::world::particle::ParticleWorld;
-use crate::physics::world::terrain::{TerrainCell, TerrainWorld, world_to_cell};
+use crate::physics::world::terrain::TerrainWorld;
 
-const SDF_QUERY_RADIUS_CELLS: i32 = 10;
-const SDF_INF: f32 = 1.0e9;
+const TERRAIN_SDF_DISABLED_DISTANCE_M: f32 = 1.0e6;
 /// 境界速度補正のSDF閾値（h比）。地形侵入を抑えるため、粒径比ではなく格子幅基準で扱う。
 const MPM_BOUNDARY_THRESHOLD_SCALE_H: f32 = 0.5;
 
@@ -128,7 +127,7 @@ pub fn prepare_particle_upload(
 pub fn prepare_terrain_upload(
     control: Res<MpmGpuControl>,
     sim_state: Res<SimulationState>,
-    terrain: Res<TerrainWorld>,
+    _terrain: Res<TerrainWorld>,
     mut upload: ResMut<MpmGpuUploadRequest>,
 ) {
     // Default: no terrain upload this frame unless explicitly requested below.
@@ -144,51 +143,20 @@ pub fn prepare_terrain_upload(
     if !sim_state.mpm_enabled {
         return;
     }
-    let terrain_version = terrain.terrain_version();
-    if upload.last_uploaded_terrain_version == Some(terrain_version) {
+    // Temporary: CPU-side terrain SDF generation is disabled.
+    // Upload a single "always outside terrain" field so GPU側での地形SDF生成へ移行するまで
+    // CPU再生成コストを発生させない。
+    if upload.last_uploaded_terrain_version == Some(u64::MAX) {
         return;
     }
     let layout = world_grid_layout();
     let node_count = layout.node_count();
-    let mut sdf = vec![SDF_INF; node_count];
-    let mut normals = vec![[0.0_f32, 1.0]; node_count];
-
-    let h = CELL_SIZE_M;
-    let eps = h * 0.5;
-
-    for ny in 0..layout.dims.y {
-        for nx in 0..layout.dims.x {
-            let idx = (ny * layout.dims.x + nx) as usize;
-            let node = layout.origin + IVec2::new(nx as i32, ny as i32);
-            let world_pos = Vec2::new(node.x as f32 * h, node.y as f32 * h);
-            if let Some((signed_distance, normal)) =
-                terrain.sample_signed_distance_and_normal(world_pos)
-            {
-                sdf[idx] = signed_distance;
-                if normal != Vec2::ZERO {
-                    normals[idx] = normal.to_array();
-                }
-                continue;
-            }
-
-            let sdf_val = sample_terrain_sdf_for_gpu(&terrain, world_pos);
-            sdf[idx] = sdf_val;
-
-            let dx = sample_terrain_sdf_for_gpu(&terrain, world_pos + Vec2::new(eps, 0.0))
-                - sample_terrain_sdf_for_gpu(&terrain, world_pos - Vec2::new(eps, 0.0));
-            let dy = sample_terrain_sdf_for_gpu(&terrain, world_pos + Vec2::new(0.0, eps))
-                - sample_terrain_sdf_for_gpu(&terrain, world_pos - Vec2::new(0.0, eps));
-            let len = (dx * dx + dy * dy).sqrt();
-            if len > 1e-6 {
-                normals[idx] = [dx / len, dy / len];
-            }
-        }
-    }
-
-    upload.terrain_sdf = sdf;
-    upload.terrain_normal = normals;
+    upload
+        .terrain_sdf
+        .resize(node_count, TERRAIN_SDF_DISABLED_DISTANCE_M);
+    upload.terrain_normal.resize(node_count, [0.0_f32, 1.0]);
     upload.upload_terrain = true;
-    upload.last_uploaded_terrain_version = Some(terrain_version);
+    upload.last_uploaded_terrain_version = Some(u64::MAX);
 }
 
 /// System: update MpmGpuParamsRequest from SolverParams, simulation state, and PhysicsParams asset.
@@ -385,40 +353,6 @@ pub fn apply_gpu_readback(
             bevy::log::info!("[gpu_mpm] frame={frame} n={n} max_speed={max_speed:.2} m/s — OK");
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Terrain SDF helper (mirrors terrain_boundary.rs logic, CPU-side, no cache)
-// ---------------------------------------------------------------------------
-
-fn sample_terrain_sdf_for_gpu(terrain: &TerrainWorld, world_pos: Vec2) -> f32 {
-    let center_cell = world_to_cell(world_pos);
-    let inside = matches!(
-        terrain.get_cell_or_generated(center_cell),
-        TerrainCell::Solid { .. }
-    );
-    let h = CELL_SIZE_M;
-    let mut best = SDF_INF;
-    for dy in -SDF_QUERY_RADIUS_CELLS..=SDF_QUERY_RADIUS_CELLS {
-        for dx in -SDF_QUERY_RADIUS_CELLS..=SDF_QUERY_RADIUS_CELLS {
-            let cell = center_cell + IVec2::new(dx, dy);
-            let cell_is_solid = matches!(
-                terrain.get_cell_or_generated(cell),
-                TerrainCell::Solid { .. }
-            );
-            if cell_is_solid == inside {
-                continue;
-            }
-            let min = cell.as_vec2() * h;
-            let max = min + Vec2::splat(h);
-            let closest = world_pos.clamp(min, max);
-            best = best.min(world_pos.distance(closest));
-        }
-    }
-    if best >= SDF_INF {
-        best = SDF_QUERY_RADIUS_CELLS as f32 * h;
-    }
-    if inside { -best } else { best }
 }
 
 fn particle_world_mpm_count(particles: &ParticleWorld) -> usize {

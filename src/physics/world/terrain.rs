@@ -1,20 +1,15 @@
 use std::collections::{HashMap, HashSet, hash_map::Entry};
 
-use crate::physics::generation;
 use bevy::prelude::*;
 
 pub use super::constants::{
     CELL_SIZE_M, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, DEFAULT_SOLID_HP,
-    TERRAIN_SDF_SAMPLES_PER_CELL, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
-    WORLD_MIN_CHUNK_Y,
-};
-pub use crate::physics::generation::{
-    BASE_SURFACE_Y, HEIGHT_NOISE_AMP_CELLS, HEIGHT_NOISE_FREQ, SOIL_DEPTH_CELLS,
-    TERRAIN_GENERATOR_VERSION, WORLD_SEED,
+    WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };
 pub use crate::physics::material::TerrainMaterial;
 const SDF_INF: f32 = 1.0e9;
-const SDF_DIAGONAL_COST: f32 = std::f32::consts::SQRT_2;
+const SDF_QUERY_RADIUS_CELLS: i32 = 10;
+pub const TERRAIN_GENERATOR_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TerrainCell {
@@ -50,25 +45,6 @@ pub struct TerrainChunk {
 }
 
 impl TerrainChunk {
-    pub fn generated(chunk_coord: IVec2) -> Self {
-        let mut chunk = Self {
-            cells: [TerrainCell::Empty; CHUNK_SIZE * CHUNK_SIZE],
-            dirty: true,
-        };
-
-        for local_x in 0..CHUNK_SIZE_I32 {
-            let global_x = chunk_coord.x * CHUNK_SIZE_I32 + local_x;
-            for local_y in 0..CHUNK_SIZE_I32 {
-                let global_y = chunk_coord.y * CHUNK_SIZE_I32 + local_y;
-                let local = IVec2::new(local_x, local_y);
-                let global_cell = IVec2::new(global_x, global_y);
-                chunk.cells[local_cell_to_index(local)] = generated_cell_for_world(global_cell);
-            }
-        }
-
-        chunk
-    }
-
     pub fn get(&self, local_cell: IVec2) -> TerrainCell {
         self.cells[local_cell_to_index(local_cell)]
     }
@@ -96,28 +72,71 @@ impl TerrainChunk {
         self.dirty = false;
     }
 
-    pub fn is_pristine_generated(&self, chunk_coord: IVec2) -> bool {
-        for local_y in 0..CHUNK_SIZE_I32 {
-            for local_x in 0..CHUNK_SIZE_I32 {
-                let local = IVec2::new(local_x, local_y);
-                let global_cell = chunk_coord * CHUNK_SIZE_I32 + local;
-                if self.get(local) != generated_cell_for_world(global_cell) {
-                    return false;
-                }
-            }
+    pub fn is_pristine_with_base(
+        &self,
+        base_cells: &[TerrainCell; CHUNK_SIZE * CHUNK_SIZE],
+    ) -> bool {
+        self.cells
+            .iter()
+            .zip(base_cells.iter())
+            .all(|(current, base)| current == base)
+    }
+
+    fn from_cells(cells: [TerrainCell; CHUNK_SIZE * CHUNK_SIZE]) -> Self {
+        Self {
+            cells,
+            dirty: false,
         }
-        true
     }
 }
 
-pub fn surface_y_for_world_x(world_x: i32) -> i32 {
-    generation::surface_y_for_world_x(world_x)
+#[derive(Debug, Clone)]
+pub struct TerrainOverrideChunk {
+    cells: [Option<TerrainCell>; CHUNK_SIZE * CHUNK_SIZE],
+    override_count: usize,
 }
 
-pub fn generated_cell_for_world(global_cell: IVec2) -> TerrainCell {
-    generation::generated_material_for_world_cell(global_cell)
-        .map(TerrainCell::solid)
-        .unwrap_or(TerrainCell::Empty)
+impl Default for TerrainOverrideChunk {
+    fn default() -> Self {
+        Self {
+            cells: [None; CHUNK_SIZE * CHUNK_SIZE],
+            override_count: 0,
+        }
+    }
+}
+
+impl TerrainOverrideChunk {
+    pub fn get(&self, local_cell: IVec2) -> Option<TerrainCell> {
+        self.cells[local_cell_to_index(local_cell)]
+    }
+
+    pub fn set(&mut self, local_cell: IVec2, next: Option<TerrainCell>) -> bool {
+        let index = local_cell_to_index(local_cell);
+        let prev = self.cells[index];
+        if prev == next {
+            return false;
+        }
+        self.cells[index] = next;
+        if prev.is_none() && next.is_some() {
+            self.override_count = self.override_count.saturating_add(1);
+        } else if prev.is_some() && next.is_none() {
+            self.override_count = self.override_count.saturating_sub(1);
+        }
+        true
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.override_count == 0
+    }
+
+    pub fn iter_overrides(&self) -> impl Iterator<Item = (IVec2, TerrainCell)> + '_ {
+        self.cells.iter().enumerate().filter_map(|(index, cell)| {
+            let cell = (*cell)?;
+            let local_x = (index % CHUNK_SIZE) as i32;
+            let local_y = (index / CHUNK_SIZE) as i32;
+            Some((IVec2::new(local_x, local_y), cell))
+        })
+    }
 }
 
 #[derive(Resource, Debug)]
@@ -126,8 +145,10 @@ pub struct TerrainWorld {
     terrain_version: u64,
     terrain_render_version: u64,
     chunks: HashMap<IVec2, TerrainChunk>,
-    chunk_overrides: HashMap<IVec2, HashMap<IVec2, TerrainCell>>,
+    generated_base_chunks: HashMap<IVec2, [TerrainCell; CHUNK_SIZE * CHUNK_SIZE]>,
+    chunk_overrides: HashMap<IVec2, TerrainOverrideChunk>,
     dirty_chunks: HashSet<IVec2>,
+    dirty_override_chunks: HashSet<IVec2>,
     static_particle_pos: Vec<Vec2>,
     static_particle_grid: HashMap<IVec2, Vec<usize>>,
     static_particles_dirty: bool,
@@ -147,8 +168,10 @@ impl Default for TerrainWorld {
             terrain_version: 0,
             terrain_render_version: 0,
             chunks: HashMap::default(),
+            generated_base_chunks: HashMap::default(),
             chunk_overrides: HashMap::default(),
             dirty_chunks: HashSet::default(),
+            dirty_override_chunks: HashSet::default(),
             static_particle_pos: Vec::default(),
             static_particle_grid: HashMap::default(),
             static_particles_dirty: true,
@@ -188,8 +211,10 @@ impl TerrainWorld {
         self.terrain_version = self.terrain_version.wrapping_add(1);
         self.terrain_render_version = self.terrain_render_version.wrapping_add(1);
         self.chunks.clear();
+        self.generated_base_chunks.clear();
         self.chunk_overrides.clear();
         self.dirty_chunks.clear();
+        self.dirty_override_chunks.clear();
         self.static_particle_pos.clear();
         self.static_particle_grid.clear();
         self.static_particles_dirty = true;
@@ -229,7 +254,10 @@ impl TerrainWorld {
                     return None;
                 }
                 let is_pristine = if self.generation_enabled {
-                    chunk.is_pristine_generated(chunk_coord)
+                    self.generated_base_chunks
+                        .get(&chunk_coord)
+                        .map(|base| chunk.is_pristine_with_base(base))
+                        .unwrap_or(false)
                 } else {
                     chunk.is_empty()
                 };
@@ -303,6 +331,34 @@ impl TerrainWorld {
 
     pub fn chunk(&self, chunk_coord: IVec2) -> Option<&TerrainChunk> {
         self.chunks.get(&chunk_coord)
+    }
+
+    pub fn load_generated_chunk_from_material_ids(
+        &mut self,
+        chunk_coord: IVec2,
+        material_ids: &[u16; CHUNK_SIZE * CHUNK_SIZE],
+    ) {
+        if self.chunks.contains_key(&chunk_coord) {
+            return;
+        }
+        let mut cells = [TerrainCell::Empty; CHUNK_SIZE * CHUNK_SIZE];
+        for (index, material) in material_ids.iter().copied().enumerate() {
+            cells[index] = material_id_to_terrain_cell(material);
+        }
+
+        self.generated_base_chunks.insert(chunk_coord, cells);
+        let mut chunk = TerrainChunk::from_cells(cells);
+        if let Some(overrides) = self.chunk_overrides.get(&chunk_coord) {
+            for (local_cell, cell) in overrides.iter_overrides() {
+                let _ = chunk.set(local_cell, cell);
+            }
+        }
+        if chunk.is_dirty() {
+            self.dirty_chunks.insert(chunk_coord);
+        }
+        self.chunks.insert(chunk_coord, chunk);
+        self.terrain_version = self.terrain_version.wrapping_add(1);
+        self.static_particles_dirty = true;
     }
 
     pub fn loaded_chunk_coords(&self) -> Vec<IVec2> {
@@ -382,35 +438,22 @@ impl TerrainWorld {
         }
         self.chunk_overrides
             .get(&chunk_coord)
-            .and_then(|overrides| overrides.get(&local_cell).copied())
+            .and_then(|overrides| overrides.get(local_cell))
     }
 
     pub fn get_cell_or_generated(&self, global_cell: IVec2) -> TerrainCell {
         if let Some(cell) = self.get_loaded_or_overridden_cell(global_cell) {
             return cell;
         }
-        if self.generation_enabled {
-            generated_cell_for_world(global_cell)
-        } else {
-            TerrainCell::Empty
-        }
+        TerrainCell::Empty
     }
 
     pub fn get_cell_or_generated_with_surface_y(
         &self,
         global_cell: IVec2,
-        surface_y: i32,
+        _surface_y: i32,
     ) -> TerrainCell {
-        if let Some(cell) = self.get_loaded_or_overridden_cell(global_cell) {
-            return cell;
-        }
-        if self.generation_enabled {
-            generation::generated_material_for_y(global_cell.y, surface_y)
-                .map(TerrainCell::solid)
-                .unwrap_or(TerrainCell::Empty)
-        } else {
-            TerrainCell::Empty
-        }
+        self.get_cell_or_generated(global_cell)
     }
 
     pub fn take_dirty_chunks(&mut self) -> Vec<IVec2> {
@@ -428,6 +471,28 @@ impl TerrainWorld {
 
     pub fn dirty_chunk_coords(&self) -> Vec<IVec2> {
         let mut dirty: Vec<_> = self.dirty_chunks.iter().copied().collect();
+        dirty.sort_by_key(|coord| (coord.y, coord.x));
+        dirty
+    }
+
+    pub fn override_chunk_coords(&self) -> Vec<IVec2> {
+        let mut coords: Vec<_> = self.chunk_overrides.keys().copied().collect();
+        coords.sort_by_key(|coord| (coord.y, coord.x));
+        coords
+    }
+
+    pub fn override_chunk_cells(&self, chunk_coord: IVec2) -> Option<&TerrainOverrideChunk> {
+        self.chunk_overrides.get(&chunk_coord)
+    }
+
+    pub fn take_dirty_override_chunks(&mut self) -> Vec<IVec2> {
+        let mut dirty: Vec<_> = self.dirty_override_chunks.drain().collect();
+        dirty.sort_by_key(|coord| (coord.y, coord.x));
+        dirty
+    }
+
+    pub fn dirty_override_chunk_coords(&self) -> Vec<IVec2> {
+        let mut dirty: Vec<_> = self.dirty_override_chunks.iter().copied().collect();
         dirty.sort_by_key(|coord| (coord.y, coord.x));
         dirty
     }
@@ -465,25 +530,23 @@ impl TerrainWorld {
             }
         }
 
-        self.rebuild_signed_distance_field();
+        self.sdf_samples.clear();
+        self.sdf_width = 0;
+        self.sdf_height = 0;
+        self.sdf_sample_spacing_m = 0.0;
+        self.sdf_origin_m = Vec2::ZERO;
+        self.sdf_min_world_m = Vec2::ZERO;
+        self.sdf_max_world_m = Vec2::ZERO;
         self.static_particles_dirty = false;
     }
 
     pub fn sample_signed_distance_and_normal(&self, world_pos: Vec2) -> Option<(f32, Vec2)> {
-        let d = self.sample_signed_distance(world_pos)?;
-        let eps = self.sdf_sample_spacing_m.max(1e-4);
-        let dx = self
-            .sample_signed_distance(world_pos + Vec2::new(eps, 0.0))
-            .unwrap_or(d)
-            - self
-                .sample_signed_distance(world_pos - Vec2::new(eps, 0.0))
-                .unwrap_or(d);
-        let dy = self
-            .sample_signed_distance(world_pos + Vec2::new(0.0, eps))
-            .unwrap_or(d)
-            - self
-                .sample_signed_distance(world_pos - Vec2::new(0.0, eps))
-                .unwrap_or(d);
+        let d = self.sample_signed_distance(world_pos);
+        let eps = (0.5 * CELL_SIZE_M).max(1e-4);
+        let dx = self.sample_signed_distance(world_pos + Vec2::new(eps, 0.0))
+            - self.sample_signed_distance(world_pos - Vec2::new(eps, 0.0));
+        let dy = self.sample_signed_distance(world_pos + Vec2::new(0.0, eps))
+            - self.sample_signed_distance(world_pos - Vec2::new(0.0, eps));
         let normal = Vec2::new(dx, dy).normalize_or_zero();
         if normal == Vec2::ZERO {
             return Some((d, Vec2::Y));
@@ -518,132 +581,44 @@ impl TerrainWorld {
         &self.static_particle_pos
     }
 
-    fn rebuild_signed_distance_field(&mut self) {
-        let samples_per_cell = TERRAIN_SDF_SAMPLES_PER_CELL.max(1) as usize;
-        let Some((min_cell, max_cell)) = self.loaded_cell_bounds() else {
-            self.sdf_samples.clear();
-            self.sdf_width = 0;
-            self.sdf_height = 0;
-            self.sdf_sample_spacing_m = 0.0;
-            self.sdf_origin_m = Vec2::ZERO;
-            self.sdf_min_world_m = Vec2::ZERO;
-            self.sdf_max_world_m = Vec2::ZERO;
-            return;
-        };
-        let world_cells_w = (max_cell.x - min_cell.x + 1) as usize;
-        let world_cells_h = (max_cell.y - min_cell.y + 1) as usize;
-
-        self.sdf_width = world_cells_w * samples_per_cell;
-        self.sdf_height = world_cells_h * samples_per_cell;
-        self.sdf_sample_spacing_m = CELL_SIZE_M / samples_per_cell as f32;
-        self.sdf_origin_m = Vec2::new(
-            min_cell.x as f32 * CELL_SIZE_M + 0.5 * self.sdf_sample_spacing_m,
-            min_cell.y as f32 * CELL_SIZE_M + 0.5 * self.sdf_sample_spacing_m,
+    fn sample_signed_distance(&self, world_pos: Vec2) -> f32 {
+        let center_cell = world_to_cell(world_pos);
+        let inside = matches!(
+            self.get_loaded_cell_or_empty(center_cell),
+            TerrainCell::Solid { .. }
         );
-        self.sdf_min_world_m = Vec2::new(
-            min_cell.x as f32 * CELL_SIZE_M,
-            min_cell.y as f32 * CELL_SIZE_M,
-        );
-        self.sdf_max_world_m = Vec2::new(
-            (max_cell.x + 1) as f32 * CELL_SIZE_M,
-            (max_cell.y + 1) as f32 * CELL_SIZE_M,
-        );
-
-        let sample_count = self.sdf_width * self.sdf_height;
-        if sample_count == 0 {
-            self.sdf_samples.clear();
-            return;
-        }
-
-        let mut solid_mask = vec![false; sample_count];
-        for y in 0..self.sdf_height {
-            for x in 0..self.sdf_width {
-                let idx = sdf_index(self.sdf_width, x, y);
-                let sample_pos = self.sdf_origin_m
-                    + Vec2::new(
-                        x as f32 * self.sdf_sample_spacing_m,
-                        y as f32 * self.sdf_sample_spacing_m,
-                    );
-                let cell = world_to_cell(sample_pos);
-                solid_mask[idx] = matches!(
+        let mut best = SDF_INF;
+        for dy in -SDF_QUERY_RADIUS_CELLS..=SDF_QUERY_RADIUS_CELLS {
+            for dx in -SDF_QUERY_RADIUS_CELLS..=SDF_QUERY_RADIUS_CELLS {
+                let cell = center_cell + IVec2::new(dx, dy);
+                let cell_is_solid = matches!(
                     self.get_loaded_cell_or_empty(cell),
                     TerrainCell::Solid { .. }
                 );
+                if cell_is_solid == inside {
+                    continue;
+                }
+                let min = cell.as_vec2() * CELL_SIZE_M;
+                let max = min + Vec2::splat(CELL_SIZE_M);
+                let closest = world_pos.clamp(min, max);
+                best = best.min(world_pos.distance(closest));
             }
         }
-        let non_solid_mask = solid_mask.iter().map(|&v| !v).collect::<Vec<_>>();
-        let distance_to_solid = distance_transform(
-            &solid_mask,
-            self.sdf_width,
-            self.sdf_height,
-            self.sdf_sample_spacing_m,
-        );
-        let distance_to_non_solid = distance_transform(
-            &non_solid_mask,
-            self.sdf_width,
-            self.sdf_height,
-            self.sdf_sample_spacing_m,
-        );
-        let half_sample = 0.5 * self.sdf_sample_spacing_m;
-        self.sdf_samples.resize(sample_count, 0.0);
-        for i in 0..sample_count {
-            self.sdf_samples[i] = if solid_mask[i] {
-                -distance_to_non_solid[i] + half_sample
-            } else {
-                distance_to_solid[i] - half_sample
-            };
+        if best >= SDF_INF * 0.5 {
+            best = (SDF_QUERY_RADIUS_CELLS as f32 + 1.0) * CELL_SIZE_M;
         }
-    }
-
-    fn sample_signed_distance(&self, world_pos: Vec2) -> Option<f32> {
-        if self.sdf_samples.is_empty() || self.sdf_width == 0 || self.sdf_height == 0 {
-            return None;
-        }
-        if world_pos.x < self.sdf_min_world_m.x
-            || world_pos.x >= self.sdf_max_world_m.x
-            || world_pos.y < self.sdf_min_world_m.y
-            || world_pos.y >= self.sdf_max_world_m.y
-        {
-            return None;
-        }
-
-        let width_max = (self.sdf_width.saturating_sub(1)) as f32;
-        let height_max = (self.sdf_height.saturating_sub(1)) as f32;
-        let fx =
-            ((world_pos.x - self.sdf_origin_m.x) / self.sdf_sample_spacing_m).clamp(0.0, width_max);
-        let fy = ((world_pos.y - self.sdf_origin_m.y) / self.sdf_sample_spacing_m)
-            .clamp(0.0, height_max);
-
-        let x0 = fx.floor() as usize;
-        let y0 = fy.floor() as usize;
-        let x1 = (x0 + 1).min(self.sdf_width - 1);
-        let y1 = (y0 + 1).min(self.sdf_height - 1);
-        let tx = fx - x0 as f32;
-        let ty = fy - y0 as f32;
-
-        let d00 = self.sdf_samples[sdf_index(self.sdf_width, x0, y0)];
-        let d10 = self.sdf_samples[sdf_index(self.sdf_width, x1, y0)];
-        let d01 = self.sdf_samples[sdf_index(self.sdf_width, x0, y1)];
-        let d11 = self.sdf_samples[sdf_index(self.sdf_width, x1, y1)];
-
-        let dx0 = d00 + (d10 - d00) * tx;
-        let dx1 = d01 + (d11 - d01) * tx;
-        Some(dx0 + (dx1 - dx0) * ty)
+        if inside { -best } else { best }
     }
 
     fn ensure_chunk_mut(&mut self, chunk_coord: IVec2) -> &mut TerrainChunk {
         match self.chunks.entry(chunk_coord) {
             Entry::Vacant(vacant) => {
-                let mut chunk = if self.generation_enabled {
-                    TerrainChunk::generated(chunk_coord)
-                } else {
-                    TerrainChunk {
-                        cells: [TerrainCell::Empty; CHUNK_SIZE * CHUNK_SIZE],
-                        dirty: true,
-                    }
+                let mut chunk = TerrainChunk {
+                    cells: [TerrainCell::Empty; CHUNK_SIZE * CHUNK_SIZE],
+                    dirty: true,
                 };
                 if let Some(overrides) = self.chunk_overrides.get(&chunk_coord) {
-                    for (&local_cell, &cell) in overrides {
+                    for (local_cell, cell) in overrides.iter_overrides() {
                         let _ = chunk.set(local_cell, cell);
                     }
                 }
@@ -659,25 +634,46 @@ impl TerrainWorld {
     }
 
     fn update_chunk_override(&mut self, global_cell: IVec2, next: TerrainCell) {
+        let (chunk_coord, local_cell) = global_to_chunk_local(global_cell);
         let generated = if self.generation_enabled {
-            generated_cell_for_world(global_cell)
+            self.generated_base_chunks
+                .get(&chunk_coord)
+                .map(|cells| cells[local_cell_to_index(local_cell)])
+                .unwrap_or(TerrainCell::Empty)
         } else {
             TerrainCell::Empty
         };
-        let (chunk_coord, local_cell) = global_to_chunk_local(global_cell);
-        if next == generated {
-            if let Some(overrides) = self.chunk_overrides.get_mut(&chunk_coord) {
-                overrides.remove(&local_cell);
-                if overrides.is_empty() {
-                    self.chunk_overrides.remove(&chunk_coord);
-                }
+        let override_cell = (next != generated).then_some(next);
+        let changed = match self.chunk_overrides.entry(chunk_coord) {
+            Entry::Vacant(vacant) => {
+                let Some(cell) = override_cell else {
+                    return;
+                };
+                let mut chunk = TerrainOverrideChunk::default();
+                let _ = chunk.set(local_cell, Some(cell));
+                vacant.insert(chunk);
+                true
             }
-            return;
+            Entry::Occupied(mut occupied) => {
+                let changed = occupied.get_mut().set(local_cell, override_cell);
+                if occupied.get().is_empty() {
+                    occupied.remove();
+                }
+                changed
+            }
+        };
+        if changed {
+            self.dirty_override_chunks.insert(chunk_coord);
         }
-        self.chunk_overrides
-            .entry(chunk_coord)
-            .or_default()
-            .insert(local_cell, next);
+    }
+}
+
+fn material_id_to_terrain_cell(material_id: u16) -> TerrainCell {
+    match material_id {
+        1 => TerrainCell::solid(TerrainMaterial::Stone),
+        2 => TerrainCell::solid(TerrainMaterial::Soil),
+        3 => TerrainCell::solid(TerrainMaterial::Sand),
+        _ => TerrainCell::Empty,
     }
 }
 
@@ -711,70 +707,6 @@ fn local_cell_to_index(local_cell: IVec2) -> usize {
     (local_cell.y as usize) * CHUNK_SIZE + (local_cell.x as usize)
 }
 
-fn sdf_index(width: usize, x: usize, y: usize) -> usize {
-    y * width + x
-}
-
-fn distance_transform(mask: &[bool], width: usize, height: usize, spacing: f32) -> Vec<f32> {
-    let mut dist = vec![SDF_INF; width * height];
-    for y in 0..height {
-        for x in 0..width {
-            let idx = sdf_index(width, x, y);
-            if mask[idx] {
-                dist[idx] = 0.0;
-            }
-        }
-    }
-
-    for y in 0..height {
-        for x in 0..width {
-            let idx = sdf_index(width, x, y);
-            let mut d = dist[idx];
-            if x > 0 {
-                d = d.min(dist[sdf_index(width, x - 1, y)] + 1.0);
-            }
-            if y > 0 {
-                d = d.min(dist[sdf_index(width, x, y - 1)] + 1.0);
-            }
-            if x > 0 && y > 0 {
-                d = d.min(dist[sdf_index(width, x - 1, y - 1)] + SDF_DIAGONAL_COST);
-            }
-            if x + 1 < width && y > 0 {
-                d = d.min(dist[sdf_index(width, x + 1, y - 1)] + SDF_DIAGONAL_COST);
-            }
-            dist[idx] = d;
-        }
-    }
-
-    for y in (0..height).rev() {
-        for x in (0..width).rev() {
-            let idx = sdf_index(width, x, y);
-            let mut d = dist[idx];
-            if x + 1 < width {
-                d = d.min(dist[sdf_index(width, x + 1, y)] + 1.0);
-            }
-            if y + 1 < height {
-                d = d.min(dist[sdf_index(width, x, y + 1)] + 1.0);
-            }
-            if x + 1 < width && y + 1 < height {
-                d = d.min(dist[sdf_index(width, x + 1, y + 1)] + SDF_DIAGONAL_COST);
-            }
-            if x > 0 && y + 1 < height {
-                d = d.min(dist[sdf_index(width, x - 1, y + 1)] + SDF_DIAGONAL_COST);
-            }
-            dist[idx] = d;
-        }
-    }
-
-    for d in &mut dist {
-        if *d < SDF_INF {
-            *d *= spacing;
-        }
-    }
-
-    dist
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -784,65 +716,6 @@ mod tests {
         let (chunk, local) = global_to_chunk_local(IVec2::new(-1, -1));
         assert_eq!(chunk, IVec2::new(-1, -1));
         assert_eq!(local, IVec2::new(CHUNK_SIZE_I32 - 1, CHUNK_SIZE_I32 - 1));
-    }
-
-    #[test]
-    fn generated_chunk_fills_cells_below_surface() {
-        let chunk = TerrainChunk::generated(IVec2::new(0, 0));
-        for local_y in 0..CHUNK_SIZE_I32 {
-            for local_x in 0..CHUNK_SIZE_I32 {
-                let world_x = local_x;
-                let world_y = local_y;
-                let expected = generated_cell_for_world(IVec2::new(world_x, world_y));
-                assert_eq!(chunk.get(IVec2::new(local_x, local_y)), expected);
-            }
-        }
-    }
-
-    #[test]
-    fn generated_cell_uses_soil_layer_near_surface() {
-        let x = 10;
-        let surface_y = surface_y_for_world_x(x);
-        assert!(matches!(
-            generated_cell_for_world(IVec2::new(x, surface_y)),
-            TerrainCell::Solid {
-                material: TerrainMaterial::Soil,
-                ..
-            }
-        ));
-        assert!(matches!(
-            generated_cell_for_world(IVec2::new(x, surface_y - SOIL_DEPTH_CELLS)),
-            TerrainCell::Solid {
-                material: TerrainMaterial::Stone,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn generation_rule_is_continuous_across_chunk_boundaries() {
-        let left_chunk = TerrainChunk::generated(IVec2::new(-1, 0));
-        let right_chunk = TerrainChunk::generated(IVec2::new(0, 0));
-        for local_y in 0..CHUNK_SIZE_I32 {
-            let left_world =
-                IVec2::new(-1, 0) * CHUNK_SIZE_I32 + IVec2::new(CHUNK_SIZE_I32 - 1, local_y);
-            let right_world = IVec2::new(0, 0) * CHUNK_SIZE_I32 + IVec2::new(0, local_y);
-            assert_eq!(
-                left_chunk.get(IVec2::new(CHUNK_SIZE_I32 - 1, local_y)),
-                generated_cell_for_world(left_world)
-            );
-            assert_eq!(
-                right_chunk.get(IVec2::new(0, local_y)),
-                generated_cell_for_world(right_world)
-            );
-        }
-    }
-
-    #[test]
-    fn surface_function_is_deterministic() {
-        for x in -256..=256 {
-            assert_eq!(surface_y_for_world_x(x), surface_y_for_world_x(x));
-        }
     }
 
     #[test]
@@ -856,7 +729,9 @@ mod tests {
     #[test]
     fn static_particles_marked_dirty_on_cell_changes() {
         let mut terrain = TerrainWorld::default();
-        terrain.reset_fixed_world();
+        terrain.set_generation_enabled(false);
+        terrain.ensure_chunk_loaded(IVec2::ZERO);
+        assert!(terrain.set_cell(IVec2::new(0, 0), TerrainCell::stone()));
         terrain.rebuild_static_particles_if_dirty(0.25);
         assert!(!terrain.static_particles_dirty);
 
@@ -870,23 +745,22 @@ mod tests {
     }
 
     #[test]
-    fn sdf_sign_matches_solid_and_empty_space() {
+    fn sdf_sign_matches_loaded_solid_and_empty_space() {
         let mut terrain = TerrainWorld::default();
-        terrain.reset_fixed_world();
+        terrain.set_generation_enabled(false);
+        terrain.ensure_chunk_loaded(IVec2::ZERO);
+        assert!(terrain.set_cell(IVec2::new(0, 0), TerrainCell::stone()));
         terrain.rebuild_static_particles_if_dirty(0.25);
-
-        let surface_y = surface_y_for_world_x(0);
-        let inside_ground = cell_to_world_center(IVec2::new(0, surface_y - 1));
-        let above_ground = cell_to_world_center(IVec2::new(0, surface_y + 2));
+        let inside = cell_to_world_center(IVec2::new(0, 0));
+        let above = cell_to_world_center(IVec2::new(0, 3));
         let d_inside = terrain
-            .sample_signed_distance_and_normal(inside_ground)
+            .sample_signed_distance_and_normal(inside)
             .map(|(d, _)| d)
-            .unwrap();
+            .unwrap_or(f32::INFINITY);
         let d_above = terrain
-            .sample_signed_distance_and_normal(above_ground)
+            .sample_signed_distance_and_normal(above)
             .map(|(d, _)| d)
-            .unwrap();
-
+            .unwrap_or(f32::NEG_INFINITY);
         assert!(d_inside < 0.0);
         assert!(d_above > 0.0);
     }
@@ -894,6 +768,7 @@ mod tests {
     #[test]
     fn unload_pristine_chunks_outside_radius_keeps_modified_chunks() {
         let mut terrain = TerrainWorld::default();
+        terrain.set_generation_enabled(false);
         terrain.ensure_chunk_loaded(IVec2::new(0, 0));
         terrain.ensure_chunk_loaded(IVec2::new(5, 0));
 
@@ -902,12 +777,7 @@ mod tests {
 
         terrain.ensure_chunk_loaded(IVec2::new(5, 0));
         let modified_cell = IVec2::new(5 * CHUNK_SIZE_I32, 0);
-        let generated = generated_cell_for_world(modified_cell);
-        let modified = if matches!(generated, TerrainCell::Empty) {
-            TerrainCell::stone()
-        } else {
-            TerrainCell::Empty
-        };
+        let modified = TerrainCell::stone();
         assert!(terrain.set_cell(modified_cell, modified));
 
         terrain.unload_pristine_chunks_outside_radius(IVec2::new(0, 0), 1);
@@ -940,49 +810,31 @@ mod tests {
         let mut terrain = TerrainWorld::default();
         let chunk = IVec2::new(9, -4);
         let cell = chunk * CHUNK_SIZE_I32 + IVec2::new(3, 5);
-        terrain.ensure_chunk_loaded(chunk);
-
-        let generated = generated_cell_for_world(cell);
-        let modified = if matches!(generated, TerrainCell::Empty) {
-            TerrainCell::stone()
-        } else {
-            TerrainCell::Empty
-        };
+        let empty_ids = [0u16; CHUNK_SIZE * CHUNK_SIZE];
+        terrain.load_generated_chunk_from_material_ids(chunk, &empty_ids);
+        let modified = TerrainCell::stone();
         assert!(terrain.set_cell(cell, modified));
-        assert_eq!(terrain.get_cell_or_generated(cell), modified);
+        assert_eq!(terrain.get_cell_or_generated(cell), TerrainCell::stone());
 
         terrain.chunks.remove(&chunk);
-        assert_eq!(terrain.get_cell_or_generated(cell), modified);
+        assert_eq!(terrain.get_cell_or_generated(cell), TerrainCell::stone());
 
-        terrain.ensure_chunk_loaded(chunk);
-        assert!(terrain.set_cell(cell, generated));
+        terrain.load_generated_chunk_from_material_ids(chunk, &empty_ids);
+        assert!(terrain.set_cell(cell, TerrainCell::Empty));
         terrain.chunks.remove(&chunk);
-        assert_eq!(terrain.get_cell_or_generated(cell), generated);
+        assert_eq!(terrain.get_cell_or_generated(cell), TerrainCell::Empty);
     }
 
     #[test]
     fn get_cell_or_generated_with_surface_y_matches_default_path() {
         let mut terrain = TerrainWorld::default();
-        let chunk = IVec2::new(4, -2);
-        let overridden_cell = chunk * CHUNK_SIZE_I32 + IVec2::new(5, 7);
-        terrain.ensure_chunk_loaded(chunk);
-        let generated = generated_cell_for_world(overridden_cell);
-        let overridden = if matches!(generated, TerrainCell::Empty) {
-            TerrainCell::stone()
-        } else {
-            TerrainCell::Empty
-        };
-        assert!(terrain.set_cell(overridden_cell, overridden));
-        terrain.chunks.remove(&chunk);
-
-        for x in -96..=96 {
-            let surface_y = surface_y_for_world_x(x);
-            for y in (surface_y - 12)..=(surface_y + 8) {
+        terrain.set_generation_enabled(false);
+        for x in -8..=8 {
+            for y in -8..=8 {
                 let cell = IVec2::new(x, y);
                 assert_eq!(
                     terrain.get_cell_or_generated(cell),
-                    terrain.get_cell_or_generated_with_surface_y(cell, surface_y),
-                    "mismatch at cell ({x}, {y})"
+                    terrain.get_cell_or_generated_with_surface_y(cell, 0),
                 );
             }
         }
@@ -993,10 +845,30 @@ mod tests {
         let mut terrain = TerrainWorld::default();
         terrain.set_generation_enabled(false);
         let cell = IVec2::new(0, -32);
-        assert!(matches!(
-            generated_cell_for_world(cell),
-            TerrainCell::Solid { .. }
-        ));
         assert_eq!(terrain.get_cell_or_generated(cell), TerrainCell::Empty);
+    }
+
+    #[test]
+    fn override_chunk_uses_fixed_array_and_dirty_tracking() {
+        let mut terrain = TerrainWorld::default();
+        let chunk = IVec2::new(7, -3);
+        let cell = chunk * CHUNK_SIZE_I32 + IVec2::new(11, 9);
+        let empty_ids = [0u16; CHUNK_SIZE * CHUNK_SIZE];
+        terrain.load_generated_chunk_from_material_ids(chunk, &empty_ids);
+        assert!(terrain.set_cell(cell, TerrainCell::stone()));
+
+        let dirty_chunks = terrain.take_dirty_override_chunks();
+        assert_eq!(dirty_chunks, vec![chunk]);
+
+        let override_chunk = terrain.override_chunk_cells(chunk).unwrap();
+        assert_eq!(
+            override_chunk.get(IVec2::new(11, 9)),
+            Some(TerrainCell::stone())
+        );
+
+        assert!(terrain.set_cell(cell, TerrainCell::Empty));
+        let dirty_chunks = terrain.take_dirty_override_chunks();
+        assert_eq!(dirty_chunks, vec![chunk]);
+        assert!(terrain.override_chunk_cells(chunk).is_none());
     }
 }

@@ -34,7 +34,8 @@ struct DirtyCell {
 
 @group(0) @binding(0) var<uniform> params: NearParams;
 @group(0) @binding(1) var<storage, read> dirty_cells: array<DirtyCell>;
-@group(0) @binding(2) var near_tex: texture_storage_2d<r16uint, write>;
+@group(0) @binding(2) var near_base_tex: texture_storage_2d<r16uint, write>;
+@group(0) @binding(3) var near_override_tex: texture_storage_2d<r16uint, write>;
 
 fn positive_mod(x: i32, m: i32) -> i32 {
     let r = x % m;
@@ -70,5 +71,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         material = dirty.override_material;
     }
 
-    textureStore(near_tex, vec2<i32>(tx, ty), vec4<u32>(material, 0u, 0u, 0u));
+    textureStore(near_base_tex, vec2<i32>(tx, ty), vec4<u32>(material, 0u, 0u, 0u));
+    textureStore(
+        near_override_tex,
+        vec2<i32>(tx, ty),
+        vec4<u32>(dirty.override_material, 0u, 0u, 0u),
+    );
 }

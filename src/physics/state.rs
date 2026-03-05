@@ -44,7 +44,7 @@ impl Default for TerrainStreamingSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            load_radius_chunks: 5,
+            load_radius_chunks: 0,
         }
     }
 }

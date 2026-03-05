@@ -24,7 +24,13 @@ pub struct TerrainRenderDiagnostics {
     pub terrain_generation_origin_delta_y_frame: i32,
     pub terrain_generation_full_refresh_frame: bool,
     pub terrain_generation_full_refresh_reason_bits: u32,
+    pub terrain_override_runs_frame: u32,
+    pub terrain_override_cells_frame: u32,
+    pub terrain_override_pending_runs: u32,
+    pub terrain_override_budget_completion_frame: f32,
+    pub terrain_override_runs_total: u64,
+    pub terrain_override_cells_total: u64,
 }
 
-pub use terrain_gpu::TerrainGpuPlugin;
+pub use terrain_gpu::{TerrainGeneratedChunkCache, TerrainGpuPlugin};
 pub use water_dot_gpu::{WaterDotGpuLabel, WaterDotGpuPlugin};

@@ -7,14 +7,13 @@ use bevy::prelude::*;
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
-use super::generation::TERRAIN_GENERATOR_VERSION;
 use super::material::{
     DEFAULT_MATERIAL_PARAMS, ParticleMaterial, TerrainMaterial, terrain_boundary_radius_m,
 };
 use super::state::SimulationState;
 use super::world::object::{ObjectSnapshotData, ObjectWorld};
 use super::world::particle::ParticleWorld;
-use super::world::terrain::{CHUNK_SIZE_I32, TerrainCell, TerrainWorld};
+use super::world::terrain::{CHUNK_SIZE_I32, TERRAIN_GENERATOR_VERSION, TerrainCell, TerrainWorld};
 
 pub const SAVE_VERSION: u32 = 1;
 pub const DEFAULT_QUICK_SAVE_SLOT: &str = "quick_save";
@@ -464,10 +463,9 @@ mod tests {
     use super::*;
     use crate::physics::world::object::ObjectWorld;
     use crate::physics::world::particle::ParticleWorld;
-    use crate::physics::world::terrain::generated_cell_for_world;
 
     #[test]
-    fn load_uses_chunk_regeneration_when_terrain_cells_are_empty() {
+    fn load_restores_loaded_chunks_as_empty_when_terrain_cells_are_empty() {
         let mut terrain = TerrainWorld::default();
         let mut particles = ParticleWorld::default();
         let mut objects = ObjectWorld::default();
@@ -495,10 +493,7 @@ mod tests {
         for local_y in 0..CHUNK_SIZE_I32 {
             for local_x in 0..CHUNK_SIZE_I32 {
                 let cell = IVec2::new(local_x, local_y);
-                assert_eq!(
-                    terrain.get_loaded_cell_or_empty(cell),
-                    generated_cell_for_world(cell)
-                );
+                assert_eq!(terrain.get_loaded_cell_or_empty(cell), TerrainCell::Empty);
             }
         }
 

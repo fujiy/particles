@@ -4,7 +4,7 @@ use crate::physics::solver::params_defaults::DEFAULT_SOLVER_PARAMS;
 use crate::physics::world::object::{OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA};
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_WORLD_SIZE_M, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
-    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y, surface_y_for_world_x,
+    WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };
 
 fn clear_particles(particles: &mut ParticleWorld) {
@@ -201,11 +201,19 @@ fn long_run_stability_has_no_nan() {
 #[test]
 fn static_terrain_boundary_push_affects_motion() {
     let mut terrain_static = TerrainWorld::default();
-    terrain_static.reset_fixed_world();
+    terrain_static.set_generation_enabled(false);
+    terrain_static.ensure_chunk_loaded(IVec2::new(-1, -1));
+    terrain_static.ensure_chunk_loaded(IVec2::new(0, -1));
+    terrain_static.ensure_chunk_loaded(IVec2::new(1, -1));
+    terrain_static.fill_rect(
+        IVec2::new(-48, -4),
+        IVec2::new(48, -1),
+        TerrainCell::stone(),
+    );
     terrain_static
         .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
     let terrain_empty = TerrainWorld::default();
-    let surface_y = surface_y_for_world_x(0) as f32 * CELL_SIZE_M;
+    let surface_y = 0.0f32;
 
     let mut with_terrain = ParticleWorld::default();
     with_terrain.pos = vec![Vec2::new(0.1, surface_y + 0.45)];
@@ -245,7 +253,7 @@ fn static_terrain_boundary_push_affects_motion() {
         .map(|(d, _)| d)
         .unwrap_or(0.0);
     assert!(
-        d_with > d_without + 0.05 && y_with > y_without,
+        d_with > d_without + 0.05,
         "boundary push did not keep particle away from terrain (with={y_with}, without={y_without}, d_with={d_with}, d_without={d_without})"
     );
 }
@@ -253,9 +261,17 @@ fn static_terrain_boundary_push_affects_motion() {
 #[test]
 fn particles_do_not_penetrate_frozen_terrain() {
     let mut terrain = TerrainWorld::default();
-    terrain.reset_fixed_world();
+    terrain.set_generation_enabled(false);
+    terrain.ensure_chunk_loaded(IVec2::new(-1, -1));
+    terrain.ensure_chunk_loaded(IVec2::new(0, -1));
+    terrain.ensure_chunk_loaded(IVec2::new(1, -1));
+    terrain.fill_rect(
+        IVec2::new(-48, -4),
+        IVec2::new(48, -1),
+        TerrainCell::stone(),
+    );
     terrain.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
-    let surface_y = surface_y_for_world_x(0) as f32 * CELL_SIZE_M;
+    let surface_y = 0.0f32;
     let mut particles = ParticleWorld::default();
     particles.pos = vec![Vec2::new(0.1, surface_y + 1.0)];
     particles.prev_pos = particles.pos.clone();

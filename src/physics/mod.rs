@@ -1,5 +1,4 @@
 pub mod connectivity;
-pub mod generation;
 pub mod gpu_mpm;
 pub mod material;
 pub mod profiler;

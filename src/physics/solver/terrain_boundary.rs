@@ -265,10 +265,18 @@ mod tests {
     use crate::physics::world::grid::GridBlock;
 
     #[test]
-    fn generated_sdf_sign_is_consistent_with_generated_occupancy() {
-        let terrain = TerrainWorld::default();
-        let inside = Vec2::new(0.0, -8.0);
-        let outside = Vec2::new(0.0, 8.0);
+    fn loaded_terrain_sdf_sign_is_consistent_with_occupancy() {
+        let mut terrain = TerrainWorld::default();
+        terrain.set_generation_enabled(false);
+        terrain.ensure_chunk_loaded(IVec2::new(-1, -1));
+        terrain.ensure_chunk_loaded(IVec2::new(0, -1));
+        terrain.fill_rect(
+            IVec2::new(-16, -8),
+            IVec2::new(16, -1),
+            TerrainCell::stone(),
+        );
+        let inside = Vec2::new(0.0, -1.0);
+        let outside = Vec2::new(0.0, 1.0);
         assert!(sample_terrain_sdf(&terrain, inside) < 0.0);
         assert!(sample_terrain_sdf(&terrain, outside) > 0.0);
     }
