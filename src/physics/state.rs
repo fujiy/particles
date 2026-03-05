@@ -81,11 +81,6 @@ pub struct PhysicsActiveRegion {
     pub chunk_max: Option<IVec2>,
 }
 
-#[derive(Resource, Debug, Default)]
-pub struct SimulationPerfMetrics {
-    pub physics_time_this_frame_secs: f64,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct PhysicsStepProfileSegment {
     pub name: String,
@@ -135,11 +130,6 @@ pub struct ReplayState {
     pub status_message: String,
     pub baseline_particle_count: usize,
     pub baseline_solid_cell_count: usize,
-}
-
-#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
-pub enum SimFixedSet {
-    Physics,
 }
 
 #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]

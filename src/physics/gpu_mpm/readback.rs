@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 
-use super::buffers::GpuParticle;
+use super::buffers::{GpuParticle, GpuStatisticsScalars};
 
 // ---------------------------------------------------------------------------
 // Final parsed result (shared render world → main world via Arc)
@@ -31,6 +31,26 @@ impl GpuReadbackResult {
     pub fn store(&self, particles: Vec<GpuParticle>) {
         if let Ok(mut g) = self.inner.lock() {
             *g = Some(particles);
+        }
+    }
+}
+
+#[derive(Resource, Clone, Default)]
+pub struct GpuStatisticsReadbackResult {
+    pub inner: Arc<Mutex<Option<GpuStatisticsScalars>>>,
+}
+
+impl GpuStatisticsReadbackResult {
+    pub fn take(&self) -> Option<GpuStatisticsScalars> {
+        if let Ok(mut g) = self.inner.lock() {
+            g.take()
+        } else {
+            None
+        }
+    }
+    pub fn store(&self, counts: GpuStatisticsScalars) {
+        if let Ok(mut g) = self.inner.lock() {
+            *g = Some(counts);
         }
     }
 }
@@ -57,6 +77,24 @@ impl Default for GpuReadbackState {
         Self {
             mapped: false,
             pending_count: 0,
+            mapped_ready: Arc::new(AtomicBool::new(false)),
+            frame_counter: 0,
+        }
+    }
+}
+
+/// Tracks in-flight map_async state for phase-count readback.
+#[derive(Resource)]
+pub struct GpuStatisticsReadbackState {
+    pub mapped: bool,
+    pub mapped_ready: Arc<AtomicBool>,
+    pub frame_counter: u64,
+}
+
+impl Default for GpuStatisticsReadbackState {
+    fn default() -> Self {
+        Self {
+            mapped: false,
             mapped_ready: Arc::new(AtomicBool::new(false)),
             frame_counter: 0,
         }

@@ -1,9 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::*;
+use crate::physics::gpu_mpm::sync::{
+    GpuWorldEditCommand, GpuWorldEditRequest,
+};
+use crate::physics::material::particles_per_cell;
 use crate::render::TerrainGeneratedChunkCache;
 
 const TOOL_PREFETCH_RADIUS_CHUNKS: i32 = 1;
@@ -12,14 +16,13 @@ pub(super) fn handle_world_interactions(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
-    solver_params: Res<SolverParams>,
     material_params: Res<MaterialParams>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     ui_buttons: Query<&Interaction, With<Button>>,
     mut interaction_state: ResMut<WorldInteractionState>,
     save_load_ui_state: Res<SaveLoadUiState>,
-    mut particle_world: ResMut<ParticleWorld>,
+    mut gpu_world_edit_requests: MessageWriter<GpuWorldEditRequest>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut generated_chunk_cache: ResMut<TerrainGeneratedChunkCache>,
     mut prefetched_tool: Local<Option<WorldTool>>,
@@ -29,8 +32,7 @@ pub(super) fn handle_world_interactions(
         finalize_stone_stroke(
             &mut interaction_state.stone_stroke,
             selected_tool,
-            &mut particle_world,
-            &solver_params,
+            &mut gpu_world_edit_requests,
         );
         interaction_state.last_drag_world = None;
         interaction_state.last_water_spawn_cell = None;
@@ -92,8 +94,7 @@ pub(super) fn handle_world_interactions(
         finalize_stone_stroke(
             &mut interaction_state.stone_stroke,
             selected_tool,
-            &mut particle_world,
-            &solver_params,
+            &mut gpu_world_edit_requests,
         );
         interaction_state.last_drag_world = None;
         interaction_state.last_water_spawn_cell = None;
@@ -104,8 +105,7 @@ pub(super) fn handle_world_interactions(
     let cursor_world = cursor_world.unwrap_or(Vec2::ZERO);
 
     let previous_world = interaction_state.last_drag_world.unwrap_or(cursor_world);
-    let dt = time.delta_secs().max(1e-4);
-    let stroke_velocity = (cursor_world - previous_world) / dt;
+    let _dt = time.delta_secs().max(1e-4);
     let mut terrain_changed = false;
 
     match selected_tool {
@@ -114,8 +114,7 @@ pub(super) fn handle_world_interactions(
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
-                &mut particle_world,
-                &solver_params,
+                &mut gpu_world_edit_requests,
             );
             let mut spawn_cells = Vec::new();
             let mut last_cell = interaction_state.last_water_spawn_cell;
@@ -124,18 +123,16 @@ pub(super) fn handle_world_interactions(
                     spawn_cells.push(cell);
                     last_cell = Some(cell);
                 }
-                particle_world.wake_particles_in_radius(
-                    cell_to_world_center(cell),
-                    solver_params.wake_radius_m,
-                );
             });
             interaction_state.last_water_spawn_cell = last_cell;
             if !spawn_cells.is_empty() {
-                let _ = particle_world.spawn_material_particles_from_cells(
-                    &spawn_cells,
-                    ParticleMaterial::WaterLiquid,
-                    Vec2::ZERO,
-                );
+                gpu_world_edit_requests.write(GpuWorldEditRequest {
+                    cells: spawn_cells,
+                    command: GpuWorldEditCommand::AddParticles {
+                        material: ParticleMaterial::WaterLiquid,
+                        count_per_cell: particles_per_cell(ParticleMaterial::WaterLiquid),
+                    },
+                });
             }
         }
         Some(tool) if tool.terrain_material().is_some() => {
@@ -159,10 +156,6 @@ pub(super) fn handle_world_interactions(
                 }
                 terrain_changed |=
                     terrain_world.set_cell(cell, TerrainCell::solid(terrain_material));
-                particle_world.wake_particles_in_radius(
-                    cell_to_world_center(cell),
-                    solver_params.wake_radius_m,
-                );
             });
         }
         Some(tool) if tool.is_granular() => {
@@ -178,18 +171,16 @@ pub(super) fn handle_world_interactions(
                         spawn_cells.push(cell);
                         last_cell = Some(cell);
                     }
-                    particle_world.wake_particles_in_radius(
-                        cell_to_world_center(cell),
-                        solver_params.wake_radius_m,
-                    );
                 });
                 interaction_state.last_granular_spawn_cell = last_cell;
                 if !spawn_cells.is_empty() {
-                    let _ = particle_world.spawn_material_particles_from_cells(
-                        &spawn_cells,
-                        material,
-                        Vec2::ZERO,
-                    );
+                    gpu_world_edit_requests.write(GpuWorldEditRequest {
+                        cells: spawn_cells,
+                        command: GpuWorldEditCommand::AddParticles {
+                            material,
+                            count_per_cell: particles_per_cell(material),
+                        },
+                    });
                 }
             }
         }
@@ -199,18 +190,12 @@ pub(super) fn handle_world_interactions(
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
-                &mut particle_world,
-                &solver_params,
+                &mut gpu_world_edit_requests,
             );
-            let mut had_particle_removal = false;
+            let mut delete_cells = HashSet::new();
             let mut removed_terrain_cells = HashSet::new();
             stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
-                let point = cell_to_world_center(cell);
-                let removal = particle_world
-                    .remove_particles_in_radius_with_map(point, TOOL_DELETE_BRUSH_RADIUS_M);
-                if removal.removed_count > 0 {
-                    had_particle_removal = true;
-                }
+                delete_cells.insert(cell);
                 let chunk = IVec2::new(
                     cell.x.div_euclid(CHUNK_SIZE_I32),
                     cell.y.div_euclid(CHUNK_SIZE_I32),
@@ -225,11 +210,15 @@ pub(super) fn handle_world_interactions(
                 if terrain_world.set_cell(cell, TerrainCell::Empty) {
                     removed_terrain_cells.insert(cell);
                 }
-                particle_world.wake_particles_in_radius(point, solver_params.wake_radius_m);
             });
             terrain_changed |= !removed_terrain_cells.is_empty();
-            if had_particle_removal {
-                let _ = had_particle_removal;
+            if !delete_cells.is_empty() {
+                gpu_world_edit_requests.write(GpuWorldEditRequest {
+                    cells: delete_cells.into_iter().collect(),
+                    command: GpuWorldEditCommand::RemoveParticles {
+                        max_count: u32::MAX,
+                    },
+                });
             }
         }
         Some(WorldTool::Break) => {
@@ -238,31 +227,25 @@ pub(super) fn handle_world_interactions(
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
-                &mut particle_world,
-                &solver_params,
+                &mut gpu_world_edit_requests,
             );
-            let mut detached_particles = HashSet::new();
             let mut removed_terrain_cells = HashSet::new();
             stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                let fractured = particle_world
-                    .fracture_solid_particles_in_radius(point, TOOL_BREAK_BRUSH_RADIUS_M);
-                detached_particles.extend(fractured);
                 removed_terrain_cells.extend(break_terrain_solids_in_radius(
                     &mut terrain_world,
                     &mut generated_chunk_cache,
-                    &mut particle_world,
                     point,
                     TOOL_BREAK_BRUSH_RADIUS_M,
                 ));
-                particle_world.wake_particles_in_radius(point, solver_params.wake_radius_m);
             });
             terrain_changed |= !removed_terrain_cells.is_empty();
-            let _ = detached_particles;
             if !removed_terrain_cells.is_empty() {
-                terrain_changed |= particle_world.detach_terrain_components_after_cell_removal(
-                    &mut terrain_world,
-                    &removed_terrain_cells,
-                );
+                gpu_world_edit_requests.write(GpuWorldEditRequest {
+                    cells: removed_terrain_cells.iter().copied().collect(),
+                    command: GpuWorldEditCommand::RemoveParticles {
+                        max_count: u32::MAX,
+                    },
+                });
             }
         }
         Some(_) => {}
@@ -272,18 +255,8 @@ pub(super) fn handle_world_interactions(
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
-                &mut particle_world,
-                &solver_params,
+                &mut gpu_world_edit_requests,
             );
-            let velocity_delta = stroke_velocity * DRAG_VELOCITY_GAIN;
-            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
-                particle_world.add_velocity_in_radius(
-                    point,
-                    DRAG_VELOCITY_BRUSH_RADIUS_M,
-                    velocity_delta,
-                    material_params.particle_speed_limit_mps,
-                );
-            });
         }
     }
 
@@ -334,8 +307,7 @@ pub(super) fn draw_world_tool_hover_highlight(
 fn finalize_stone_stroke(
     stroke: &mut StoneStrokeState,
     selected_tool: Option<WorldTool>,
-    particle_world: &mut ParticleWorld,
-    solver_params: &SolverParams,
+    gpu_world_edit_requests: &mut MessageWriter<GpuWorldEditRequest>,
 ) {
     if !stroke.active {
         stroke.generated_cells.clear();
@@ -353,9 +325,14 @@ fn finalize_stone_stroke(
                 stroke.candidate_cells.clear();
                 return;
             };
-            let _ = solver_params;
             let _ = tool.terrain_material();
-            let _ = particle_world.spawn_material_particles_from_cells(&cells, material, Vec2::ZERO);
+            gpu_world_edit_requests.write(GpuWorldEditRequest {
+                cells,
+                command: GpuWorldEditCommand::AddParticles {
+                    material,
+                    count_per_cell: particles_per_cell(material),
+                },
+            });
         }
     }
 
@@ -458,7 +435,6 @@ fn ensure_chunk_ready_for_edit(
 fn break_terrain_solids_in_radius(
     terrain_world: &mut TerrainWorld,
     generated_chunk_cache: &mut TerrainGeneratedChunkCache,
-    particle_world: &mut ParticleWorld,
     center: Vec2,
     radius: f32,
 ) -> HashSet<IVec2> {
@@ -466,7 +442,6 @@ fn break_terrain_solids_in_radius(
     let max_cell = world_to_cell(center + Vec2::splat(radius));
     let radius2 = radius * radius;
     let mut removed = HashSet::new();
-    let mut spawn_cells_by_material = HashMap::<ParticleMaterial, Vec<IVec2>>::new();
     let mut ready_chunks = HashSet::new();
     let mut missing_chunks = HashSet::new();
 
@@ -495,21 +470,11 @@ fn break_terrain_solids_in_radius(
             else {
                 continue;
             };
-            let Some(target_particle) = terrain_fracture_particle(material) else {
-                continue;
-            };
+            let _material = material;
             if terrain_world.set_cell(cell, TerrainCell::Empty) {
                 removed.insert(cell);
-                spawn_cells_by_material
-                    .entry(target_particle)
-                    .or_default()
-                    .push(cell);
             }
         }
-    }
-
-    for (material, cells) in spawn_cells_by_material {
-        let _ = particle_world.spawn_material_particles_from_cells(&cells, material, Vec2::ZERO);
     }
     removed
 }

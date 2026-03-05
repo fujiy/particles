@@ -247,13 +247,11 @@ pub(super) fn update_physics_area_overlay_button_label(
     overlay_state: Res<PhysicsAreaOverlayState>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     active_region: Res<PhysicsActiveRegion>,
-    particle_world: Res<ParticleWorld>,
     mut labels: Query<&mut Text, With<PhysicsAreaOverlayToggleButtonLabel>>,
 ) {
     if !overlay_state.is_changed()
         && !render_diagnostics.is_changed()
         && !active_region.is_changed()
-        && !particle_world.is_changed()
     {
         return;
     }
@@ -308,7 +306,6 @@ pub(super) fn update_overlay_info_text(
     physics_overlay_state: Res<PhysicsAreaOverlayState>,
     active_region: Res<PhysicsActiveRegion>,
     terrain_world: Res<TerrainWorld>,
-    particle_world: Res<ParticleWorld>,
     mut labels: Query<&mut Text, With<OverlayInfoText>>,
 ) {
     if !tile_overlay_state.is_changed()
@@ -316,7 +313,6 @@ pub(super) fn update_overlay_info_text(
         && !physics_overlay_state.is_changed()
         && !active_region.is_changed()
         && !terrain_world.is_changed()
-        && !particle_world.is_changed()
     {
         return;
     }

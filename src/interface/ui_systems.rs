@@ -3,6 +3,18 @@ use bevy::window::PrimaryWindow;
 
 use super::*;
 use crate::camera_controller::MainCamera;
+use crate::physics::gpu_mpm::sync::{MpmStatisticsSnapshot, MpmStatisticsStatus};
+use crate::physics::material::ParticleMaterial;
+use crate::physics::scenario::{ScenarioStatisticsInput, evaluate_scenario_state_from_statistics};
+
+fn phase_id_for_material(material: ParticleMaterial) -> Option<u32> {
+    match material {
+        ParticleMaterial::WaterLiquid => Some(0),
+        ParticleMaterial::SoilGranular => Some(1),
+        ParticleMaterial::SandGranular => Some(2),
+        _ => None,
+    }
+}
 
 pub(super) fn update_world_tool_button_visuals(
     interaction_state: Res<WorldInteractionState>,
@@ -218,13 +230,17 @@ pub(super) fn update_test_assert_panel(
     mut commands: Commands,
     replay_state: Res<ReplayState>,
     terrain: Res<TerrainWorld>,
-    particles: Res<ParticleWorld>,
+    stats_snapshot: Res<MpmStatisticsSnapshot>,
+    mut stats_status: ResMut<MpmStatisticsStatus>,
     mut panel_node: Single<&mut Node, With<TestAssertPanelRoot>>,
     title_entity: Single<Entity, With<TestAssertTitleText>>,
     list_entity: Single<Entity, With<TestAssertList>>,
     mut text_query: Query<&mut Text>,
     children_query: Query<&Children>,
 ) {
+    stats_status.total_particles = true;
+    stats_status.phase_counts = true;
+    stats_status.penetration = true;
     if !replay_state.enabled {
         panel_node.display = Display::None;
         return;
@@ -237,15 +253,43 @@ pub(super) fn update_test_assert_panel(
         panel_node.display = Display::None;
         return;
     };
+    stats_status.max_speed |= spec.thresholds.max_max_speed_mps.is_some();
+    stats_status.water_surface_p95 |= spec.water_surface_assertion.is_some();
+    stats_status.granular_repose |= spec.granular_repose_assertion.is_some();
+    stats_status.material_interaction |= spec.material_interaction_assertion.is_some();
+    if let Some(repose) = spec.granular_repose_assertion {
+        stats_status.repose_phase_id = phase_id_for_material(repose.material).unwrap_or(1);
+    }
+    if let Some(interaction) = spec.material_interaction_assertion {
+        stats_status.interaction_primary_phase_id =
+            phase_id_for_material(interaction.primary_material).unwrap_or(2);
+        stats_status.interaction_secondary_phase_id =
+            phase_id_for_material(interaction.secondary_material).unwrap_or(0);
+    }
     panel_node.display = Display::Flex;
 
-    let (metrics, assertions) = evaluate_scenario_state(
+    let stats_input = ScenarioStatisticsInput {
+        particle_count: stats_snapshot.total() as usize,
+        sleeping_ratio: 0.0,
+        max_speed_mps: stats_snapshot.max_speed_mps,
+        terrain_penetration_rate: stats_snapshot.all_penetration_ratio(),
+        water_surface_p95_cell: stats_snapshot.water_surface_p95_cell,
+        granular_repose_angle_deg: stats_snapshot.granular_repose_angle_deg,
+        granular_repose_base_span_cells: stats_snapshot.granular_repose_base_span_cells,
+        material_interaction_contact_ratio: Some(stats_snapshot.material_interaction_contact_ratio),
+        material_interaction_primary_centroid_y: stats_snapshot
+            .material_interaction_primary_centroid_y_m,
+        material_interaction_secondary_centroid_y: stats_snapshot
+            .material_interaction_secondary_centroid_y_m,
+    };
+
+    let (metrics, assertions) = evaluate_scenario_state_from_statistics(
         &spec,
         replay_state.current_step,
         replay_state.baseline_particle_count,
         replay_state.baseline_solid_cell_count,
         &terrain,
-        &particles,
+        stats_input,
     );
     let overall_ok = assertions.iter().filter(|row| row.active).all(|row| row.ok);
 
@@ -545,7 +589,7 @@ pub(super) fn update_fps_hud_stats(time: Res<Time>, mut fps_stats: ResMut<FpsHud
 pub(super) fn update_simulation_hud(
     fps_stats: Res<FpsHudStats>,
     sim_state: Res<SimulationState>,
-    particles: Res<ParticleWorld>,
+    phase_counts: Res<MpmStatisticsSnapshot>,
     terrain_render_diagnostics: Res<TerrainRenderDiagnostics>,
     mut hud_texts: ParamSet<(
         Single<&mut Text, With<SimulationHudFpsText>>,
@@ -562,43 +606,13 @@ pub(super) fn update_simulation_hud(
     } else {
         "Paused"
     };
-    let water_count = particles
-        .materials()
-        .iter()
-        .filter(|&&m| matches!(m, ParticleMaterial::WaterLiquid))
-        .count();
-    let stone_solid_count = particles
-        .materials()
-        .iter()
-        .filter(|&&m| matches!(m, ParticleMaterial::StoneSolid))
-        .count();
-    let stone_granular_count = particles
-        .materials()
-        .iter()
-        .filter(|&&m| matches!(m, ParticleMaterial::StoneGranular))
-        .count();
-    let soil_solid_count = particles
-        .materials()
-        .iter()
-        .filter(|&&m| matches!(m, ParticleMaterial::SoilSolid))
-        .count();
-    let soil_granular_count = particles
-        .materials()
-        .iter()
-        .filter(|&&m| matches!(m, ParticleMaterial::SoilGranular))
-        .count();
-    let sand_solid_count = particles
-        .materials()
-        .iter()
-        .filter(|&&m| matches!(m, ParticleMaterial::SandSolid))
-        .count();
-    let sand_granular_count = particles
-        .materials()
-        .iter()
-        .filter(|&&m| matches!(m, ParticleMaterial::SandGranular))
-        .count();
+    let water_count = phase_counts.water_liquid as usize;
+    let granular_soil_like_count = phase_counts.soil_granular as usize;
+    let granular_sand_count = phase_counts.sand_granular as usize;
+    let unknown_phase_count = phase_counts.unknown as usize;
+    let gpu_total_count = phase_counts.total() as usize;
     hud_texts.p1().0 = format!(
-        "Sim: {sim_status}\nTerrainGen/frame: {:>7} (d={:>4},{:>4} full={} r=0x{:02X})\nTerrainOvr/frame: runs={:>5} cells={:>6} pending={:>5} done={:>5.1}%\nTerrainOvr/total: runs={:>7} cells={:>8}\nWater(L): {water_count}\nStone(S): {stone_solid_count}\nStone(G): {stone_granular_count}\nSoil(S): {soil_solid_count}\nSoil(G): {soil_granular_count}\nSand(S): {sand_solid_count}\nSand(G): {sand_granular_count}",
+        "Sim: {sim_status}\nTerrainGen/frame: {:>7} (d={:>4},{:>4} full={} r=0x{:02X})\nTerrainOvr/frame: runs={:>5} cells={:>6} pending={:>5} done={:>5.1}%\nTerrainOvr/total: runs={:>7} cells={:>8}\nGPU Total: {gpu_total_count}\nWater(L): {water_count}\nGranular(Soil+Stone): {granular_soil_like_count}\nGranular(Sand): {granular_sand_count}\nGPU Unknown: {unknown_phase_count}",
         terrain_render_diagnostics.terrain_generation_eval_count_frame,
         terrain_render_diagnostics.terrain_generation_origin_delta_x_frame,
         terrain_render_diagnostics.terrain_generation_origin_delta_y_frame,

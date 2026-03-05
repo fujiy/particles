@@ -127,10 +127,93 @@ pub struct GpuMpmParams {
     pub alpha_apic_water: f32,
     /// APIC↔PIC blend coefficient for granular [Eq.32, physics.md].
     pub alpha_apic_granular: f32,
-    pub _pad: [u32; 1],
+    /// Statistics: tracked phase id (0=water,1=soil,2=sand, 0xFFFF_FFFF=all MPM phases).
+    pub stats_tracked_phase_id: u32,
+    /// Statistics: granular repose target phase id.
+    pub stats_repose_phase_id: u32,
+    /// Statistics: material interaction primary phase id.
+    pub stats_interaction_primary_phase_id: u32,
+    /// Statistics: material interaction secondary phase id.
+    pub stats_interaction_secondary_phase_id: u32,
+    /// Statistics: penetration threshold against terrain SDF (meters).
+    pub stats_penetration_epsilon_m: f32,
+    /// Statistics: fixed-point scale for position accumulations.
+    pub stats_position_fp_scale: f32,
+    pub _pad: [u32; 7],
 }
 
-const _: () = assert!(std::mem::size_of::<GpuMpmParams>() == 144);
+const _: () = assert!(std::mem::size_of::<GpuMpmParams>() == 192);
+
+pub const GPU_STATS_LANE_TOTAL_PARTICLES: usize = 0;
+pub const GPU_STATS_LANE_PHASE_WATER: usize = 1;
+pub const GPU_STATS_LANE_PHASE_GRANULAR_SOIL: usize = 2;
+pub const GPU_STATS_LANE_PHASE_GRANULAR_SAND: usize = 3;
+pub const GPU_STATS_LANE_PHASE_UNKNOWN: usize = 4;
+pub const GPU_STATS_LANE_MAX_SPEED_BITS: usize = 5;
+pub const GPU_STATS_LANE_ALL_COUNT: usize = 6;
+pub const GPU_STATS_LANE_ALL_PENETRATION_COUNT: usize = 7;
+/// Signed fixed-point sum (i32 bit pattern in u32 lane).
+pub const GPU_STATS_LANE_ALL_SUM_Y_FP: usize = 8;
+pub const GPU_STATS_LANE_TRACKED_COUNT: usize = 9;
+pub const GPU_STATS_LANE_TRACKED_PENETRATION_COUNT: usize = 10;
+/// Signed fixed-point sum (i32 bit pattern in u32 lane).
+pub const GPU_STATS_LANE_TRACKED_SUM_Y_FP: usize = 11;
+/// i32 bit pattern (cell y index).
+pub const GPU_STATS_LANE_WATER_SURFACE_P95_CELL_BITS: usize = 12;
+pub const GPU_STATS_LANE_GRANULAR_REPOSE_ANGLE_BITS: usize = 13;
+/// i32 bit pattern.
+pub const GPU_STATS_LANE_GRANULAR_REPOSE_BASE_SPAN_BITS: usize = 14;
+pub const GPU_STATS_LANE_INTERACTION_PRIMARY_COUNT: usize = 15;
+pub const GPU_STATS_LANE_INTERACTION_CONTACT_COUNT: usize = 16;
+/// Signed fixed-point sum (i32 bit pattern in u32 lane).
+pub const GPU_STATS_LANE_INTERACTION_PRIMARY_SUM_Y_FP: usize = 17;
+pub const GPU_STATS_LANE_INTERACTION_SECONDARY_COUNT: usize = 18;
+/// Signed fixed-point sum (i32 bit pattern in u32 lane).
+pub const GPU_STATS_LANE_INTERACTION_SECONDARY_SUM_Y_FP: usize = 19;
+pub const GPU_STATS_LANE_INTERACTION_CONTACT_RATIO_BITS: usize = 20;
+pub const GPU_STATS_LANE_INTERACTION_PRIMARY_CENTROID_Y_BITS: usize = 21;
+pub const GPU_STATS_LANE_INTERACTION_SECONDARY_CENTROID_Y_BITS: usize = 22;
+pub const GPU_STATS_LANE_REPOSE_COUNT: usize = 23;
+pub const GPU_STATS_LANE_GRID_WATER_PHI_MAX_BITS: usize = 24;
+pub const GPU_STATS_LANE_GRID_WATER_PHI_MEAN_NONZERO_BITS: usize = 25;
+pub const GPU_STATS_LANE_GRID_WATER_PHI_P99_BITS: usize = 26;
+pub const GPU_STATS_LANE_GRID_WATER_NONZERO_NODES: usize = 27;
+pub const GPU_STATS_LANE_GRID_GRANULAR_PHI_MAX_BITS: usize = 28;
+pub const GPU_STATS_LANE_GRID_GRANULAR_PHI_MEAN_NONZERO_BITS: usize = 29;
+pub const GPU_STATS_LANE_GRID_GRANULAR_PHI_P99_BITS: usize = 30;
+pub const GPU_STATS_LANE_GRID_GRANULAR_NONZERO_NODES: usize = 31;
+/// Ordered-f32 bits for atomic min/max.
+pub const GPU_STATS_LANE_REPOSE_X_MIN_ORDERED_BITS: usize = 32;
+pub const GPU_STATS_LANE_REPOSE_X_MAX_ORDERED_BITS: usize = 33;
+pub const GPU_STATS_LANE_REPOSE_Y_MIN_ORDERED_BITS: usize = 34;
+pub const GPU_STATS_LANE_REPOSE_Y_MAX_ORDERED_BITS: usize = 35;
+/// Ordered-f32 bits for tracked position bounds.
+pub const GPU_STATS_LANE_TRACKED_X_MIN_ORDERED_BITS: usize = 36;
+pub const GPU_STATS_LANE_TRACKED_X_MAX_ORDERED_BITS: usize = 37;
+pub const GPU_STATS_LANE_TRACKED_Y_MIN_ORDERED_BITS: usize = 38;
+pub const GPU_STATS_LANE_TRACKED_Y_MAX_ORDERED_BITS: usize = 39;
+
+pub const GPU_STATS_SCALAR_BASE_LANES: usize = 64;
+pub const GPU_STATS_WATER_SURFACE_HIST_BINS: usize = 256;
+pub const GPU_STATS_LANE_WATER_SURFACE_HIST_BASE: usize = GPU_STATS_SCALAR_BASE_LANES;
+pub const GPU_STATS_SCALAR_LANES: usize =
+    GPU_STATS_SCALAR_BASE_LANES + GPU_STATS_WATER_SURFACE_HIST_BINS;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct GpuStatisticsScalars {
+    pub lanes: [u32; GPU_STATS_SCALAR_LANES],
+}
+
+impl Default for GpuStatisticsScalars {
+    fn default() -> Self {
+        Self {
+            lanes: [0; GPU_STATS_SCALAR_LANES],
+        }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<GpuStatisticsScalars>() == 1280);
 
 impl Default for GpuMpmParams {
     fn default() -> Self {
@@ -170,7 +253,13 @@ impl Default for GpuMpmParams {
             coupling_interface_normal_eps: 1.0e-6,
             alpha_apic_water: 0.95,
             alpha_apic_granular: 0.78,
-            _pad: [0; 1],
+            stats_tracked_phase_id: 0,
+            stats_repose_phase_id: 1,
+            stats_interaction_primary_phase_id: 2,
+            stats_interaction_secondary_phase_id: 0,
+            stats_penetration_epsilon_m: 1.0e-3,
+            stats_position_fp_scale: 100.0,
+            _pad: [0; 7],
         }
     }
 }

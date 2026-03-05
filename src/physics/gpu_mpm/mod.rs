@@ -28,8 +28,11 @@ use self::gpu_resources::{
 };
 use self::node::MpmComputeNode;
 use self::pipeline::MpmComputePipelines;
-use self::readback::{GpuReadbackResult, GpuReadbackState};
+use self::readback::{
+    GpuReadbackResult, GpuReadbackState, GpuStatisticsReadbackResult, GpuStatisticsReadbackState,
+};
 use self::shaders::MpmShaders;
+use crate::physics::state::SimUpdateSet;
 
 // ---------------------------------------------------------------------------
 // Render graph label
@@ -88,6 +91,13 @@ impl ExtractResource for MpmGpuControl {
     }
 }
 
+impl ExtractResource for sync::MpmStatisticsStatus {
+    type Source = sync::MpmStatisticsStatus;
+    fn extract_resource(source: &Self::Source) -> Self {
+        *source
+    }
+}
+
 impl Clone for MpmGpuParamsRequest {
     fn clone(&self) -> Self {
         Self {
@@ -121,7 +131,7 @@ fn prepare_gpu_uploads(
     }
     buffers.upload_params(&queue, &params_req.params);
 
-    if upload.upload_particles && !upload.particles.is_empty() {
+    if upload.upload_particles {
         buffers.upload_particles(&queue, &upload.particles);
         buffers.ready = true;
     } else if buffers.particle_count > 0 {
@@ -206,6 +216,63 @@ fn readback_particles(
     state.mapped = true;
 }
 
+fn readback_statistics(
+    control: Res<MpmGpuControl>,
+    stats_status: Res<sync::MpmStatisticsStatus>,
+    buffers: Res<MpmGpuBuffers>,
+    mut state: ResMut<GpuStatisticsReadbackState>,
+    readback_result: Res<GpuStatisticsReadbackResult>,
+) {
+    if control.init_only || !control.readback_enabled {
+        return;
+    }
+    if !stats_status.any_enabled() {
+        return;
+    }
+
+    if state.mapped {
+        let ready = state
+            .mapped_ready
+            .load(std::sync::atomic::Ordering::Acquire);
+        if ready {
+            let slice = buffers
+                .stats_scalar_readback_buf
+                .slice(..size_of::<buffers::GpuStatisticsScalars>() as u64);
+            let data = slice.get_mapped_range();
+            if data.len() >= size_of::<buffers::GpuStatisticsScalars>() {
+                let counts = bytemuck::from_bytes::<buffers::GpuStatisticsScalars>(
+                    &data[..size_of::<buffers::GpuStatisticsScalars>()],
+                );
+                readback_result.store(*counts);
+            }
+            drop(data);
+            buffers.stats_scalar_readback_buf.unmap();
+            state
+                .mapped_ready
+                .store(false, std::sync::atomic::Ordering::Release);
+            state.mapped = false;
+        }
+        return;
+    }
+
+    state.frame_counter = state.frame_counter.wrapping_add(1);
+    let interval = control.readback_interval_frames.max(1) as u64;
+    if state.frame_counter % interval != 0 {
+        return;
+    }
+
+    let slice = buffers
+        .stats_scalar_readback_buf
+        .slice(..size_of::<buffers::GpuStatisticsScalars>() as u64);
+    let flag = state.mapped_ready.clone();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        if result.is_ok() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+    });
+    state.mapped = true;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -216,37 +283,59 @@ impl Plugin for GpuMpmPlugin {
     fn build(&self, app: &mut App) {
         let readback = GpuReadbackResult::default();
         let readback_for_render = readback.clone();
+        let statistics_readback = GpuStatisticsReadbackResult::default();
+        let statistics_readback_for_render = statistics_readback.clone();
 
         app.init_resource::<MpmGpuUploadRequest>()
             .init_resource::<MpmGpuParamsRequest>()
             .init_resource::<MpmGpuRunRequest>()
             .init_resource::<MpmGpuStepClock>()
             .init_resource::<MpmGpuControl>()
+            .init_resource::<sync::MpmStatisticsStatus>()
+            .add_message::<sync::GpuWorldEditRequest>()
+            .init_resource::<sync::MpmReadbackSnapshot>()
+            .init_resource::<sync::MpmStatisticsSnapshot>()
             .insert_resource(readback)
+            .insert_resource(statistics_readback)
             .add_systems(
                 Update,
                 (
-                    sync::ensure_continuum_seed_from_particle_world,
+                    sync::apply_world_edit_requests,
                     sync::prepare_particle_upload,
                     sync::prepare_terrain_upload,
                     sync::prepare_gpu_params,
                     sync::prepare_gpu_run_state,
                 )
-                    .chain(),
+                    .chain()
+                    .in_set(SimUpdateSet::Rendering),
             )
-            .add_systems(Update, sync::apply_gpu_readback)
+            .add_systems(
+                Update,
+                (
+                    sync::apply_gpu_readback,
+                    sync::apply_statistics_readback,
+                )
+                    .chain()
+                    .in_set(SimUpdateSet::Rendering),
+            )
             .add_plugins(ExtractResourcePlugin::<MpmGpuUploadRequest>::default())
             .add_plugins(ExtractResourcePlugin::<MpmGpuParamsRequest>::default())
             .add_plugins(ExtractResourcePlugin::<MpmGpuRunRequest>::default())
-            .add_plugins(ExtractResourcePlugin::<MpmGpuControl>::default());
+            .add_plugins(ExtractResourcePlugin::<MpmGpuControl>::default())
+            .add_plugins(ExtractResourcePlugin::<sync::MpmStatisticsStatus>::default());
 
         let render_app = app.sub_app_mut(RenderApp);
 
         render_app
             .insert_resource(readback_for_render)
+            .insert_resource(statistics_readback_for_render)
             .init_resource::<GpuReadbackState>()
+            .init_resource::<GpuStatisticsReadbackState>()
             .add_systems(Render, prepare_gpu_uploads.in_set(RenderSystems::Prepare))
-            .add_systems(Render, readback_particles.in_set(RenderSystems::Cleanup));
+            .add_systems(
+                Render,
+                (readback_particles, readback_statistics).in_set(RenderSystems::Cleanup),
+            );
 
         let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
         render_graph.add_node(MpmComputeLabel, MpmComputeNode);

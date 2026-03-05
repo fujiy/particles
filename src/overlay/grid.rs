@@ -162,7 +162,6 @@ pub(super) fn draw_physics_area_overlay(
     active_region: Res<PhysicsActiveRegion>,
     region_settings: Res<PhysicsRegionSettings>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
-    _particle_world: Res<ParticleWorld>,
 ) {
     if !overlay_state.enabled {
         return;

@@ -3,12 +3,10 @@ use std::collections::{HashSet, VecDeque};
 use bevy::prelude::*;
 
 use crate::physics::cell_to_world_center;
-use crate::physics::material::terrain_fracture_particle;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::save_load;
 use crate::physics::scenario::{
     count_solid_cells, default_scenario_names, default_scenario_spec_by_name,
-    evaluate_scenario_state,
 };
 use crate::physics::solver::params_types::SolverParams;
 use crate::physics::state::{
@@ -16,7 +14,7 @@ use crate::physics::state::{
     ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationParallelSettings,
     SimulationState,
 };
-use crate::physics::world::particle::{ParticleMaterial, ParticleWorld};
+use crate::physics::material::ParticleMaterial;
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,
 };
@@ -79,10 +77,7 @@ const STEP_PROFILER_OBJECT_COLORS: [Color; 3] = [
     Color::srgba(0.33, 0.70, 0.33, 0.95),
     Color::srgba(0.52, 0.86, 0.51, 0.95),
 ];
-const DRAG_VELOCITY_BRUSH_RADIUS_M: f32 = 0.55;
-const DRAG_VELOCITY_GAIN: f32 = 0.9;
 const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
-const TOOL_DELETE_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
 const TOOL_BREAK_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
 const TOOL_HOVER_HIGHLIGHT_TERRAIN_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
 const TOOL_HOVER_HIGHLIGHT_BREAK_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);

@@ -11,7 +11,6 @@ use super::material::{
     DEFAULT_MATERIAL_PARAMS, ParticleMaterial, TerrainMaterial, terrain_boundary_radius_m,
 };
 use super::state::SimulationState;
-use super::world::particle::ParticleWorld;
 use super::world::terrain::{CHUNK_SIZE_I32, TERRAIN_GENERATOR_VERSION, TerrainCell, TerrainWorld};
 
 pub const SAVE_VERSION: u32 = 1;
@@ -57,6 +56,13 @@ struct ParticleSnapshot {
     position: [f32; 2],
     velocity: [f32; 2],
     material: SaveParticleMaterial,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SnapshotParticle {
+    pub position: Vec2,
+    pub velocity: Vec2,
+    pub material: ParticleMaterial,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -167,83 +173,37 @@ pub fn list_save_slots() -> Result<Vec<String>, String> {
     Ok(slots)
 }
 
-pub fn save_to_slot(
+pub fn save_to_slot_with_particles(
     slot_name: &str,
     terrain: &TerrainWorld,
-    particles: &ParticleWorld,
+    particles: &[SnapshotParticle],
     sim_state: &SimulationState,
 ) -> Result<PathBuf, String> {
     let slot = sanitize_slot_name(slot_name)?;
     let path = save_root_dir().join(format!("{slot}.json"));
-    save_to_path(
-        path.to_string_lossy().as_ref(),
-        terrain,
-        particles,
-        sim_state,
-    )?;
+    save_to_path_with_particles(path.to_string_lossy().as_ref(), terrain, particles, sim_state)?;
     Ok(path)
 }
 
-pub fn load_from_slot(
+pub fn load_from_slot_with_particles(
     slot_name: &str,
     terrain: &mut TerrainWorld,
-    particles: &mut ParticleWorld,
     sim_state: &mut SimulationState,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Vec<SnapshotParticle>), String> {
     let slot = sanitize_slot_name(slot_name)?;
     let path = save_root_dir().join(format!("{slot}.json"));
-    load_from_path(
-        path.to_string_lossy().as_ref(),
-        terrain,
-        particles,
-        sim_state,
-    )?;
-    Ok(path)
+    let particles = load_from_path_with_particles(path.to_string_lossy().as_ref(), terrain, sim_state)?;
+    Ok((path, particles))
 }
 
-pub fn save_to_path(
+pub fn save_to_path_with_particles(
     path: &str,
     terrain: &TerrainWorld,
-    particles: &ParticleWorld,
+    particles: &[SnapshotParticle],
     sim_state: &SimulationState,
 ) -> Result<(), String> {
-    let snapshot = SaveSnapshot {
-        save_version: SAVE_VERSION,
-        generator_version: TERRAIN_GENERATOR_VERSION,
-        terrain_generation_enabled: terrain.generation_enabled(),
-        simulation: SimulationSnapshot {
-            running: sim_state.running,
-        },
-        loaded_chunks: terrain
-            .loaded_chunk_coords()
-            .into_iter()
-            .map(|chunk| ChunkSnapshot {
-                chunk: [chunk.x, chunk.y],
-            })
-            .collect(),
-        terrain_cells: collect_terrain_cells(terrain),
-        particles: particles
-            .positions()
-            .iter()
-            .zip(particles.vel.iter())
-            .zip(particles.materials().iter())
-            .map(|((&position, &velocity), &material)| ParticleSnapshot {
-                position: [position.x, position.y],
-                velocity: [velocity.x, velocity.y],
-                material: material.into(),
-            })
-            .collect(),
-    };
-
-    let json = serde_json::to_string_pretty(&snapshot)
-        .map_err(|error| format!("failed to serialize snapshot: {error}"))?;
-    let save_path = Path::new(path);
-    if let Some(parent) = save_path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create save directory: {error}"))?;
-    }
-    fs::write(save_path, json).map_err(|error| format!("failed to write save file: {error}"))?;
-    Ok(())
+    let snapshot = build_snapshot(terrain, particles, sim_state);
+    write_snapshot_to_path(path, &snapshot)
 }
 
 fn sanitize_slot_name(slot_name: &str) -> Result<String, String> {
@@ -272,17 +232,73 @@ fn sanitize_slot_name(slot_name: &str) -> Result<String, String> {
     Ok(sanitized)
 }
 
-pub fn load_from_path(
+pub fn load_from_path_with_particles(
     path: &str,
     terrain: &mut TerrainWorld,
-    particles: &mut ParticleWorld,
     sim_state: &mut SimulationState,
-) -> Result<(), String> {
+) -> Result<Vec<SnapshotParticle>, String> {
+    let snapshot = read_snapshot_from_path(path)?;
+    apply_snapshot_to_terrain(&snapshot, terrain);
+    sim_state.running = snapshot.simulation.running;
+    Ok(snapshot
+        .particles
+        .into_iter()
+        .map(|particle| SnapshotParticle {
+            position: Vec2::new(particle.position[0], particle.position[1]),
+            velocity: Vec2::new(particle.velocity[0], particle.velocity[1]),
+            material: particle.material.into(),
+        })
+        .collect())
+}
+
+fn build_snapshot(
+    terrain: &TerrainWorld,
+    particles: &[SnapshotParticle],
+    sim_state: &SimulationState,
+) -> SaveSnapshot {
+    SaveSnapshot {
+        save_version: SAVE_VERSION,
+        generator_version: TERRAIN_GENERATOR_VERSION,
+        terrain_generation_enabled: terrain.generation_enabled(),
+        simulation: SimulationSnapshot {
+            running: sim_state.running,
+        },
+        loaded_chunks: terrain
+            .loaded_chunk_coords()
+            .into_iter()
+            .map(|chunk| ChunkSnapshot {
+                chunk: [chunk.x, chunk.y],
+            })
+            .collect(),
+        terrain_cells: collect_terrain_cells(terrain),
+        particles: particles
+            .iter()
+            .map(|particle| ParticleSnapshot {
+                position: [particle.position.x, particle.position.y],
+                velocity: [particle.velocity.x, particle.velocity.y],
+                material: particle.material.into(),
+            })
+            .collect(),
+    }
+}
+
+fn write_snapshot_to_path(path: &str, snapshot: &SaveSnapshot) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(snapshot)
+        .map_err(|error| format!("failed to serialize snapshot: {error}"))?;
+    let save_path = Path::new(path);
+    if let Some(parent) = save_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create save directory: {error}"))?;
+    }
+    fs::write(save_path, json).map_err(|error| format!("failed to write save file: {error}"))?;
+    Ok(())
+}
+
+fn read_snapshot_from_path(path: &str) -> Result<SaveSnapshot, String> {
     let json =
         fs::read_to_string(path).map_err(|error| format!("failed to read save file: {error}"))?;
     let snapshot: SaveSnapshot = serde_json::from_str(&json)
         .map_err(|error| format!("failed to parse save file: {error}"))?;
-
     if snapshot.save_version != SAVE_VERSION {
         return Err(format!(
             "incompatible save version: file={}, supported={}",
@@ -296,7 +312,10 @@ pub fn load_from_path(
         ));
     }
     validate_snapshot(&snapshot)?;
+    Ok(snapshot)
+}
 
+fn apply_snapshot_to_terrain(snapshot: &SaveSnapshot, terrain: &mut TerrainWorld) {
     terrain.set_generation_enabled(snapshot.terrain_generation_enabled);
     terrain.clear();
     if snapshot.loaded_chunks.is_empty() {
@@ -327,26 +346,6 @@ pub fn load_from_path(
         );
     }
     terrain.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
-
-    let positions = snapshot
-        .particles
-        .iter()
-        .map(|particle| Vec2::new(particle.position[0], particle.position[1]))
-        .collect();
-    let velocities = snapshot
-        .particles
-        .iter()
-        .map(|particle| Vec2::new(particle.velocity[0], particle.velocity[1]))
-        .collect();
-    let materials = snapshot
-        .particles
-        .iter()
-        .map(|particle| particle.material.into())
-        .collect();
-    particles.restore_from_snapshot(positions, velocities, materials)?;
-
-    sim_state.running = snapshot.simulation.running;
-    Ok(())
 }
 
 fn collect_terrain_cells(terrain: &TerrainWorld) -> Vec<TerrainCellSnapshot> {
@@ -391,12 +390,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::physics::world::particle::ParticleWorld;
 
     #[test]
     fn load_restores_loaded_chunks_as_empty_when_terrain_cells_are_empty() {
         let mut terrain = TerrainWorld::default();
-        let mut particles = ParticleWorld::default();
         let mut sim_state = SimulationState::default();
 
         let nanos = SystemTime::now()
@@ -409,10 +406,9 @@ mod tests {
             SAVE_VERSION, TERRAIN_GENERATOR_VERSION
         );
         fs::write(&path, json).expect("should write temporary save file");
-        load_from_path(
+        let _particles = load_from_path_with_particles(
             path.to_str().expect("temp path should be utf-8"),
             &mut terrain,
-            &mut particles,
             &mut sim_state,
         )
         .expect("loading regeneration-only snapshot should succeed");
@@ -430,7 +426,6 @@ mod tests {
     #[test]
     fn load_rejects_incompatible_generator_version() {
         let mut terrain = TerrainWorld::default();
-        let mut particles = ParticleWorld::default();
         let mut sim_state = SimulationState::default();
 
         let nanos = SystemTime::now()
@@ -444,10 +439,9 @@ mod tests {
             TERRAIN_GENERATOR_VERSION + 1
         );
         fs::write(&path, json).expect("should write temporary save file");
-        let error = load_from_path(
+        let error = load_from_path_with_particles(
             path.to_str().expect("temp path should be utf-8"),
             &mut terrain,
-            &mut particles,
             &mut sim_state,
         )
         .expect_err("mismatched generator version should fail");
@@ -458,7 +452,7 @@ mod tests {
     #[test]
     fn save_and_load_restores_modified_terrain_outside_fixed_bounds() {
         let mut terrain = TerrainWorld::default();
-        let particles = ParticleWorld::default();
+        let particles: Vec<SnapshotParticle> = Vec::new();
         let sim_state = SimulationState::default();
 
         let far_chunk = IVec2::new(12, -9);
@@ -477,7 +471,7 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let path = std::env::temp_dir().join(format!("particles_far_chunk_save_{nanos}.json"));
-        save_to_path(
+        save_to_path_with_particles(
             path.to_str().expect("temp path should be utf-8"),
             &terrain,
             &particles,
@@ -486,12 +480,10 @@ mod tests {
         .expect("saving snapshot should succeed");
 
         let mut loaded_terrain = TerrainWorld::default();
-        let mut loaded_particles = ParticleWorld::default();
         let mut loaded_sim_state = SimulationState::default();
-        load_from_path(
+        let _loaded_particles = load_from_path_with_particles(
             path.to_str().expect("temp path should be utf-8"),
             &mut loaded_terrain,
-            &mut loaded_particles,
             &mut loaded_sim_state,
         )
         .expect("loading snapshot should succeed");

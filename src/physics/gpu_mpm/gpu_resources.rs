@@ -10,7 +10,9 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bytemuck::cast_slice;
 use std::mem::size_of;
 
-use super::buffers::{GpuGridLayout, GpuGridNode, GpuMpmParams, GpuParticle};
+use super::buffers::{
+    GpuGridLayout, GpuGridNode, GpuMpmParams, GpuParticle, GpuStatisticsScalars,
+};
 use crate::physics::world::constants::{
     CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };
@@ -55,9 +57,16 @@ pub struct MpmGpuBuffers {
 
     /// Terrain normal buffer: node_count * 8 bytes (vec2<f32> per node).
     pub terrain_normal_buf: Buffer,
+    /// Temporary per-cell occupancy flags for interaction statistics.
+    pub stats_cell_flags_buf: Buffer,
 
     /// Staging buffer for GPU→CPU readback (particle data, MAP_READ).
     pub readback_buf: Buffer,
+
+    /// GPU-side statistics scalar lanes (atomic<u32>).
+    pub stats_scalar_buf: Buffer,
+    /// Staging buffer for GPU→CPU readback (statistics scalar lanes, MAP_READ).
+    pub stats_scalar_readback_buf: Buffer,
 
     /// Current active particle count on GPU.
     pub particle_count: u32,
@@ -106,10 +115,31 @@ impl MpmGpuBuffers {
             mapped_at_creation: false,
         });
 
+        let stats_cell_flags_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_stats_cell_flags"),
+            size: node_count * 4,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         // Readback buffer: one GpuParticle per max particle slot
         let readback_buf = device.create_buffer(&BufferDescriptor {
             label: Some("mpm_readback"),
             size: MAX_PARTICLES as u64 * size_of::<GpuParticle>() as u64,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let stats_scalar_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_stats_scalar"),
+            size: size_of::<GpuStatisticsScalars>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let stats_scalar_readback_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_stats_scalar_readback"),
+            size: size_of::<GpuStatisticsScalars>() as u64,
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
@@ -121,7 +151,10 @@ impl MpmGpuBuffers {
             grid_buf,
             terrain_sdf_buf,
             terrain_normal_buf,
+            stats_cell_flags_buf,
             readback_buf,
+            stats_scalar_buf,
+            stats_scalar_readback_buf,
             particle_count: 0,
             ready: false,
         }

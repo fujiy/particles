@@ -4,121 +4,380 @@
 // which are then executed in the render-world extract/prepare phase.
 
 use bevy::prelude::*;
+use std::collections::HashSet;
 
-use super::buffers::{GpuMpmParams, GpuParticle};
+use super::buffers::{self, GpuMpmParams, GpuParticle, GpuStatisticsScalars};
 use super::gpu_resources::{
     MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest,
     world_grid_layout,
 };
-use super::readback::GpuReadbackResult;
+use super::readback::{GpuReadbackResult, GpuStatisticsReadbackResult};
 use crate::params::ActivePhysicsParams;
+use crate::physics::material::{ParticleMaterial, particle_properties};
 use crate::physics::solver::mpm_water::{
-    MpmWaterParams, is_mpm_managed_particle, rebuild_continuum_from_particle_world,
-    sync_continuum_to_particle_world,
+    mpm_phase_id_for_particle,
 };
 use crate::physics::solver::params_types::SolverParams;
 use crate::physics::state::{ReplayState, SimulationState};
 use crate::physics::world::constants::CELL_SIZE_M;
-use crate::physics::world::continuum::ContinuumParticleWorld;
-use crate::physics::world::particle::ParticleWorld;
-use crate::physics::world::terrain::TerrainWorld;
+use crate::physics::world::terrain::{TerrainWorld, cell_to_world_center, world_to_cell};
 
 const TERRAIN_SDF_DISABLED_DISTANCE_M: f32 = 1.0e6;
 /// 境界速度補正のSDF閾値（h比）。地形侵入を抑えるため、粒径比ではなく格子幅基準で扱う。
 const MPM_BOUNDARY_THRESHOLD_SCALE_H: f32 = 0.5;
 
-/// Ensure GPU upload source (`ContinuumParticleWorld`) is seeded from `ParticleWorld`.
-///
-/// This prevents "overlay ON but nothing visible" when a map/scenario populates
-/// `ParticleWorld` but does not explicitly rebuild continuum data.
-pub fn ensure_continuum_seed_from_particle_world(
-    control: Res<MpmGpuControl>,
-    particle_world: Res<ParticleWorld>,
-    solver_params: Res<SolverParams>,
-    mut continuum: ResMut<ContinuumParticleWorld>,
-) {
-    if control.init_only {
-        return;
-    }
-
-    let mpm_count = particle_world
-        .materials()
-        .iter()
-        .filter(|&&mat| is_mpm_managed_particle(mat))
-        .count();
-    if mpm_count == 0 {
-        if continuum.is_empty() {
-            return;
-        }
-        continuum.clear();
-        return;
-    }
-
-    let needs_seed = continuum.len() != mpm_count
-        || (continuum.is_empty() && particle_world.particle_count() > 0);
-    if !needs_seed {
-        return;
-    }
-
-    let _ = rebuild_continuum_from_particle_world(
-        &particle_world,
-        &mut continuum,
-        &MpmWaterParams {
-            dt: solver_params.fixed_dt,
-            gravity: solver_params.gravity_mps2,
-            ..Default::default()
-        },
-    );
+#[derive(Resource, Debug, Default)]
+pub struct MpmReadbackSnapshot {
+    pub particles: Vec<GpuParticle>,
 }
 
-/// System: build upload request from ContinuumParticleWorld.
-///
-/// Called when particles are modified (spawn/clear). Marks full particle upload.
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct MpmStatisticsStatus {
+    pub total_particles: bool,
+    pub phase_counts: bool,
+    pub max_speed: bool,
+    pub penetration: bool,
+    pub tracked_summary: bool,
+    pub water_surface_p95: bool,
+    pub granular_repose: bool,
+    pub material_interaction: bool,
+    pub grid_density: bool,
+    pub tracked_phase_id: u32,
+    pub tracked_fallback_to_all: bool,
+    pub repose_phase_id: u32,
+    pub interaction_primary_phase_id: u32,
+    pub interaction_secondary_phase_id: u32,
+}
+
+impl MpmStatisticsStatus {
+    pub fn any_enabled(self) -> bool {
+        self.total_particles
+            || self.phase_counts
+            || self.max_speed
+            || self.penetration
+            || self.tracked_summary
+            || self.water_surface_p95
+            || self.granular_repose
+            || self.material_interaction
+            || self.grid_density
+    }
+}
+
+impl Default for MpmStatisticsStatus {
+    fn default() -> Self {
+        Self {
+            total_particles: true,
+            phase_counts: true,
+            max_speed: false,
+            penetration: false,
+            tracked_summary: false,
+            water_surface_p95: false,
+            granular_repose: false,
+            material_interaction: false,
+            grid_density: false,
+            tracked_phase_id: 0,
+            tracked_fallback_to_all: true,
+            repose_phase_id: 1,
+            interaction_primary_phase_id: 2,
+            interaction_secondary_phase_id: 0,
+        }
+    }
+}
+
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct MpmStatisticsSnapshot {
+    pub total_particles: u32,
+    pub water_liquid: u32,
+    pub soil_granular: u32,
+    pub sand_granular: u32,
+    pub unknown: u32,
+    pub max_speed_mps: f32,
+    pub all_count: u32,
+    pub all_penetration_count: u32,
+    pub all_mean_y_m: f32,
+    pub tracked_count: u32,
+    pub tracked_penetration_count: u32,
+    pub tracked_mean_y_m: f32,
+    pub tracked_min_x_m: Option<f32>,
+    pub tracked_max_x_m: Option<f32>,
+    pub tracked_min_y_m: Option<f32>,
+    pub tracked_max_y_m: Option<f32>,
+    pub water_surface_p95_cell: Option<i32>,
+    pub granular_repose_angle_deg: Option<f32>,
+    pub granular_repose_base_span_cells: Option<i32>,
+    pub material_interaction_contact_ratio: f32,
+    pub material_interaction_primary_centroid_y_m: Option<f32>,
+    pub material_interaction_secondary_centroid_y_m: Option<f32>,
+    pub grid_water_phi_max: f32,
+    pub grid_water_phi_p99: f32,
+    pub grid_water_phi_mean_nonzero: f32,
+    pub grid_water_nonzero_nodes: u32,
+    pub grid_granular_phi_max: f32,
+    pub grid_granular_phi_p99: f32,
+    pub grid_granular_phi_mean_nonzero: f32,
+    pub grid_granular_nonzero_nodes: u32,
+}
+
+impl MpmStatisticsSnapshot {
+    pub fn total(self) -> u32 {
+        self.total_particles
+    }
+
+    pub fn tracked_penetration_ratio(self) -> f32 {
+        if self.tracked_count == 0 {
+            0.0
+        } else {
+            self.tracked_penetration_count as f32 / self.tracked_count as f32
+        }
+    }
+
+    pub fn all_penetration_ratio(self) -> f32 {
+        if self.all_count == 0 {
+            0.0
+        } else {
+            self.all_penetration_count as f32 / self.all_count as f32
+        }
+    }
+
+    fn from_gpu_scalars(scalars: GpuStatisticsScalars) -> Self {
+        fn ordered_u32_to_f32(ordered: u32) -> f32 {
+            let bits = if (ordered & 0x8000_0000) != 0 {
+                ordered ^ 0x8000_0000
+            } else {
+                !ordered
+            };
+            f32::from_bits(bits)
+        }
+
+        fn decode_optional_ordered_f32(raw: u32) -> Option<f32> {
+            let value = ordered_u32_to_f32(raw);
+            value.is_finite().then_some(value)
+        }
+
+        fn lane_as_i32(raw: u32) -> i32 {
+            i32::from_ne_bytes(raw.to_ne_bytes())
+        }
+
+        let all_count = scalars.lanes[buffers::GPU_STATS_LANE_ALL_COUNT];
+        let tracked_count = scalars.lanes[buffers::GPU_STATS_LANE_TRACKED_COUNT];
+        let all_sum_y_fp = lane_as_i32(scalars.lanes[buffers::GPU_STATS_LANE_ALL_SUM_Y_FP]);
+        let tracked_sum_y_fp = lane_as_i32(scalars.lanes[buffers::GPU_STATS_LANE_TRACKED_SUM_Y_FP]);
+        let fp_scale = 100.0_f32;
+        let all_mean_y_m = if all_count > 0 {
+            all_sum_y_fp as f32 / (fp_scale * all_count as f32)
+        } else {
+            0.0
+        };
+        let tracked_mean_y_m = if tracked_count > 0 {
+            tracked_sum_y_fp as f32 / (fp_scale * tracked_count as f32)
+        } else {
+            0.0
+        };
+        let water_surface_p95_cell_bits =
+            scalars.lanes[buffers::GPU_STATS_LANE_WATER_SURFACE_P95_CELL_BITS];
+        let water_surface_p95_cell = if water_surface_p95_cell_bits == 0x8000_0000 {
+            None
+        } else {
+            Some(lane_as_i32(water_surface_p95_cell_bits))
+        };
+
+        let repose_angle = f32::from_bits(
+            scalars.lanes[buffers::GPU_STATS_LANE_GRANULAR_REPOSE_ANGLE_BITS],
+        );
+        let granular_repose_angle_deg = repose_angle.is_finite().then_some(repose_angle);
+        let repose_base_bits = scalars.lanes[buffers::GPU_STATS_LANE_GRANULAR_REPOSE_BASE_SPAN_BITS];
+        let granular_repose_base_span_cells = if repose_base_bits == 0x8000_0000 {
+            None
+        } else {
+            Some(lane_as_i32(repose_base_bits))
+        };
+
+        let primary_centroid = f32::from_bits(
+            scalars.lanes[buffers::GPU_STATS_LANE_INTERACTION_PRIMARY_CENTROID_Y_BITS],
+        );
+        let secondary_centroid = f32::from_bits(
+            scalars.lanes[buffers::GPU_STATS_LANE_INTERACTION_SECONDARY_CENTROID_Y_BITS],
+        );
+
+        Self {
+            total_particles: scalars.lanes[buffers::GPU_STATS_LANE_TOTAL_PARTICLES],
+            water_liquid: scalars.lanes[buffers::GPU_STATS_LANE_PHASE_WATER],
+            soil_granular: scalars.lanes[buffers::GPU_STATS_LANE_PHASE_GRANULAR_SOIL],
+            sand_granular: scalars.lanes[buffers::GPU_STATS_LANE_PHASE_GRANULAR_SAND],
+            unknown: scalars.lanes[buffers::GPU_STATS_LANE_PHASE_UNKNOWN],
+            max_speed_mps: f32::from_bits(scalars.lanes[buffers::GPU_STATS_LANE_MAX_SPEED_BITS]),
+            all_count,
+            all_penetration_count: scalars.lanes[buffers::GPU_STATS_LANE_ALL_PENETRATION_COUNT],
+            all_mean_y_m,
+            tracked_count,
+            tracked_penetration_count: scalars.lanes
+                [buffers::GPU_STATS_LANE_TRACKED_PENETRATION_COUNT],
+            tracked_mean_y_m,
+            tracked_min_x_m: decode_optional_ordered_f32(
+                scalars.lanes[buffers::GPU_STATS_LANE_TRACKED_X_MIN_ORDERED_BITS],
+            ),
+            tracked_max_x_m: decode_optional_ordered_f32(
+                scalars.lanes[buffers::GPU_STATS_LANE_TRACKED_X_MAX_ORDERED_BITS],
+            ),
+            tracked_min_y_m: decode_optional_ordered_f32(
+                scalars.lanes[buffers::GPU_STATS_LANE_TRACKED_Y_MIN_ORDERED_BITS],
+            ),
+            tracked_max_y_m: decode_optional_ordered_f32(
+                scalars.lanes[buffers::GPU_STATS_LANE_TRACKED_Y_MAX_ORDERED_BITS],
+            ),
+            water_surface_p95_cell,
+            granular_repose_angle_deg,
+            granular_repose_base_span_cells,
+            material_interaction_contact_ratio: f32::from_bits(
+                scalars.lanes[buffers::GPU_STATS_LANE_INTERACTION_CONTACT_RATIO_BITS],
+            ),
+            material_interaction_primary_centroid_y_m: primary_centroid.is_finite().then_some(primary_centroid),
+            material_interaction_secondary_centroid_y_m: secondary_centroid
+                .is_finite()
+                .then_some(secondary_centroid),
+            grid_water_phi_max: f32::from_bits(
+                scalars.lanes[buffers::GPU_STATS_LANE_GRID_WATER_PHI_MAX_BITS],
+            ),
+            grid_water_phi_p99: f32::from_bits(
+                scalars.lanes[buffers::GPU_STATS_LANE_GRID_WATER_PHI_P99_BITS],
+            ),
+            grid_water_phi_mean_nonzero: f32::from_bits(
+                scalars.lanes[buffers::GPU_STATS_LANE_GRID_WATER_PHI_MEAN_NONZERO_BITS],
+            ),
+            grid_water_nonzero_nodes: scalars.lanes[buffers::GPU_STATS_LANE_GRID_WATER_NONZERO_NODES],
+            grid_granular_phi_max: f32::from_bits(
+                scalars.lanes[buffers::GPU_STATS_LANE_GRID_GRANULAR_PHI_MAX_BITS],
+            ),
+            grid_granular_phi_p99: f32::from_bits(
+                scalars.lanes[buffers::GPU_STATS_LANE_GRID_GRANULAR_PHI_P99_BITS],
+            ),
+            grid_granular_phi_mean_nonzero: f32::from_bits(
+                scalars.lanes[buffers::GPU_STATS_LANE_GRID_GRANULAR_PHI_MEAN_NONZERO_BITS],
+            ),
+            grid_granular_nonzero_nodes: scalars
+                .lanes[buffers::GPU_STATS_LANE_GRID_GRANULAR_NONZERO_NODES],
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum GpuWorldEditCommand {
+    AddParticles {
+        material: ParticleMaterial,
+        count_per_cell: u32,
+    },
+    RemoveParticles {
+        max_count: u32,
+    },
+}
+
+#[derive(Clone, Debug)]
+#[derive(Message)]
+pub struct GpuWorldEditRequest {
+    pub cells: Vec<IVec2>,
+    pub command: GpuWorldEditCommand,
+}
+
+/// System: apply queued world-edit requests onto GPU upload particles.
+pub fn apply_world_edit_requests(
+    control: Res<MpmGpuControl>,
+    active_params: Res<ActivePhysicsParams>,
+    mut edit_requests: MessageReader<GpuWorldEditRequest>,
+    mut upload: ResMut<MpmGpuUploadRequest>,
+    mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
+) {
+    if control.init_only {
+        let _ = edit_requests.read().count();
+        return;
+    }
+
+    let rho0 = active_params.0.water.rho0.max(1.0e-6);
+    let mut saw_request = false;
+    let mut changed = false;
+
+    for request in edit_requests.read() {
+        saw_request = true;
+        if request.cells.is_empty() {
+            continue;
+        }
+        if upload.particles.is_empty() {
+            upload.particles = readback_snapshot.particles.clone();
+        }
+        match &request.command {
+            GpuWorldEditCommand::AddParticles {
+                material,
+                count_per_cell,
+            } => {
+                if *count_per_cell == 0 || mpm_phase_id_for_particle(*material).is_none() {
+                    continue;
+                }
+                let before = upload.particles.len();
+                for &cell in &request.cells {
+                    append_particles_in_cell(
+                        &mut upload.particles,
+                        cell,
+                        *material,
+                        *count_per_cell,
+                        rho0,
+                    );
+                }
+                changed |= upload.particles.len() != before;
+            }
+            GpuWorldEditCommand::RemoveParticles { max_count } => {
+                if *max_count == 0 || upload.particles.is_empty() {
+                    continue;
+                }
+                let removed_mpm_indices =
+                    remove_gpu_particles_in_cells(&mut upload.particles, &request.cells, *max_count as usize);
+                if removed_mpm_indices.is_empty() {
+                    continue;
+                }
+                changed = true;
+            }
+        }
+    }
+
+    if !saw_request {
+        return;
+    }
+
+    if !changed {
+        return;
+    }
+
+    readback_snapshot.particles = upload.particles.clone();
+    upload.upload_particles = true;
+}
+
+/// System: keep GPU MPM run-state aligned to global simulation mode.
 pub fn prepare_particle_upload(
     control: Res<MpmGpuControl>,
-    particle_world: Res<ParticleWorld>,
-    continuum: Res<ContinuumParticleWorld>,
+    readback_snapshot: Res<MpmReadbackSnapshot>,
     mut upload: ResMut<MpmGpuUploadRequest>,
     mut sim_state: ResMut<SimulationState>,
 ) {
-    // Default: no particle upload this frame unless explicitly requested below.
-    upload.upload_particles = false;
-
     if control.init_only {
+        upload.upload_particles = false;
         sim_state.gpu_mpm_active = false;
         upload.particles.clear();
         return;
     }
-    let mpm_count = particle_world_mpm_count(&particle_world);
-    let unmanaged_count = particle_world
-        .materials()
-        .iter()
-        .filter(|&&material| !is_mpm_managed_particle(material))
-        .count();
-    // Keep GPU MPM on a single-route path: either all dynamic particles are MPM-managed,
-    // or we stay on the legacy CPU particle step to avoid partially frozen worlds.
-    sim_state.gpu_mpm_active = sim_state.mpm_enabled && mpm_count > 0 && unmanaged_count == 0;
-    // Ensure at least one upload after startup/scenario load even when change detection
-    // is not observed in this system's frame.
-    if !continuum.is_changed() && !upload.particles.is_empty() {
+    let has_particles = if upload.upload_particles {
+        !upload.particles.is_empty()
+    } else {
+        !readback_snapshot.particles.is_empty()
+    };
+    // Pure GPU mode: no CPU fallback; active when MPM is enabled and particles exist.
+    sim_state.gpu_mpm_active = sim_state.mpm_enabled && has_particles;
+
+    // Preserve explicit upload requests (save/load/manual clear+replace).
+    if upload.upload_particles {
         return;
     }
-    let particles: Vec<GpuParticle> = (0..continuum.len())
-        .map(|i| {
-            GpuParticle::from_cpu(
-                continuum.x[i],
-                continuum.v[i],
-                continuum.m[i],
-                continuum.v0[i],
-                continuum.f[i],
-                continuum.c[i],
-                continuum.v_vol[i],
-                continuum.material_id[i],
-            )
-        })
-        .collect();
-    upload.particles = particles;
-    upload.upload_particles = !upload.particles.is_empty();
+
+    // Default: no particle upload this frame unless explicitly requested below.
+    upload.upload_particles = false;
+
 }
 
 /// System: build terrain SDF/normal upload request.
@@ -164,8 +423,10 @@ pub fn prepare_gpu_params(
     control: Res<MpmGpuControl>,
     solver_params: Res<SolverParams>,
     active_params: Res<ActivePhysicsParams>,
+    upload: Res<MpmGpuUploadRequest>,
+    readback_snapshot: Res<MpmReadbackSnapshot>,
+    stats_status: Res<MpmStatisticsStatus>,
     mut params_req: ResMut<MpmGpuParamsRequest>,
-    continuum: Res<ContinuumParticleWorld>,
 ) {
     if control.init_only {
         return;
@@ -188,6 +449,11 @@ pub fn prepare_gpu_params(
         p.sand.hardening,
     );
     let boundary_threshold_m = h * MPM_BOUNDARY_THRESHOLD_SCALE_H;
+    let particle_count = if upload.upload_particles {
+        upload.particles.len()
+    } else {
+        readback_snapshot.particles.len()
+    };
 
     params_req.params = GpuMpmParams {
         dt: solver_params.fixed_dt,
@@ -200,7 +466,7 @@ pub fn prepare_gpu_params(
         grid_origin_y: layout.origin.y,
         grid_width: layout.dims.x,
         grid_height: layout.dims.y,
-        particle_count: continuum.len() as u32,
+        particle_count: particle_count as u32,
         j_min: p.deformation.j_min,
         j_max: p.deformation.j_max,
         c_max_norm: p.deformation.c_max_norm,
@@ -225,14 +491,20 @@ pub fn prepare_gpu_params(
         coupling_interface_normal_eps: p.coupling.interface_normal_eps,
         alpha_apic_water: p.apic.water,
         alpha_apic_granular: p.apic.granular,
-        _pad: [0; 1],
+        stats_tracked_phase_id: stats_status.tracked_phase_id,
+        stats_repose_phase_id: stats_status.repose_phase_id,
+        stats_interaction_primary_phase_id: stats_status.interaction_primary_phase_id,
+        stats_interaction_secondary_phase_id: stats_status.interaction_secondary_phase_id,
+        stats_penetration_epsilon_m: 1.0e-3,
+        stats_position_fp_scale: 100.0,
+        _pad: [0; 7],
     };
 }
 
 /// System: update GPU compute run state from SimulationState.
 pub fn prepare_gpu_run_state(
     control: Res<MpmGpuControl>,
-    sim_state: Res<SimulationState>,
+    mut sim_state: ResMut<SimulationState>,
     mut replay_state: ResMut<ReplayState>,
     solver_params: Res<SolverParams>,
     time: Res<Time>,
@@ -243,6 +515,7 @@ pub fn prepare_gpu_run_state(
         run_req.enabled = false;
         run_req.substeps = 0;
         step_clock.accumulator_secs = 0.0;
+        sim_state.step_once = false;
         return;
     }
     let active = sim_state.mpm_enabled && sim_state.gpu_mpm_active;
@@ -250,6 +523,7 @@ pub fn prepare_gpu_run_state(
         run_req.enabled = false;
         run_req.substeps = 0;
         step_clock.accumulator_secs = 0.0;
+        sim_state.step_once = false;
         return;
     }
 
@@ -261,6 +535,7 @@ pub fn prepare_gpu_run_state(
         if replay_state.enabled {
             replay_state.current_step = replay_state.current_step.saturating_add(1);
         }
+        sim_state.step_once = false;
         return;
     }
 
@@ -298,16 +573,11 @@ pub fn prepare_gpu_run_state(
 /// Diagnostics counter for GPU readback frames.
 static GPU_READBACK_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// System: apply GPU readback results to ContinuumParticleWorld.
-///
-/// Runs in main-world Update (after rendering). Consumes the latest readback
-/// from the render world and writes x, v, F, C back to CPU state so the rest
-/// of the simulation pipeline sees up-to-date positions.
+/// System: apply GPU readback results to snapshot cache.
 pub fn apply_gpu_readback(
     control: Res<MpmGpuControl>,
     readback_result: Res<GpuReadbackResult>,
-    mut continuum: ResMut<ContinuumParticleWorld>,
-    mut particle_world: ResMut<ParticleWorld>,
+    mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
 ) {
     if !control.readback_enabled {
         return;
@@ -315,23 +585,9 @@ pub fn apply_gpu_readback(
     let Some(particles) = readback_result.take() else {
         return;
     };
+    readback_snapshot.particles = particles.clone();
     let frame = GPU_READBACK_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let n = particles.len().min(continuum.len());
-    {
-        // Use bypass_change_detection so this write does NOT trigger prepare_particle_upload.
-        // Without this, the CPU would re-upload stale data every frame, overwriting GPU results.
-        let continuum = continuum.bypass_change_detection();
-        for i in 0..n {
-            let p = &particles[i];
-            continuum.x[i] = Vec2::from_array(p.x);
-            continuum.v[i] = Vec2::from_array(p.v);
-            continuum.f[i] = Mat2::from_cols(Vec2::new(p.f[0], p.f[1]), Vec2::new(p.f[2], p.f[3]));
-            continuum.c[i] = Mat2::from_cols(Vec2::new(p.c[0], p.c[1]), Vec2::new(p.c[2], p.c[3]));
-            continuum.v_vol[i] = p.v_vol;
-        }
-    }
-    // Reflect readback positions to ParticleWorld so particle overlay can render GPU data.
-    let _ = sync_continuum_to_particle_world(&mut particle_world, &continuum);
+    let n = particles.len();
     // Periodic NaN / divergence check (every 60 readback frames).
     if frame % 60 == 0 {
         let mut nan_count = 0u32;
@@ -355,12 +611,107 @@ pub fn apply_gpu_readback(
     }
 }
 
-fn particle_world_mpm_count(particles: &ParticleWorld) -> usize {
-    particles
-        .materials()
-        .iter()
-        .filter(|&&material| is_mpm_managed_particle(material))
-        .count()
+pub fn apply_statistics_readback(
+    control: Res<MpmGpuControl>,
+    stats_status: Res<MpmStatisticsStatus>,
+    stats_readback: Res<GpuStatisticsReadbackResult>,
+    mut stats_snapshot: ResMut<MpmStatisticsSnapshot>,
+) {
+    if control.init_only || !control.readback_enabled {
+        return;
+    }
+    if !stats_status.any_enabled() {
+        return;
+    }
+    let Some(scalars) = stats_readback.take() else {
+        return;
+    };
+    *stats_snapshot = MpmStatisticsSnapshot::from_gpu_scalars(scalars);
+}
+
+fn append_particles_in_cell(
+    upload_particles: &mut Vec<GpuParticle>,
+    cell: IVec2,
+    material: ParticleMaterial,
+    count_per_cell: u32,
+    rho0: f32,
+) {
+    let Some(phase_id) = mpm_phase_id_for_particle(material) else {
+        return;
+    };
+    let props = particle_properties(material);
+    let axis = particle_grid_axis(count_per_cell);
+    let axis_f = axis as f32;
+    let spacing = CELL_SIZE_M / axis_f.max(1.0);
+    let cell_min = cell_to_world_center(cell) - Vec2::splat(CELL_SIZE_M * 0.5);
+
+    let mut spawned = 0u32;
+    'grid: for y in 0..axis {
+        for x in 0..axis {
+            if spawned >= count_per_cell {
+                break 'grid;
+            }
+            let offset = Vec2::new((x as f32 + 0.5) * spacing, (y as f32 + 0.5) * spacing);
+            let p = cell_min + offset;
+            upload_particles.push(GpuParticle::from_cpu(
+                p,
+                Vec2::ZERO,
+                props.mass,
+                props.mass.max(0.0) / rho0,
+                Mat2::IDENTITY,
+                Mat2::ZERO,
+                0.0,
+                phase_id,
+            ));
+            spawned += 1;
+        }
+    }
+}
+
+fn particle_grid_axis(count: u32) -> u32 {
+    (count as f32).sqrt().ceil() as u32
+}
+
+fn remove_gpu_particles_in_cells(
+    upload_particles: &mut Vec<GpuParticle>,
+    cells: &[IVec2],
+    max_count: usize,
+) -> Vec<usize> {
+    let target_cells: HashSet<IVec2> = cells.iter().copied().collect();
+    if target_cells.is_empty() {
+        return Vec::new();
+    }
+    let mut removed_mpm_indices = Vec::new();
+    let mut keep = vec![true; upload_particles.len()];
+    for (i, particle) in upload_particles.iter().enumerate() {
+        if removed_mpm_indices.len() >= max_count {
+            break;
+        }
+        let cell = world_to_cell(Vec2::from_array(particle.x));
+        if target_cells.contains(&cell) {
+            keep[i] = false;
+            removed_mpm_indices.push(i);
+        }
+    }
+    if removed_mpm_indices.is_empty() {
+        return removed_mpm_indices;
+    }
+    compact_vec_by_keep(upload_particles, &keep);
+    removed_mpm_indices
+}
+
+fn compact_vec_by_keep<T: Copy>(data: &mut Vec<T>, keep: &[bool]) {
+    let mut write = 0usize;
+    for read in 0..data.len() {
+        if !keep[read] {
+            continue;
+        }
+        if write != read {
+            data[write] = data[read];
+        }
+        write += 1;
+    }
+    data.truncate(write);
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -397,5 +748,129 @@ fn drucker_prager_params(
         alpha,
         k,
         hardening: hardening.max(0.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::ecs::message::Messages;
+    use crate::physics::material::ParticleMaterial;
+    use crate::physics::gpu_mpm::readback::GpuStatisticsReadbackResult;
+    use crate::physics::gpu_mpm::gpu_resources::MpmGpuUploadRequest;
+
+    fn setup_edit_app() -> App {
+        let mut app = App::new();
+        app.insert_resource(MpmGpuControl::default())
+            .insert_resource(ActivePhysicsParams::default())
+            .insert_resource(MpmGpuUploadRequest::default())
+            .insert_resource(MpmReadbackSnapshot::default())
+            .add_message::<GpuWorldEditRequest>()
+            .add_systems(Update, apply_world_edit_requests);
+        app
+    }
+
+    #[test]
+    fn world_edit_add_particles_updates_upload_and_snapshot() {
+        let mut app = setup_edit_app();
+        let cells = vec![IVec2::new(0, 0), IVec2::new(1, 0)];
+        app.world_mut()
+            .resource_mut::<Messages<GpuWorldEditRequest>>()
+            .write(GpuWorldEditRequest {
+                cells: cells.clone(),
+                command: GpuWorldEditCommand::AddParticles {
+                    material: ParticleMaterial::WaterLiquid,
+                    count_per_cell: 4,
+                },
+            });
+
+        app.update();
+
+        let upload = app.world().resource::<MpmGpuUploadRequest>();
+        let snapshot = app.world().resource::<MpmReadbackSnapshot>();
+
+        assert_eq!(upload.particles.len(), 8);
+        assert_eq!(snapshot.particles.len(), 8);
+        assert!(upload.upload_particles);
+        for p in &upload.particles {
+            let cell = world_to_cell(Vec2::from_array(p.x));
+            assert!(cells.contains(&cell));
+        }
+    }
+
+    #[test]
+    fn world_edit_remove_particles_respects_max_count() {
+        let mut app = setup_edit_app();
+        let target = IVec2::new(2, 3);
+
+        app.world_mut()
+            .resource_mut::<Messages<GpuWorldEditRequest>>()
+            .write(GpuWorldEditRequest {
+                cells: vec![target],
+                command: GpuWorldEditCommand::AddParticles {
+                    material: ParticleMaterial::WaterLiquid,
+                    count_per_cell: 9,
+                },
+            });
+        app.update();
+
+        app.world_mut()
+            .resource_mut::<Messages<GpuWorldEditRequest>>()
+            .write(GpuWorldEditRequest {
+                cells: vec![target],
+                command: GpuWorldEditCommand::RemoveParticles { max_count: 4 },
+            });
+        app.update();
+
+        let upload = app.world().resource::<MpmGpuUploadRequest>();
+
+        assert_eq!(upload.particles.len(), 5);
+    }
+
+    #[test]
+    fn apply_statistics_readback_updates_snapshot() {
+        let mut app = App::new();
+        app.insert_resource(MpmGpuControl::default())
+            .insert_resource(MpmStatisticsStatus {
+                total_particles: true,
+                phase_counts: true,
+                max_speed: true,
+                penetration: false,
+                tracked_summary: false,
+                water_surface_p95: false,
+                granular_repose: false,
+                material_interaction: false,
+                grid_density: false,
+                tracked_phase_id: 0,
+                tracked_fallback_to_all: true,
+                repose_phase_id: 1,
+                interaction_primary_phase_id: 2,
+                interaction_secondary_phase_id: 0,
+            })
+            .insert_resource(GpuStatisticsReadbackResult::default())
+            .insert_resource(MpmStatisticsSnapshot::default())
+            .add_systems(Update, apply_statistics_readback);
+
+        let mut lanes = [0u32; buffers::GPU_STATS_SCALAR_LANES];
+        lanes[buffers::GPU_STATS_LANE_TOTAL_PARTICLES] = 99;
+        lanes[buffers::GPU_STATS_LANE_PHASE_WATER] = 11;
+        lanes[buffers::GPU_STATS_LANE_PHASE_GRANULAR_SOIL] = 22;
+        lanes[buffers::GPU_STATS_LANE_PHASE_GRANULAR_SAND] = 33;
+        lanes[buffers::GPU_STATS_LANE_PHASE_UNKNOWN] = 44;
+        lanes[buffers::GPU_STATS_LANE_MAX_SPEED_BITS] = 1.5f32.to_bits();
+        app.world()
+            .resource::<GpuStatisticsReadbackResult>()
+            .store(GpuStatisticsScalars { lanes });
+
+        app.update();
+
+        let snapshot = app.world().resource::<MpmStatisticsSnapshot>();
+        assert_eq!(snapshot.total_particles, 99);
+        assert_eq!(snapshot.water_liquid, 11);
+        assert_eq!(snapshot.soil_granular, 22);
+        assert_eq!(snapshot.sand_granular, 33);
+        assert_eq!(snapshot.unknown, 44);
+        assert_eq!(snapshot.total(), 99);
+        assert!((snapshot.max_speed_mps - 1.5).abs() < 1.0e-6);
     }
 }

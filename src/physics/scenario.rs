@@ -7,11 +7,12 @@ use image::{ColorType, ImageFormat};
 use serde::Serialize;
 
 use super::material::{
-    DEFAULT_MATERIAL_PARAMS, ParticleMaterial, TerrainMaterial, terrain_boundary_radius_m,
+    DEFAULT_MATERIAL_PARAMS, ParticleMaterial, TerrainMaterial, particles_per_cell,
+    terrain_boundary_radius_m,
 };
+use super::save_load;
 use super::solver::params_defaults::DEFAULT_SOLVER_PARAMS;
-use super::world::particle::{ParticleActivityState, ParticleWorld};
-use super::world::terrain::world_to_cell;
+use super::world::terrain::{cell_to_world_center, world_to_cell};
 use super::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
     WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
@@ -160,12 +161,25 @@ pub struct ScenarioAssertionResult {
     pub condition: String,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ScenarioStatisticsInput {
+    pub particle_count: usize,
+    pub sleeping_ratio: f32,
+    pub max_speed_mps: f32,
+    pub terrain_penetration_rate: f32,
+    pub water_surface_p95_cell: Option<i32>,
+    pub granular_repose_angle_deg: Option<f32>,
+    pub granular_repose_base_span_cells: Option<i32>,
+    pub material_interaction_contact_ratio: Option<f32>,
+    pub material_interaction_primary_centroid_y: Option<f32>,
+    pub material_interaction_secondary_centroid_y: Option<f32>,
+}
+
 #[derive(Debug, Serialize)]
 struct ParticleStateJson {
     position: [f32; 2],
     velocity: [f32; 2],
     material: &'static str,
-    activity: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -367,11 +381,10 @@ pub fn default_scenario_spec_by_name(name: &str) -> Option<ScenarioSpec> {
         .find(|spec| spec.name == name)
 }
 
-pub fn apply_scenario_spec(
+pub fn apply_scenario_spec_to_terrain(
     spec: &ScenarioSpec,
     terrain: &mut TerrainWorld,
-    particles: &mut ParticleWorld,
-) -> Result<(), String> {
+) -> Result<Vec<save_load::SnapshotParticle>, String> {
     if spec.reset_fixed_world {
         terrain.set_generation_enabled(true);
         terrain.clear();
@@ -395,28 +408,57 @@ pub fn apply_scenario_spec(
         );
     }
     terrain.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
-
-    particles.restore_from_snapshot(Vec::new(), Vec::new(), Vec::new())?;
-
-    for spawn in &spec.free_particles {
-        let cells = spawn.rect.cells();
-        particles.spawn_material_particles_from_cells(
-            &cells,
-            spawn.material,
-            spawn.initial_velocity,
-        );
-    }
-
-    Ok(())
+    Ok(scenario_particles_for_spec(spec))
 }
 
-pub fn write_scenario_artifacts_for_state(
+pub fn scenario_particles_for_spec(spec: &ScenarioSpec) -> Vec<save_load::SnapshotParticle> {
+    let mut particles = Vec::new();
+    for spawn in &spec.free_particles {
+        append_spawn_particles(&mut particles, spawn);
+    }
+    particles
+}
+
+fn append_spawn_particles(
+    out: &mut Vec<save_load::SnapshotParticle>,
+    spawn: &ParticleSpawnSpec,
+) {
+    let cells = spawn.rect.cells();
+    let count = particles_per_cell(spawn.material);
+    let axis = particle_grid_axis(count);
+    let axis_f = axis as f32;
+    let spacing = CELL_SIZE_M / axis_f.max(1.0);
+    for cell in cells {
+        let cell_min = cell_to_world_center(cell) - Vec2::splat(CELL_SIZE_M * 0.5);
+        let mut spawned = 0u32;
+        'grid: for y in 0..axis {
+            for x in 0..axis {
+                if spawned >= count {
+                    break 'grid;
+                }
+                let offset = Vec2::new((x as f32 + 0.5) * spacing, (y as f32 + 0.5) * spacing);
+                out.push(save_load::SnapshotParticle {
+                    position: cell_min + offset,
+                    velocity: spawn.initial_velocity,
+                    material: spawn.material,
+                });
+                spawned += 1;
+            }
+        }
+    }
+}
+
+fn particle_grid_axis(count: u32) -> u32 {
+    (count as f32).sqrt().ceil() as u32
+}
+
+pub fn write_scenario_artifacts_for_snapshot(
     spec: &ScenarioSpec,
     step_count: usize,
     terrain: &TerrainWorld,
-    particles: &ParticleWorld,
+    particles: &[save_load::SnapshotParticle],
 ) -> Result<PathBuf, String> {
-    write_scenario_artifacts_for_state_with_options(
+    write_scenario_artifacts_for_snapshot_with_options(
         spec,
         step_count,
         terrain,
@@ -425,14 +467,14 @@ pub fn write_scenario_artifacts_for_state(
     )
 }
 
-pub fn write_scenario_artifacts_for_state_with_options(
+pub fn write_scenario_artifacts_for_snapshot_with_options(
     spec: &ScenarioSpec,
     step_count: usize,
     terrain: &TerrainWorld,
-    particles: &ParticleWorld,
+    particles: &[save_load::SnapshotParticle],
     options: ScenarioArtifactOptions,
 ) -> Result<PathBuf, String> {
-    let metrics = compute_metrics(spec, step_count, terrain, particles);
+    let metrics = compute_metrics_from_snapshot(spec, step_count, terrain, particles);
     let artifact_dir = artifact_dir_for_scenario(&spec.name);
     fs::create_dir_all(&artifact_dir)
         .map_err(|error| format!("failed to create artifact directory: {error}"))?;
@@ -443,6 +485,39 @@ pub fn write_scenario_artifacts_for_state_with_options(
         write_final_state_png(&artifact_dir.join("final_state.png"), terrain, particles)?;
     }
     Ok(artifact_dir)
+}
+
+fn compute_metrics_from_snapshot(
+    spec: &ScenarioSpec,
+    step_count: usize,
+    terrain: &TerrainWorld,
+    particles: &[save_load::SnapshotParticle],
+) -> ScenarioMetrics {
+    let max_speed = particles
+        .iter()
+        .map(|particle| particle.velocity.length())
+        .fold(0.0, f32::max);
+    let particle_count = particles.len();
+    let terrain_penetration_count = particles
+        .iter()
+        .filter(|particle| {
+            terrain
+                .sample_signed_distance_and_normal(particle.position)
+                .map(|(distance, _)| distance < -DEFAULT_PENETRATION_EPSILON_M)
+                .unwrap_or(false)
+        })
+        .count();
+    let particle_denominator = particle_count.max(1) as f32;
+    ScenarioMetrics {
+        scenario: spec.name.clone(),
+        steps: step_count,
+        particle_count,
+        sleeping_ratio: 0.0,
+        max_speed_mps: max_speed,
+        terrain_penetration_rate: terrain_penetration_count as f32 / particle_denominator,
+        granular_repose_angle_deg: None,
+        material_interaction_contact_ratio: None,
+    }
 }
 
 pub fn count_solid_cells(terrain: &TerrainWorld) -> usize {
@@ -464,240 +539,46 @@ pub fn count_solid_cells(terrain: &TerrainWorld) -> usize {
     count
 }
 
-pub fn evaluate_scenario_state(
+pub fn evaluate_scenario_state_from_statistics(
     spec: &ScenarioSpec,
     step_count: usize,
     baseline_particle_count: usize,
     baseline_solid_cell_count: usize,
     terrain: &TerrainWorld,
-    particles: &ParticleWorld,
+    stats: ScenarioStatisticsInput,
 ) -> (ScenarioMetrics, Vec<ScenarioAssertionResult>) {
-    let metrics = compute_metrics(spec, step_count, terrain, particles);
-    let assertions = evaluate_assertions_with_context(
+    let metrics = ScenarioMetrics {
+        scenario: spec.name.clone(),
+        steps: step_count,
+        particle_count: stats.particle_count,
+        sleeping_ratio: stats.sleeping_ratio,
+        max_speed_mps: stats.max_speed_mps,
+        terrain_penetration_rate: stats.terrain_penetration_rate,
+        granular_repose_angle_deg: stats.granular_repose_angle_deg,
+        material_interaction_contact_ratio: stats.material_interaction_contact_ratio,
+    };
+    let assertions = evaluate_assertions_from_statistics(
         spec,
         step_count,
         &metrics,
         terrain,
-        particles,
         baseline_particle_count,
         baseline_solid_cell_count,
         count_solid_cells(terrain),
+        stats,
     );
     (metrics, assertions)
 }
 
-fn compute_metrics(
-    spec: &ScenarioSpec,
-    step_count: usize,
-    terrain: &TerrainWorld,
-    particles: &ParticleWorld,
-) -> ScenarioMetrics {
-    let mut max_speed = 0.0f32;
-    for &velocity in &particles.vel {
-        max_speed = max_speed.max(velocity.length());
-    }
-
-    let particle_count = particles.particle_count();
-    let sleeping_count = particles
-        .activity_states()
-        .iter()
-        .filter(|&&state| matches!(state, ParticleActivityState::Sleeping))
-        .count();
-
-    let mut terrain_penetration_count = 0usize;
-    for (index, &position) in particles.positions().iter().enumerate() {
-        if let Some((distance, _)) = terrain.sample_signed_distance_and_normal(position) {
-            if distance < -DEFAULT_PENETRATION_EPSILON_M {
-                terrain_penetration_count += 1;
-            }
-        }
-
-        let _ = index;
-        let _ = position;
-    }
-
-    let particle_denominator = particle_count.max(1) as f32;
-    let granular_repose_angle_deg = spec
-        .granular_repose_assertion
-        .and_then(|cfg| granular_repose_angle_deg(particles, cfg.material));
-    let material_interaction_contact_ratio = spec.material_interaction_assertion.map(|cfg| {
-        material_contact_ratio_cells(particles, cfg.primary_material, cfg.secondary_material)
-    });
-
-    ScenarioMetrics {
-        scenario: spec.name.clone(),
-        steps: step_count,
-        particle_count,
-        sleeping_ratio: sleeping_count as f32 / particle_denominator,
-        max_speed_mps: max_speed,
-        terrain_penetration_rate: terrain_penetration_count as f32 / particle_denominator,
-        granular_repose_angle_deg,
-        material_interaction_contact_ratio,
-    }
-}
-
-fn granular_repose_angle_deg(particles: &ParticleWorld, material: ParticleMaterial) -> Option<f32> {
-    let mut xs = Vec::new();
-    let mut ys = Vec::new();
-    for (&pos, &mat) in particles
-        .positions()
-        .iter()
-        .zip(particles.materials().iter())
-    {
-        if mat == material {
-            xs.push(pos.x);
-            ys.push(pos.y);
-        }
-    }
-    if xs.len() < 8 {
-        return None;
-    }
-    let x_min = xs.iter().copied().fold(f32::INFINITY, f32::min);
-    let x_max = xs.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let y_min = ys.iter().copied().fold(f32::INFINITY, f32::min);
-    let y_max = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    if !(x_min.is_finite() && x_max.is_finite() && y_min.is_finite() && y_max.is_finite()) {
-        return None;
-    }
-    let height = (y_max - y_min).max(1e-6);
-    let base_band_y = y_min + height * 0.20;
-    let apex_index = ys
-        .iter()
-        .enumerate()
-        .max_by(|(_, a), (_, b)| a.total_cmp(b))
-        .map(|(i, _)| i)?;
-    let apex = Vec2::new(xs[apex_index], ys[apex_index]);
-
-    let mut left_base: Option<Vec2> = None;
-    let mut right_base: Option<Vec2> = None;
-    for (&x, &y) in xs.iter().zip(ys.iter()) {
-        if y > base_band_y {
-            continue;
-        }
-        let candidate = Vec2::new(x, y);
-        let replace_left = left_base.map(|v| candidate.x < v.x).unwrap_or(true);
-        if replace_left {
-            left_base = Some(candidate);
-        }
-        let replace_right = right_base.map(|v| candidate.x > v.x).unwrap_or(true);
-        if replace_right {
-            right_base = Some(candidate);
-        }
-    }
-    let left = left_base?;
-    let right = right_base?;
-    let left_dx = (apex.x - left.x).abs().max(1e-6);
-    let right_dx = (right.x - apex.x).abs().max(1e-6);
-    let left_dy = (apex.y - left.y).max(0.0);
-    let right_dy = (apex.y - right.y).max(0.0);
-    let left_angle = left_dy.atan2(left_dx).to_degrees();
-    let right_angle = right_dy.atan2(right_dx).to_degrees();
-    Some(0.5 * (left_angle + right_angle))
-}
-
-fn granular_repose_base_span_cells(
-    particles: &ParticleWorld,
-    material: ParticleMaterial,
-) -> Option<i32> {
-    let mut x_min = f32::INFINITY;
-    let mut x_max = f32::NEG_INFINITY;
-    let mut seen = false;
-    for (&pos, &mat) in particles
-        .positions()
-        .iter()
-        .zip(particles.materials().iter())
-    {
-        if mat != material {
-            continue;
-        }
-        x_min = x_min.min(pos.x);
-        x_max = x_max.max(pos.x);
-        seen = true;
-    }
-    if !seen {
-        return None;
-    }
-    Some(((x_max - x_min) / CELL_SIZE_M).round() as i32)
-}
-
-fn material_centroid_y(particles: &ParticleWorld, material: ParticleMaterial) -> Option<f32> {
-    let mut sum = 0.0f32;
-    let mut count = 0usize;
-    for (&pos, &mat) in particles
-        .positions()
-        .iter()
-        .zip(particles.materials().iter())
-    {
-        if mat == material {
-            sum += pos.y;
-            count += 1;
-        }
-    }
-    if count == 0 {
-        return None;
-    }
-    Some(sum / count as f32)
-}
-
-fn material_contact_ratio_cells(
-    particles: &ParticleWorld,
-    primary: ParticleMaterial,
-    secondary: ParticleMaterial,
-) -> f32 {
-    let mut secondary_cells = std::collections::HashSet::<IVec2>::new();
-    for (&pos, &mat) in particles
-        .positions()
-        .iter()
-        .zip(particles.materials().iter())
-    {
-        if mat == secondary {
-            secondary_cells.insert(world_to_cell(pos));
-        }
-    }
-    let mut primary_count = 0usize;
-    let mut contact_count = 0usize;
-    for (&pos, &mat) in particles
-        .positions()
-        .iter()
-        .zip(particles.materials().iter())
-    {
-        if mat != primary {
-            continue;
-        }
-        primary_count += 1;
-        let cell = world_to_cell(pos);
-        let mut touching = false;
-        for oy in -1..=1 {
-            for ox in -1..=1 {
-                if secondary_cells.contains(&(cell + IVec2::new(ox, oy))) {
-                    touching = true;
-                    break;
-                }
-            }
-            if touching {
-                break;
-            }
-        }
-        if touching {
-            contact_count += 1;
-        }
-    }
-    if primary_count == 0 {
-        0.0
-    } else {
-        contact_count as f32 / primary_count as f32
-    }
-}
-
-fn evaluate_assertions_with_context(
+fn evaluate_assertions_from_statistics(
     spec: &ScenarioSpec,
     step_count: usize,
     metrics: &ScenarioMetrics,
     terrain: &TerrainWorld,
-    particles: &ParticleWorld,
     baseline_particle_count: usize,
     baseline_solid_cell_count: usize,
     current_solid_cell_count: usize,
+    stats: ScenarioStatisticsInput,
 ) -> Vec<ScenarioAssertionResult> {
     let mut rows = Vec::new();
     let thresholds = spec.thresholds;
@@ -747,6 +628,7 @@ fn evaluate_assertions_with_context(
         active: true,
         condition: "always".to_string(),
     });
+
     if let Some(surface) = spec.water_surface_assertion {
         let active_after_steps =
             (surface.active_after_seconds / DEFAULT_SOLVER_PARAMS.fixed_dt).ceil() as usize;
@@ -759,25 +641,7 @@ fn evaluate_assertions_with_context(
             basin_bottom_free_y_cell(terrain, surface).unwrap_or(initial_min_y_cell);
         let expected_max_y_cell =
             bottom_free_y_cell + expected_height_cells - 1 + surface.margin_cells;
-        let mut water_y_cells: Vec<i32> = particles
-            .positions()
-            .iter()
-            .zip(particles.materials().iter())
-            .filter_map(|(&position, &material)| {
-                if matches!(material, ParticleMaterial::WaterLiquid) {
-                    Some((position.y / CELL_SIZE_M).floor() as i32)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        water_y_cells.sort_unstable();
-        let actual_max_y_cell = if water_y_cells.is_empty() {
-            i32::MIN
-        } else {
-            let idx = ((water_y_cells.len() as f32) * 0.95).floor() as usize;
-            water_y_cells[idx.min(water_y_cells.len() - 1)]
-        };
+        let actual_max_y_cell = stats.water_surface_p95_cell.unwrap_or(i32::MIN);
         rows.push(ScenarioAssertionResult {
             label: "water_surface_height_p95".to_string(),
             expected: format!("<= {}", expected_max_y_cell),
@@ -787,12 +651,13 @@ fn evaluate_assertions_with_context(
             condition: format!("step >= {}", active_after_steps),
         });
     }
+
     if let Some(repose) = spec.granular_repose_assertion {
         let active_after_steps =
             (repose.active_after_seconds / DEFAULT_SOLVER_PARAMS.fixed_dt).ceil() as usize;
         let active = step_count >= active_after_steps;
-        let angle_deg = granular_repose_angle_deg(particles, repose.material);
-        let base_span_cells = granular_repose_base_span_cells(particles, repose.material);
+        let angle_deg = stats.granular_repose_angle_deg;
+        let base_span_cells = stats.granular_repose_base_span_cells;
         let angle_ok = angle_deg
             .map(|deg| deg >= repose.min_angle_deg && deg <= repose.max_angle_deg)
             .unwrap_or(false);
@@ -820,15 +685,12 @@ fn evaluate_assertions_with_context(
             condition: format!("step >= {}", active_after_steps),
         });
     }
+
     if let Some(interaction) = spec.material_interaction_assertion {
         let active_after_steps =
             (interaction.active_after_seconds / DEFAULT_SOLVER_PARAMS.fixed_dt).ceil() as usize;
         let active = step_count >= active_after_steps;
-        let contact_ratio = material_contact_ratio_cells(
-            particles,
-            interaction.primary_material,
-            interaction.secondary_material,
-        );
+        let contact_ratio = stats.material_interaction_contact_ratio.unwrap_or(0.0);
         rows.push(ScenarioAssertionResult {
             label: "material_interaction_contact_ratio".to_string(),
             expected: format!(">= {:.4}", interaction.min_contact_ratio),
@@ -838,8 +700,8 @@ fn evaluate_assertions_with_context(
             condition: format!("step >= {}", active_after_steps),
         });
         if interaction.require_primary_below_secondary {
-            let primary_y = material_centroid_y(particles, interaction.primary_material);
-            let secondary_y = material_centroid_y(particles, interaction.secondary_material);
+            let primary_y = stats.material_interaction_primary_centroid_y;
+            let secondary_y = stats.material_interaction_secondary_centroid_y;
             let order_ok = primary_y
                 .zip(secondary_y)
                 .map(|(p, s)| p < s)
@@ -859,6 +721,7 @@ fn evaluate_assertions_with_context(
             });
         }
     }
+
     rows
 }
 
@@ -905,22 +768,15 @@ fn capture_final_state_json(
     spec: &ScenarioSpec,
     step_count: usize,
     terrain: &TerrainWorld,
-    particles: &ParticleWorld,
+    particles: &[save_load::SnapshotParticle],
 ) -> FinalStateJson {
     let particle_states = particles
-        .positions()
         .iter()
-        .zip(particles.vel.iter())
-        .zip(particles.materials().iter())
-        .zip(particles.activity_states().iter())
-        .map(
-            |(((&position, &velocity), &material), &activity)| ParticleStateJson {
-                position: [position.x, position.y],
-                velocity: [velocity.x, velocity.y],
-                material: particle_material_label(material),
-                activity: activity_label(activity),
-            },
-        )
+        .map(|particle| ParticleStateJson {
+            position: [particle.position.x, particle.position.y],
+            velocity: [particle.velocity.x, particle.velocity.y],
+            material: particle_material_label(particle.material),
+        })
         .collect();
 
     let mut terrain_cells = Vec::new();
@@ -956,7 +812,7 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
 fn write_final_state_png(
     path: &Path,
     terrain: &TerrainWorld,
-    particles: &ParticleWorld,
+    particles: &[save_load::SnapshotParticle],
 ) -> Result<(), String> {
     let min_cell_x = WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32;
     let max_cell_x = (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 - 1;
@@ -996,11 +852,9 @@ fn write_final_state_png(
     }
 
     let particle_radius_px_min = (FINAL_STATE_PNG_CELL_RESOLUTION as f32 * 0.35).max(1.0);
-    for (&position, &material) in particles
-        .positions()
-        .iter()
-        .zip(particles.materials().iter())
-    {
+    for particle in particles {
+        let position = particle.position;
+        let material = particle.material;
         let cell = world_to_cell(position);
         let color = particle_palette(material)[deterministic_palette_index(cell.x, cell.y)];
         let rel_x = (position.x / CELL_SIZE_M) - min_cell_x as f32;
@@ -1212,17 +1066,9 @@ fn terrain_material_label(material: TerrainMaterial) -> &'static str {
     }
 }
 
-fn activity_label(state: ParticleActivityState) -> &'static str {
-    match state {
-        ParticleActivityState::Active => "Active",
-        ParticleActivityState::Sleeping => "Sleeping",
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{apply_scenario_spec, default_scenario_spec_by_name, parse_toggle_value};
-    use crate::physics::world::particle::ParticleWorld;
+    use super::{apply_scenario_spec_to_terrain, default_scenario_spec_by_name, parse_toggle_value};
     use crate::physics::world::terrain::{TerrainCell, TerrainWorld};
     use bevy::prelude::IVec2;
 
@@ -1251,8 +1097,8 @@ mod tests {
     fn water_drop_scenario_disables_background_generation() {
         let spec = default_scenario_spec_by_name("water_drop").expect("water_drop must exist");
         let mut terrain = TerrainWorld::default();
-        let mut particles = ParticleWorld::default();
-        apply_scenario_spec(&spec, &mut terrain, &mut particles).expect("scenario apply should succeed");
+        let _particles = apply_scenario_spec_to_terrain(&spec, &mut terrain)
+            .expect("scenario apply should succeed");
 
         assert!(!terrain.generation_enabled());
         assert_eq!(

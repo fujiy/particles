@@ -8,7 +8,6 @@ use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, water_kernel_radius_m};
 use crate::physics::state::{PhysicsActiveRegion, PhysicsRegionSettings, SimUpdateSet};
-use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainWorld,
 };

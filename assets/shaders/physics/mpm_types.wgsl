@@ -100,8 +100,15 @@ struct MpmParams {
     // APIC<->PIC blend: 1.0=full APIC, 0.0=full PIC [Eq.32, physics.md]
     alpha_apic_water: f32,
     alpha_apic_granular: f32,
+    // Statistics config
+    stats_tracked_phase_id: u32,
+    stats_repose_phase_id: u32,
+    stats_interaction_primary_phase_id: u32,
+    stats_interaction_secondary_phase_id: u32,
+    stats_penetration_epsilon_m: f32,
+    stats_position_fp_scale: f32,
     // padding
-    pad_a: u32,
+    pad_a: vec3<u32>,
 }
 
 const PHASE_WATER: u32 = 0u;

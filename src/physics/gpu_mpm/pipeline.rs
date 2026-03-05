@@ -28,6 +28,51 @@ pub struct MpmComputePipelines {
 
     pub g2p_layout: BindGroupLayout,
     pub g2p_pipeline: CachedComputePipelineId,
+
+    pub stats_clear_layout: BindGroupLayout,
+    pub stats_clear_pipeline: CachedComputePipelineId,
+
+    pub stats_total_layout: BindGroupLayout,
+    pub stats_total_pipeline: CachedComputePipelineId,
+
+    pub stats_phase_layout: BindGroupLayout,
+    pub stats_phase_pipeline: CachedComputePipelineId,
+
+    pub stats_max_speed_layout: BindGroupLayout,
+    pub stats_max_speed_pipeline: CachedComputePipelineId,
+
+    pub stats_penetration_tracking_layout: BindGroupLayout,
+    pub stats_penetration_tracking_pipeline: CachedComputePipelineId,
+
+    pub stats_water_surface_hist_layout: BindGroupLayout,
+    pub stats_water_surface_hist_pipeline: CachedComputePipelineId,
+
+    pub stats_water_surface_finalize_layout: BindGroupLayout,
+    pub stats_water_surface_finalize_pipeline: CachedComputePipelineId,
+
+    pub stats_repose_bounds_layout: BindGroupLayout,
+    pub stats_repose_bounds_pipeline: CachedComputePipelineId,
+
+    pub stats_repose_finalize_layout: BindGroupLayout,
+    pub stats_repose_finalize_pipeline: CachedComputePipelineId,
+
+    pub stats_interaction_clear_cells_layout: BindGroupLayout,
+    pub stats_interaction_clear_cells_pipeline: CachedComputePipelineId,
+
+    pub stats_interaction_mark_secondary_layout: BindGroupLayout,
+    pub stats_interaction_mark_secondary_pipeline: CachedComputePipelineId,
+
+    pub stats_interaction_primary_contact_layout: BindGroupLayout,
+    pub stats_interaction_primary_contact_pipeline: CachedComputePipelineId,
+
+    pub stats_interaction_finalize_layout: BindGroupLayout,
+    pub stats_interaction_finalize_pipeline: CachedComputePipelineId,
+
+    pub stats_grid_density_layout: BindGroupLayout,
+    pub stats_grid_density_pipeline: CachedComputePipelineId,
+
+    pub stats_grid_density_finalize_layout: BindGroupLayout,
+    pub stats_grid_density_finalize_pipeline: CachedComputePipelineId,
 }
 
 impl FromWorld for MpmComputePipelines {
@@ -60,7 +105,6 @@ impl FromWorld for MpmComputePipelines {
         });
 
         // p2g: 0=params, 1=particles(read), 2=grid_atomic(rw)
-        // grid is written only via atomic u32 view; no separate GpuGridNode binding needed.
         let p2g_entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
@@ -72,10 +116,7 @@ impl FromWorld for MpmComputePipelines {
         let p2g_layout = render_device.create_bind_group_layout("mpm_p2g_layout", &*p2g_entries);
         let p2g_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("mpm_p2g".into()),
-            layout: vec![BindGroupLayoutDescriptor::new(
-                "mpm_p2g_layout",
-                &*p2g_entries,
-            )],
+            layout: vec![BindGroupLayoutDescriptor::new("mpm_p2g_layout", &*p2g_entries)],
             push_constant_ranges: vec![],
             shader: shaders.p2g.clone(),
             shader_defs: vec![],
@@ -121,16 +162,336 @@ impl FromWorld for MpmComputePipelines {
         let g2p_layout = render_device.create_bind_group_layout("mpm_g2p_layout", &*g2p_entries);
         let g2p_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("mpm_g2p".into()),
-            layout: vec![BindGroupLayoutDescriptor::new(
-                "mpm_g2p_layout",
-                &*g2p_entries,
-            )],
+            layout: vec![BindGroupLayoutDescriptor::new("mpm_g2p_layout", &*g2p_entries)],
             push_constant_ranges: vec![],
             shader: shaders.g2p.clone(),
             shader_defs: vec![],
             entry_point: Some("g2p".into()),
             zero_initialize_workgroup_memory: false,
         });
+
+        // stats_clear: 0=stats_scalars(rw)
+        let stats_clear_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (binding_types::storage_buffer_sized(false, None),),
+        );
+        let stats_clear_layout =
+            render_device.create_bind_group_layout("mpm_stats_clear_layout", &*stats_clear_entries);
+        let stats_clear_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("mpm_stats_clear".into()),
+            layout: vec![BindGroupLayoutDescriptor::new(
+                "mpm_stats_clear_layout",
+                &*stats_clear_entries,
+            )],
+            push_constant_ranges: vec![],
+            shader: shaders.stats_clear.clone(),
+            shader_defs: vec![],
+            entry_point: Some("clear_stats_scalars".into()),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        // Shared layout for particle-stat passes: 0=params, 1=particles(read), 2=stats_scalars(rw)
+        let stats_particle_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let stats_total_layout =
+            render_device.create_bind_group_layout("mpm_stats_total_layout", &*stats_particle_entries);
+        let stats_total_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("mpm_stats_total_particles".into()),
+            layout: vec![BindGroupLayoutDescriptor::new(
+                "mpm_stats_total_layout",
+                &*stats_particle_entries,
+            )],
+            push_constant_ranges: vec![],
+            shader: shaders.stats_total_particles.clone(),
+            shader_defs: vec![],
+            entry_point: Some("count_total_particles".into()),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        let stats_phase_layout =
+            render_device.create_bind_group_layout("mpm_stats_phase_layout", &*stats_particle_entries);
+        let stats_phase_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("mpm_stats_phase_counts".into()),
+            layout: vec![BindGroupLayoutDescriptor::new(
+                "mpm_stats_phase_layout",
+                &*stats_particle_entries,
+            )],
+            push_constant_ranges: vec![],
+            shader: shaders.stats_phase_counts.clone(),
+            shader_defs: vec![],
+            entry_point: Some("count_phase_particles".into()),
+            zero_initialize_workgroup_memory: false,
+        });
+
+        let stats_max_speed_layout = render_device
+            .create_bind_group_layout("mpm_stats_max_speed_layout", &*stats_particle_entries);
+        let stats_max_speed_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_max_speed".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_max_speed_layout",
+                    &*stats_particle_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_max_speed.clone(),
+                shader_defs: vec![],
+                entry_point: Some("compute_max_speed".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // 0=params, 1=particles(read), 2=terrain_sdf(read), 3=stats_scalars(rw)
+        let stats_penetration_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let stats_penetration_tracking_layout = render_device.create_bind_group_layout(
+            "mpm_stats_penetration_tracking_layout",
+            &*stats_penetration_entries,
+        );
+        let stats_penetration_tracking_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_penetration_tracking".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_penetration_tracking_layout",
+                    &*stats_penetration_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_penetration_tracking.clone(),
+                shader_defs: vec![],
+                entry_point: Some("compute_penetration_tracking".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        let stats_water_surface_hist_layout = render_device.create_bind_group_layout(
+            "mpm_stats_water_surface_hist_layout",
+            &*stats_particle_entries,
+        );
+        let stats_water_surface_hist_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_water_surface_hist".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_water_surface_hist_layout",
+                    &*stats_particle_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_water_surface_histogram.clone(),
+                shader_defs: vec![],
+                entry_point: Some("build_water_surface_histogram".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // 0=params, 1=stats_scalars(rw)
+        let stats_finalize_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let stats_water_surface_finalize_layout = render_device.create_bind_group_layout(
+            "mpm_stats_water_surface_finalize_layout",
+            &*stats_finalize_entries,
+        );
+        let stats_water_surface_finalize_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_water_surface_finalize".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_water_surface_finalize_layout",
+                    &*stats_finalize_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_water_surface_finalize.clone(),
+                shader_defs: vec![],
+                entry_point: Some("finalize_water_surface_p95".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        let stats_repose_bounds_layout = render_device.create_bind_group_layout(
+            "mpm_stats_repose_bounds_layout",
+            &*stats_particle_entries,
+        );
+        let stats_repose_bounds_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_repose_bounds".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_repose_bounds_layout",
+                    &*stats_particle_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_granular_repose_bounds.clone(),
+                shader_defs: vec![],
+                entry_point: Some("collect_granular_repose_bounds".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        let stats_repose_finalize_layout = render_device.create_bind_group_layout(
+            "mpm_stats_repose_finalize_layout",
+            &*stats_finalize_entries,
+        );
+        let stats_repose_finalize_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_repose_finalize".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_repose_finalize_layout",
+                    &*stats_finalize_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_granular_repose_finalize.clone(),
+                shader_defs: vec![],
+                entry_point: Some("finalize_granular_repose".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // 0=params, 1=cell_flags(rw)
+        let interaction_clear_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let stats_interaction_clear_cells_layout = render_device.create_bind_group_layout(
+            "mpm_stats_interaction_clear_cells_layout",
+            &*interaction_clear_entries,
+        );
+        let stats_interaction_clear_cells_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_interaction_clear_cells".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_interaction_clear_cells_layout",
+                    &*interaction_clear_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_interaction_clear_cells.clone(),
+                shader_defs: vec![],
+                entry_point: Some("clear_interaction_cells".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // 0=params, 1=particles(read), 2=cell_flags, 3=stats_scalars
+        let interaction_particle_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let stats_interaction_mark_secondary_layout = render_device.create_bind_group_layout(
+            "mpm_stats_interaction_mark_secondary_layout",
+            &*interaction_particle_entries,
+        );
+        let stats_interaction_mark_secondary_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_interaction_mark_secondary".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_interaction_mark_secondary_layout",
+                    &*interaction_particle_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_interaction_mark_secondary.clone(),
+                shader_defs: vec![],
+                entry_point: Some("mark_interaction_secondary".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        let stats_interaction_primary_contact_layout = render_device.create_bind_group_layout(
+            "mpm_stats_interaction_primary_contact_layout",
+            &*interaction_particle_entries,
+        );
+        let stats_interaction_primary_contact_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_interaction_primary_contact".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_interaction_primary_contact_layout",
+                    &*interaction_particle_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_interaction_primary_contact.clone(),
+                shader_defs: vec![],
+                entry_point: Some("compute_interaction_primary_contact".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        let stats_interaction_finalize_layout = render_device.create_bind_group_layout(
+            "mpm_stats_interaction_finalize_layout",
+            &*stats_finalize_entries,
+        );
+        let stats_interaction_finalize_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_interaction_finalize".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_interaction_finalize_layout",
+                    &*stats_finalize_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_interaction_finalize.clone(),
+                shader_defs: vec![],
+                entry_point: Some("finalize_interaction".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // 0=params, 1=grid(read), 2=stats_scalars(rw)
+        let stats_grid_density_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let stats_grid_density_layout = render_device.create_bind_group_layout(
+            "mpm_stats_grid_density_layout",
+            &*stats_grid_density_entries,
+        );
+        let stats_grid_density_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_grid_density".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_grid_density_layout",
+                    &*stats_grid_density_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_grid_density.clone(),
+                shader_defs: vec![],
+                entry_point: Some("collect_grid_density".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // 0=stats_scalars(rw)
+        let stats_scalar_only_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (binding_types::storage_buffer_sized(false, None),),
+        );
+        let stats_grid_density_finalize_layout = render_device.create_bind_group_layout(
+            "mpm_stats_grid_density_finalize_layout",
+            &*stats_scalar_only_entries,
+        );
+        let stats_grid_density_finalize_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_grid_density_finalize".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_grid_density_finalize_layout",
+                    &*stats_scalar_only_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_grid_density_finalize.clone(),
+                shader_defs: vec![],
+                entry_point: Some("finalize_grid_density".into()),
+                zero_initialize_workgroup_memory: false,
+            });
 
         Self {
             clear_layout,
@@ -141,6 +502,36 @@ impl FromWorld for MpmComputePipelines {
             grid_update_pipeline,
             g2p_layout,
             g2p_pipeline,
+            stats_clear_layout,
+            stats_clear_pipeline,
+            stats_total_layout,
+            stats_total_pipeline,
+            stats_phase_layout,
+            stats_phase_pipeline,
+            stats_max_speed_layout,
+            stats_max_speed_pipeline,
+            stats_penetration_tracking_layout,
+            stats_penetration_tracking_pipeline,
+            stats_water_surface_hist_layout,
+            stats_water_surface_hist_pipeline,
+            stats_water_surface_finalize_layout,
+            stats_water_surface_finalize_pipeline,
+            stats_repose_bounds_layout,
+            stats_repose_bounds_pipeline,
+            stats_repose_finalize_layout,
+            stats_repose_finalize_pipeline,
+            stats_interaction_clear_cells_layout,
+            stats_interaction_clear_cells_pipeline,
+            stats_interaction_mark_secondary_layout,
+            stats_interaction_mark_secondary_pipeline,
+            stats_interaction_primary_contact_layout,
+            stats_interaction_primary_contact_pipeline,
+            stats_interaction_finalize_layout,
+            stats_interaction_finalize_pipeline,
+            stats_grid_density_layout,
+            stats_grid_density_pipeline,
+            stats_grid_density_finalize_layout,
+            stats_grid_density_finalize_pipeline,
         }
     }
 }
