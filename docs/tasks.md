@@ -217,11 +217,11 @@
     - [x] 解像度 = 画面 + 余白（2.5倍）を基準に固定し、ズーム時は downsample（LOD）でカバーする。
     - [x] セル値: `far_top1_id: u8`, `far_w1: u8`, `solid_fraction: u8`, pad（RGBA8 format）
     - [x] LOD k_far = k_near + FAR_OFFSET（デフォルト 3）
-  - [ ] **[P4: TerrainNearUpdate compute]** `assets/shaders/render/terrain_near_update.wgsl` を実装する。
-    - [x] 入力: dirty list（SSBO）、生成関数パラメータ（uniform）、地形オーバーライド情報（SSBO）
-    - [x] 各 dirty cell で `material_for_cell()` を評価し、オーバーライドがあれば上書きする。
+  - [x] **[P4: TerrainNearUpdate compute]** `assets/shaders/render/terrain_near_update.wgsl` を実装する。
+    - [x] 入力: dirty list（SSBO）、生成関数パラメータ（uniform）
+    - [x] 各 dirty cell で `material_for_cell()` を評価して Near 基準値を生成する。
     - [x] 結果を Near テクスチャ（リング座標）へ書き込む。
-    - [ ] 地形編集オーバーライド転送経路: `TerrainOverrideDeltaBuffer`（CPU dirty_chunks差分 → GPU）を実装する。
+    - [x] 地形編集オーバーライド転送経路（`TerrainOverrideDeltaBuffer`）は [REND-GPU-02] へ移管する。
   - [ ] **[P5: TerrainFarUpdate compute]** `assets/shaders/render/terrain_far_update.wgsl` を実装する。
     - [x] Far texel が表すワールド領域を多点サンプリングして集約値（top1_id, w1）を計算する。
     - [x] LOD k_far 変化時に Far 全体を dirty 化する。
@@ -257,6 +257,7 @@
     - [ ] `configs/autoverify/terrain_pan_continuity.json`: パン継続性スクリーンショット（リングバッファ実装後）。
     - [ ] `configs/autoverify/terrain_zoom_lod.json`: ズーム遷移スクリーンショット（LOD実装後）。
 - 進捗:
+  - 2026-03-05: 地形改変反映（`TerrainOverrideDeltaBuffer` / 編集入力 / セーブロード反映）を [REND-GPU-02] へ分離し、本WUは Near/Far生成キャッシュ基盤にスコープを限定。
   - 2026-03-04: 診断表示を追加。HUD に `TerrainGen/frame`（そのフレームで NearUpdate が評価する dirty cell 数）を表示し、スクロール時の生成負荷を可視化。あわせて `prepare_terrain_near_uploads` の retry を「pipeline ready 時は1フレーム、未ready時のみ32フレーム」へ変更し、不要な再dispatchを削減。
   - 2026-03-04: リングバッファ表示のずれを修正。`terrain_compose.wgsl` に `ring_offset` を追加し、`world_cell -> texture` 参照を mod-ring 化。`prepare_terrain_near_uploads` で compose uniform へ `ring_offset` を転送。スクロール時の地形が飛び飛びに移動する表示不整合を解消。
   - 2026-03-04: スクロール時の周期的カクつき対策として Near 更新を dirty 列/行ベースへ移行。`prepare_terrain_near_update_request` はカメラ移動量から新規可視ストリップのみ dirty 発行し、`ring_offset` を更新。`terrain_near_update.wgsl` は dirty cell SSBO を1D dispatchで処理する方式に変更し、Near 全面再生成を回避。`cargo check` / `cargo test --lib` / `terrain_gpu_screenshot` / `terrain_gpu_panned_screenshot` で確認。
@@ -301,6 +302,113 @@
   - dirty キュー＋予算スケジューラで1フレーム更新コストが `max_tiles_near/far` 以内に収まる。
   - autoverify でセル一致率 ≥ 99.9%、パン継続性・ズーム遷移スクリーンショットが成立する。
   - 旧 `terrain_dot_gpu` 方式が完全削除され、[MPM-GPU-03]/[REND-01]/[WGEN-02] が整理済みである。
+
+
+### [REND-GPU-02] 地形改変のNear反映（編集入力 + セーブロード + override差分転送）
+
+- Status: `In Progress`
+- 背景:
+  - [REND-GPU-01] で Near/Far 生成キャッシュは整備されたが、地形改変の表示反映は暫定的にスコープ外としている。
+  - ユーザー操作（delete tool / solid tool）のセル編集、およびセーブデータからの改変復元を Near 描画に反映する必要がある。
+  - 改変データは CPU 側で `chunk_coord -> chunk_cells`（`CHUNK_SIZE = 32`）の HashMap として保持する方針とする。
+  - [REND-GPU-01] P4 の `TerrainOverrideDeltaBuffer` 未実装項目を本WUへ移管する。
+- スコープ:
+  - 編集入力（delete/solid）とセーブロード差分を、共通の改変チャンク台帳へ反映する。
+  - Near GPU キャッシュに「生成セル配列」と「改変セル配列（override）」を同一リングバッファ座標系で保持する。
+  - スクロール/ズーム時に、改変セルを CPU から RLE 圧縮差分として固定 payload 単位で GPU へ転送する。
+  - `terrain_compose.wgsl` は改変キャッシュ優先で参照し、`no_override` 特別ID時のみ生成キャッシュを参照する。
+  - Far への改変反映は対象外とし、後続 Work Unit へ分離する。
+- Subtasks:
+  - [x] **[P0: 改変データモデル]** CPU 改変チャンク台帳を定義する。
+    - [x] `CHUNK_SIZE = 32` のセル配列を値にした `HashMap<chunk_coord, chunk_cells>` を実装する。
+    - [x] セル表現を `override_material_id` + `no_override` 特別IDで統一する。
+    - [x] 編集由来/ロード由来の dirty chunk 追跡を共通化する。
+  - [x] **[P1: 編集入力接続]** delete tool / solid tool をセル編集へ接続する。
+    - [x] ツール入力を world 座標から cell 座標へ変換し、改変チャンク台帳へ反映する。
+    - [x] 複数セル編集（ブラシ範囲）時の dirty chunk 発行を実装する。
+  - [x] **[P2: セーブロード接続]** セーブ差分から改変チャンク台帳を復元する。
+    - [x] ロード時に改変セル差分を台帳へ復元する。
+    - [x] ロード直後に可視範囲対応の dirty chunk を発行する。
+  - [x] **[P3: override差分転送]** `TerrainOverrideDeltaBuffer` を実装する。
+    - [x] 可視 dirty rect と交差する override chunk の改変セルを run-length 圧縮してエンコードする。
+    - [x] 転送データを固定 payload サイズ単位へ分割して SSBO へ転送する。
+    - [x] `terrain_near_update.wgsl` 側で payload をデコードし、Near 改変キャッシュへ書き込む。
+  - [x] **[P4: Near改変キャッシュ統合]** 生成/改変の2配列構成を Near リングへ統合する。
+    - [x] Near 改変キャッシュを生成キャッシュと同寸法・同ring_offsetで保持する。
+    - [x] スクロール/ズーム時は生成関数評価の代替として改変 payload 適用を実行できるようにする。
+    - [x] 未改変セルは `no_override` を維持する。
+  - [x] **[P5: Compose参照順序]** 改変優先参照を描画経路へ適用する。
+    - [x] `terrain_compose.wgsl` で「override -> base generated」の順に参照する。
+    - [x] Near/Far 合成の既存表示（Near優先、Near欠損時Far補完）を維持する。
+  - [x] **[P6: 自動検証]** 改変反映の runtime artifact を追加する。
+    - [x] `configs/autoverify/terrain_edit_delete_tool.json` を追加し、削除編集結果の screenshot を保存する。
+    - [x] `configs/autoverify/terrain_edit_solid_tool.json` を追加し、solid 編集結果の screenshot を保存する。
+    - [x] `configs/autoverify/terrain_edit_load_override.json` を追加し、ロード差分反映の snapshot（state/metrics）を保存する。
+    - [x] RLE payload 数・展開セル数・フレーム予算内完了率を JSON/HUD へ出力する。
+  - [x] **[P7: MPM地形SDFのGPU一本化準備]** CPU側SDF生成/CPU地形生成依存を撤去する。
+    - [x] `TerrainWorld` のSDF前計算（rebuild）を停止し、CPU側の重い再生成処理を外す。
+    - [x] CPU地形生成モジュール（noise/rules）を削除し、未ロード領域はGPU生成chunk readback経由でのみ編集/参照する。
+    - [x] MPM向けSDF生成をGPU側で完結させる後続WUを起票する（実装は別WU）。
+  - [ ] **[P8: Far/Back 改変反映]** Far/Back 表示にも override 差分を反映する。
+    - [x] Far/Back 更新computeで Near base/override を参照し、既存GPU downsample 経路で反映する（Nearカバー領域）。
+    - [x] CPU override chunk 台帳を hash + chunkセル配列（疎payload）としてGPUへ送信し、Far/Back shader で global override lookup を実装する（Near外の改変を反映）。
+    - [x] Near非表示ズーム域では Near cache 参照を無効化し、中央固定幅のFar/Back描画ずれを解消する。
+    - [ ] CPU側 override chunk から `2^k` ダウンサンプルmipmapキャッシュを構築する。
+    - [ ] Far/Back の scale (`downsample`) ごとに必要mip差分のみを payload 送信する。
+    - [ ] GPU側で mip差分 payload を Far/Back override cache へ適用する（現状は sparse lookup 方式）。
+    - [ ] scale変更時の再構築コストを分割実行し、フレームスパイクを抑制する（現状は生成更新時に同一payload参照）。
+- 進捗:
+  - 2026-03-05: Near を `base(R16Uint) + override(R16Uint)` の2層へ拡張。`terrain_near_update` で base と `no_override` 初期化を同時更新し、`terrain_override_apply.wgsl` で chunk(32x32) override を RLE run 展開して override 層へ適用。Compose は override 優先参照へ更新。
+  - 2026-03-05: CPU 側で可視 dirty rect に交差する override chunk を列挙し、chunk 線形配列を run-length 圧縮して `MAX_OVERRIDE_RUNS_PER_FRAME` で分割送信するキューを実装。
+  - 2026-03-05: screenshot autoverify に terrain ops（`delete_rect`, `solid_rect`, `save_snapshot`, `load_snapshot`）を追加し、成果物 `artifacts/autoverify/terrain_edit_delete_tool.png` / `terrain_edit_solid_tool.png` / `terrain_edit_load_override.png` を生成確認。
+  - 2026-03-05: HUD に override 転送診断 (`TerrainOvr/frame: runs/cells/pending`) を追加。
+  - 2026-03-05: CPU 改変台帳を `HashMap<chunk_coord, TerrainOverrideChunk(32x32 fixed array)>` へ移行し、`dirty_override_chunks` で編集由来/ロード由来の共通 dirty 追跡を追加。
+  - 2026-03-05: HUD に `done=%`（フレーム予算内完了率）を追加。screenshot autoverify は sidecar JSON（`*.json`）へ `payload_runs_total / expanded_cells_total / budget_completion_avg` を出力するよう更新。
+  - 2026-03-05: delete tool をセル単位編集へ変更し、ホバーセルの4辺ハイライト表示を追加（delete/break/terrain solid系ツール）。
+  - 2026-03-05: Tile Overlay を Chunk Overlay 化。可視chunk境界を薄線表示し、改変済みchunk（override保持）を色付き境界線で強調。
+  - 2026-03-05: Chunk Overlay が `visible_tiles` 未供給で空描画だった問題を修正。カメラ可視範囲から chunk 境界線を直接描画する方式へ変更し、改変chunk枠表示を安定化。
+  - 2026-03-05: `TerrainOvr` HUD に累積カウンタ（runs/cells total）を追加し、1フレーム値が見逃されるケースでも改変転送発生を確認可能にした。
+  - 2026-03-05: Core2d graph の描画順を修正し、`TerrainCompose/WaterDot` を `MainTransparentPass` より前へ移動。CPU gizmo overlay（Chunk/SDF/Physics Area）が上面表示されることを `configs/autoverify/overlay_visibility_default_world.json` の screenshot で確認。
+  - 2026-03-05: ツールhoverハイライト色を白に統一。solidツールは粒子生成を行わず、セル直接編集（`TerrainCell::Solid`）へ変更。
+  - 2026-03-05: `overlay_chunk_modified_highlight` / `overlay_chunk_modified_solid_highlight` で `Chunk Overlay: Modified:2` と `TerrainOvr/total` 増加（delete: runs=10, solid: runs=30）を確認。
+  - 2026-03-05: `terrain_compose.wgsl` の Near 合成を修正。Near 範囲では「override(Empty含む)を優先し、Emptyなら空色を描く」挙動へ更新し、`near_enabled` 条件に依存せず改変表示を適用。`configs/autoverify/terrain_edit_delete_tool.json` と `configs/autoverify/terrain_edit_solid_visible.json` を `default_world` で再実行し、`artifacts/autoverify/terrain_edit_delete_tool.png`（削除穴）/`terrain_edit_solid_visible.png`（solid追加）で反映を確認。
+  - 2026-03-05: delete 深部編集で「離れた場所に穴」「SDF と描画の不一致」が出る不具合を修正。原因は `terrain_override_apply.wgsl` の chunk サイズが `32` 固定で、実装定数 `CHUNK_SIZE=16` と不一致だったこと。Override apply の chunk size を uniform (`chunk_size_i32`) 化して Rust 側 `CHUNK_SIZE_I32` を転送するよう変更し、再実行した `terrain_edit_delete_tool` / `delete_sdf_align` で編集位置と描画・SDF の整合を確認。
+  - 2026-03-05: 未ロードchunk編集向けに「GPU生成chunk readback cache」を追加。`TerrainGeneratedChunkCache`（key=`chunk_coord`）へ生成結果を保持し、delete/solid/break実行時は `TerrainWorld` 未ロードchunkをこのcache経由で解決（miss時はGPU生成要求をenqueue）。ツール有効時はカーソル周辺chunkを先読み（半径1chunk）し、初回編集遅延を低減。
+  - 2026-03-05: GPU chunk readback の進行停止バグを修正。`TerrainChunkGenerateNode` で pipeline 未準備時に `pending_dispatch` を再投入し、`prepare_terrain_chunk_generate_uploads` でも `pending_dispatch` 残存時に dirty を再点火するよう変更。これにより request が `begin -> map_async -> mapped -> done` まで継続することを確認。
+  - 2026-03-05: runtime の default world/reset/streaming 経路から CPU 生成chunk依存を削減。`initialize_default_world` / `apply_sim_reset` / `apply_scenario_spec(reset_fixed_world)` は `reset_fixed_world()` を使わず `set_generation_enabled(true) + clear()` に変更し、`stream_terrain_around_camera` と `step_physics` は `TerrainGeneratedChunkCache` から chunk を取り込む方式へ変更。
+  - 2026-03-05: SDF overlay 整合確認用 `configs/autoverify/overlay_sdf_alignment_default_world.json` を追加し、`artifacts/autoverify/overlay_visibility_default_world.png`（Loaded:14）および `overlay_sdf_alignment_default_world.png` を `default_world` で再生成。SDF overlay と表示地形のズレ再発がないことを確認。
+  - 2026-03-05: 起動直後の過剰chunkロードを抑制。`TerrainStreamingSettings.load_radius_chunks` 既定値を `0` に変更し、default world 起動時は `Loaded:1 Cached:1` 程度で安定（従来の `Loaded:132` 相当の初期スパイクを解消）。
+  - 2026-03-05: Chunk overlay に generated cache 済みchunkの可視化を追加。薄境界（visible）に加えて cache 済み境界を別色で描画し、UIラベルを `Loaded/Cached/Modified` 表示へ更新。
+  - 2026-03-05: delete tool での連鎖削除/粒子化を抑制。`Delete` 分岐から `detach_terrain_components_after_cell_removal` を外し、delete は対象セルのみ `Empty` 化する挙動へ統一（break のみ連結成分detachを維持）。
+  - 2026-03-05: delete 反映不整合を修正。override比較基準をCPU生成関数ではなく chunk生成基準セル（`generated_base_chunks`）へ切替し、`load_generated_chunk_from_material_ids` 時に基準を保存するよう変更。これにより generated solid の delete でも override が正しく立つ。
+  - 2026-03-05: CPU SDF前計算を停止。`TerrainWorld::rebuild_static_particles_if_dirty` での SDF rebuild を撤去し、SDF問い合わせは loaded terrain に対する都度サンプリングへ変更（前計算コストを削除）。
+  - 2026-03-05: CPU地形生成コードを撤去。`src/physics/generation/*` と `assets/params/generation.ron` / `src/params/generation.rs` を削除し、`TerrainWorld` の未ロードセル参照は `Empty` 扱いへ変更。
+  - 2026-03-05: MPM向け CPU地形SDFアップロード生成を一時停止。`prepare_terrain_upload` は初回に「常時外側SDF」を一度だけ送る暫定挙動へ変更し、GPU側SDF生成実装まで CPU再生成を抑止。
+  - 2026-03-05: Far/Back 改変反映の第1段として、`terrain_far_update.wgsl` を拡張。Far/Back 更新時に Near base/override テクスチャを参照し、Nearカバー領域の override（delete含む）を downsample 集約へ反映するよう変更。
+  - 2026-03-05: Far/Back 改変反映の第2段として、CPU override chunk 台帳を `hash table + chunk override cells` の疎SSBO payloadで render world へ転送し、`terrain_far_update.wgsl` に global override lookup を追加。Near外のoverride（solid/delete）も Far/Back 更新computeで反映されることを `terrain_edit_solid_far_back_visible` screenshot で確認。
+  - 2026-03-05: zoom-outでNear非表示時に中央固定幅でFar/Backがずれる不具合を修正。原因はFar/Back更新shaderがNear無効時もNear cacheを参照していたこと。`near_cache_enabled` を `TerrainFarParams` に追加し、Near無効時は `global override -> generation` のみで評価するよう変更。`terrain_edit_far_back_baseline.png` で中央矩形ズレ解消を確認。
+- 完了条件:
+  - delete/solid によるセル編集が Near 描画へ反映される。
+  - セーブロードで復元した改変が Near 描画で再現される。
+  - 改変転送が「改変セルのみ RLE 差分 + 固定 payload 分割」で動作し、artifactで検証できる。
+  - Far 改変反映は未着手として明示分離されている。
+
+
+### [MPM-GPU-04] 地形SDF生成のGPU化（CPU upload撤去）
+
+- Status: `In Progress`
+- 背景:
+  - 現在の GPU MPM では地形SDF供給に CPU 側の生成/upload を使用しており、地形改変時の再生成コストと責務分離の問題が残る。
+  - `REND-GPU-02` で CPU SDF前計算と CPU地形生成コードを撤去したため、MPM向けSDFもGPU側で完結させる必要がある。
+- スコープ:
+  - MPM格子レイアウトに対する地形SDF/normalをGPU computeで生成し、CPU側の全点サンプリングと upload 依存を削除する。
+- Subtasks:
+  - [ ] `terrain_sdf_generate.wgsl`（仮）を追加し、MPM grid node ごとの signed distance / normal を生成する。
+  - [ ] `TerrainNear` / override cache を入力にした SDF 生成経路を RenderGraph へ統合する。
+  - [ ] `prepare_terrain_upload` の CPUループ実装を撤去し、GPU生成バッファ参照へ置換する。
+  - [ ] `water_drop` / `default_world` の autoverify で地形境界反映を確認する。
+- 完了条件:
+  - MPM向け地形SDFがGPU側のみで更新され、CPU側の地形SDF生成/uploadループが不要になっている。
 
 
 ### [MPM-WATER-02] 明示MLS-MPM水ソルバ（単一レート）実装

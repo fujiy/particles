@@ -14,7 +14,9 @@
 ///     → `TerrainFarUpdateNode`  (compute, full refresh on Near updates)
 ///     → `TerrainComposeNode` (fragment ViewNode, always reads cached texture)
 ///     → `clear_terrain_cache_dirty` (Cleanup) → dirty = false until next terrain change
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use bevy::asset::AssetServer;
 use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
@@ -28,8 +30,8 @@ use bevy::render::render_graph::{
     ViewNodeRunner,
 };
 use bevy::render::render_resource::binding_types::{
-    storage_buffer_read_only_sized, texture_2d, texture_storage_2d, uniform_buffer,
-    uniform_buffer_sized,
+    storage_buffer_read_only_sized, storage_buffer_sized, texture_2d, texture_storage_2d,
+    uniform_buffer, uniform_buffer_sized,
 };
 use bevy::render::render_resource::{
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BindingResource,
@@ -52,16 +54,20 @@ use crate::params::ActiveRenderParams;
 use crate::physics::material::TerrainMaterial;
 use crate::physics::state::SimUpdateSet;
 use crate::physics::world::constants::CELL_SIZE_M;
-use crate::physics::world::terrain::{TerrainCell, TerrainWorld};
+use crate::physics::world::terrain::{CHUNK_SIZE, CHUNK_SIZE_I32, TerrainCell, TerrainWorld};
 
 use super::{TerrainRenderDiagnostics, water_dot_gpu::WaterDotGpuLabel};
 
 const TERRAIN_NEAR_UPDATE_SHADER_PATH: &str = "shaders/render/terrain_near_update.wgsl";
+const TERRAIN_OVERRIDE_APPLY_SHADER_PATH: &str = "shaders/render/terrain_override_apply.wgsl";
 const TERRAIN_FAR_UPDATE_SHADER_PATH: &str = "shaders/render/terrain_far_update.wgsl";
 const TERRAIN_GEN_SHADER_PATH: &str = "shaders/render/terrain_gen.wgsl";
+const TERRAIN_CHUNK_GENERATE_SHADER_PATH: &str = "shaders/render/terrain_chunk_generate.wgsl";
 const TERRAIN_COMPOSE_SHADER_PATH: &str = "shaders/render/terrain_compose.wgsl";
 const TERRAIN_DOTS_PER_CELL: u32 = 8;
 const NEAR_UPDATE_WORKGROUP: u32 = 64;
+const OVERRIDE_APPLY_WORKGROUP: u32 = 64;
+const CHUNK_GENERATE_WORKGROUP: u32 = 64;
 const FAR_UPDATE_WORKGROUP_X: u32 = 8;
 const FAR_UPDATE_WORKGROUP_Y: u32 = 8;
 const FAR_LOD_OFFSET: i32 = 3;
@@ -77,11 +83,9 @@ const SKY_COLOR_G: f32 = 208.0;
 const SKY_COLOR_B: f32 = 255.0;
 const MAX_DISPATCH_GROUPS_X: u32 = 65_535;
 const MAX_DIRTY_CELLS_PER_DISPATCH: u32 = NEAR_UPDATE_WORKGROUP * MAX_DISPATCH_GROUPS_X;
+const MAX_OVERRIDE_RUNS_PER_FRAME: usize = 8_192;
+const MAX_OVERRIDE_RUNS_PER_DISPATCH: u32 = MAX_OVERRIDE_RUNS_PER_FRAME as u32;
 const TERRAIN_OVERRIDE_NONE: u32 = 0xFFFF;
-// Temporary debug policy: treat terrain as read-only generated field.
-// This disables CPU override sampling (loaded/edited cells) to avoid seams caused by
-// mixed CPU-generated and GPU-generated terrain while REND-GPU-01 is in progress.
-const TERRAIN_OVERRIDE_UPLOAD_ENABLED: bool = false;
 const NEAR_MARGIN_FACTOR: f32 = 1.35;
 const NEAR_QUALITY_DIVISOR: f32 = 1.0;
 const NEAR_TEX_MIN_CELLS: u32 = 1;
@@ -90,6 +94,7 @@ const FAR_TEX_MIN_CELLS: u32 = 1;
 const FAR_TEX_MAX_CELLS: u32 = 4096;
 const DEFAULT_SCREEN_SIZE_PX: UVec2 = UVec2::new(1280, 720);
 const DEFAULT_CAMERA_VIEWPORT_HEIGHT_M: f32 = 14.0;
+const TERRAIN_CHUNK_CELLS: usize = CHUNK_SIZE * CHUNK_SIZE;
 
 #[derive(Clone, Copy, Debug)]
 struct TerrainRuntimeSettings {
@@ -167,6 +172,7 @@ pub struct TerrainCacheState {
     pub near_dirty_queue: VecDeque<TerrainDirtyTile>,
     pub far_dirty_queue: VecDeque<TerrainDirtyTile>,
     pub near_extent_cells: UVec2,
+    override_run_queue: VecDeque<TerrainOverrideRunGpu>,
 }
 
 impl Default for TerrainCacheState {
@@ -178,6 +184,7 @@ impl Default for TerrainCacheState {
             near_dirty_queue: VecDeque::new(),
             far_dirty_queue: VecDeque::new(),
             near_extent_cells: compute_near_cache_extent(DEFAULT_SCREEN_SIZE_PX),
+            override_run_queue: VecDeque::new(),
         }
     }
 }
@@ -457,6 +464,136 @@ fn saturating_u32_to_i32(v: u32) -> i32 {
     i32::try_from(v).unwrap_or(i32::MAX)
 }
 
+#[derive(Clone, Copy, Debug)]
+struct TerrainGeneratedChunkInflight {
+    request_id: u64,
+    chunk_coord: IVec2,
+}
+
+#[derive(Resource, Debug, Default)]
+pub struct TerrainGeneratedChunkCache {
+    generated_chunks: HashMap<IVec2, [u16; TERRAIN_CHUNK_CELLS]>,
+    request_queue: VecDeque<IVec2>,
+    pending_chunks: HashSet<IVec2>,
+    inflight: Option<TerrainGeneratedChunkInflight>,
+    next_request_id: u64,
+}
+
+impl TerrainGeneratedChunkCache {
+    pub fn material_ids_for_chunk(
+        &self,
+        chunk_coord: IVec2,
+    ) -> Option<&[u16; TERRAIN_CHUNK_CELLS]> {
+        self.generated_chunks.get(&chunk_coord)
+    }
+
+    pub fn enqueue_chunk_request(&mut self, chunk_coord: IVec2) {
+        if self.generated_chunks.contains_key(&chunk_coord)
+            || self.pending_chunks.contains(&chunk_coord)
+            || self.inflight.map(|req| req.chunk_coord) == Some(chunk_coord)
+        {
+            return;
+        }
+        self.request_queue.push_back(chunk_coord);
+        self.pending_chunks.insert(chunk_coord);
+    }
+
+    pub fn enqueue_prefetch_square(&mut self, center_chunk: IVec2, radius_chunks: i32) {
+        let r = radius_chunks.max(0);
+        for cy in (center_chunk.y - r)..=(center_chunk.y + r) {
+            for cx in (center_chunk.x - r)..=(center_chunk.x + r) {
+                self.enqueue_chunk_request(IVec2::new(cx, cy));
+            }
+        }
+    }
+
+    pub fn cached_chunk_coords(&self) -> Vec<IVec2> {
+        let mut coords: Vec<_> = self.generated_chunks.keys().copied().collect();
+        coords.sort_by_key(|coord| (coord.y, coord.x));
+        coords
+    }
+
+    fn begin_next_request(&mut self) -> Option<(u64, IVec2)> {
+        if self.inflight.is_some() {
+            return None;
+        }
+        while let Some(chunk_coord) = self.request_queue.pop_front() {
+            if self.generated_chunks.contains_key(&chunk_coord) {
+                self.pending_chunks.remove(&chunk_coord);
+                continue;
+            }
+            let request_id = self.next_request_id;
+            self.next_request_id = self.next_request_id.wrapping_add(1);
+            self.inflight = Some(TerrainGeneratedChunkInflight {
+                request_id,
+                chunk_coord,
+            });
+            return Some((request_id, chunk_coord));
+        }
+        None
+    }
+
+    fn finish_request(&mut self, request_id: u64, chunk_coord: IVec2) -> bool {
+        let Some(inflight) = self.inflight else {
+            return false;
+        };
+        if inflight.request_id != request_id || inflight.chunk_coord != chunk_coord {
+            return false;
+        }
+        self.inflight = None;
+        self.pending_chunks.remove(&chunk_coord);
+        true
+    }
+
+    fn cache_generated_chunk(&mut self, chunk_coord: IVec2, cells: [u16; TERRAIN_CHUNK_CELLS]) {
+        self.generated_chunks.insert(chunk_coord, cells);
+    }
+}
+
+#[derive(Resource, Clone, Debug, Default)]
+pub struct TerrainGeneratedChunkReadbackRequest {
+    active: bool,
+    request_id: u64,
+    chunk_coord: IVec2,
+    generation_enabled: bool,
+}
+
+impl ExtractResource for TerrainGeneratedChunkReadbackRequest {
+    type Source = TerrainGeneratedChunkReadbackRequest;
+
+    fn extract_resource(source: &Self::Source) -> Self {
+        source.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TerrainGeneratedChunkReadbackPayload {
+    request_id: u64,
+    chunk_coord: IVec2,
+    cells: Vec<u16>,
+}
+
+#[derive(Resource, Clone, Default)]
+struct TerrainGeneratedChunkReadbackResult {
+    inner: Arc<Mutex<Option<TerrainGeneratedChunkReadbackPayload>>>,
+}
+
+impl TerrainGeneratedChunkReadbackResult {
+    fn take(&self) -> Option<TerrainGeneratedChunkReadbackPayload> {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.take()
+        } else {
+            None
+        }
+    }
+
+    fn store(&self, payload: TerrainGeneratedChunkReadbackPayload) {
+        if let Ok(mut guard) = self.inner.lock() {
+            *guard = Some(payload);
+        }
+    }
+}
+
 // ── Render labels ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
@@ -466,10 +603,16 @@ pub struct TerrainNearUpdateLabel;
 pub struct TerrainFarUpdateLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+pub struct TerrainOverrideApplyLabel;
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub struct TerrainBackUpdateLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub struct TerrainComposeLabel;
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+pub struct TerrainChunkGenerateLabel;
 
 // ── GPU uniform structs ───────────────────────────────────────────────────────
 
@@ -502,6 +645,49 @@ struct TerrainDirtyCellGpu {
 }
 const _: () = assert!(std::mem::size_of::<TerrainDirtyCellGpu>() == 16);
 
+/// Uniform for `TerrainOverrideApply` compute pass.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct TerrainOverrideParams {
+    cache_origin_x: i32,
+    cache_origin_y: i32,
+    cache_width: u32,
+    cache_height: u32,
+    ring_offset_x: i32,
+    ring_offset_y: i32,
+    override_none: u32,
+    run_count: u32,
+    chunk_size_i32: i32,
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
+}
+const _: () = assert!(std::mem::size_of::<TerrainOverrideParams>() == 48);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct TerrainOverrideRunGpu {
+    chunk_x: i32,
+    chunk_y: i32,
+    start_index: u32,
+    run_length: u32,
+    material: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+const _: () = assert!(std::mem::size_of::<TerrainOverrideRunGpu>() == 32);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct TerrainFarOverrideHashEntry {
+    chunk_x: i32,
+    chunk_y: i32,
+    chunk_index: i32,
+    _pad0: i32,
+}
+const _: () = assert!(std::mem::size_of::<TerrainFarOverrideHashEntry>() == 16);
+
 /// Uniform for `TerrainFarUpdate` compute pass.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -512,10 +698,32 @@ struct TerrainFarParams {
     far_height: u32,
     far_downsample: u32,
     generation_enabled: u32,
+    near_origin_x: i32,
+    near_origin_y: i32,
+    near_width: u32,
+    near_height: u32,
+    ring_offset_x: i32,
+    ring_offset_y: i32,
+    override_none: u32,
+    override_hash_mask: u32,
+    override_hash_len: u32,
+    override_chunk_count: u32,
+    override_chunk_size_i32: i32,
+    near_cache_enabled: u32,
     _pad0: u32,
     _pad1: u32,
 }
-const _: () = assert!(std::mem::size_of::<TerrainFarParams>() == 32);
+const _: () = assert!(std::mem::size_of::<TerrainFarParams>() == 80);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct TerrainChunkGenerateParams {
+    chunk_x: i32,
+    chunk_y: i32,
+    chunk_size_i32: i32,
+    generation_enabled: u32,
+}
+const _: () = assert!(std::mem::size_of::<TerrainChunkGenerateParams>() == 16);
 
 /// Uniform for `TerrainCompose` fragment pass.
 #[repr(C)]
@@ -576,13 +784,25 @@ struct TerrainBackGpuCache {
 #[derive(Resource)]
 struct TerrainNearGpuResources {
     near_cache: TerrainNearGpuCache,
+    override_cache: TerrainNearGpuCache,
     far_cache: TerrainFarGpuCache,
     back_cache: TerrainBackGpuCache,
     /// Storage buffer: dirty world cells to update in the current dispatch.
     dirty_cells_buf: Buffer,
     dirty_cells_capacity: u32,
+    /// Storage buffer: RLE-compressed terrain override runs.
+    override_runs_buf: Buffer,
+    override_runs_capacity: u32,
+    /// Storage buffer: hash table mapping chunk coord -> override chunk index.
+    far_override_hash_buf: Buffer,
+    far_override_hash_capacity: u32,
+    /// Storage buffer: packed per-chunk override cell ids (`CHUNK_SIZE * CHUNK_SIZE`).
+    far_override_cells_buf: Buffer,
+    far_override_cells_capacity: u32,
     /// Uniform buffer for compute pass (TerrainNearParams).
     near_params_buf: Buffer,
+    /// Uniform buffer for override apply pass (TerrainOverrideParams).
+    override_params_buf: Buffer,
     /// Uniform buffer for far compute pass (TerrainFarParams).
     far_params_buf: Buffer,
     /// Uniform buffer for back compute pass (TerrainFarParams).
@@ -593,6 +813,8 @@ struct TerrainNearGpuResources {
     /// pipeline is still compiling on the first frame data arrives.
     pending_dispatch_frames: u32,
     pending_dispatch_cells: u32,
+    pending_override_dispatch_frames: u32,
+    pending_override_dispatch_runs: u32,
     pending_far_dispatch_frames: u32,
     pending_far_dispatch_width: u32,
     pending_far_dispatch_height: u32,
@@ -601,9 +823,20 @@ struct TerrainNearGpuResources {
     pending_back_dispatch_height: u32,
 }
 
+#[derive(Resource)]
+struct TerrainChunkGenerateGpuResources {
+    params_buf: Buffer,
+    generated_buf: Buffer,
+    readback_buf: Buffer,
+}
+
 /// Set `true` when override data needs to be dispatched via compute; cleared in Cleanup.
 #[derive(Resource, Default)]
 struct TerrainNearCacheDirty(bool);
+
+/// Set `true` when compressed override runs need application; cleared in Cleanup.
+#[derive(Resource, Default)]
+struct TerrainOverrideCacheDirty(bool);
 
 /// Set `true` when far cache needs refresh via compute; cleared in Cleanup.
 #[derive(Resource, Default)]
@@ -612,6 +845,32 @@ struct TerrainFarCacheDirty(bool);
 /// Set `true` when back cache needs refresh via compute; cleared in Cleanup.
 #[derive(Resource, Default)]
 struct TerrainBackCacheDirty(bool);
+
+#[derive(Resource, Default)]
+struct TerrainChunkGenerateDirty(bool);
+
+#[derive(Resource)]
+struct TerrainChunkReadbackState {
+    mapped_ready: Arc<AtomicBool>,
+    inner: Mutex<TerrainChunkReadbackStateInner>,
+}
+
+#[derive(Default)]
+struct TerrainChunkReadbackStateInner {
+    mapped: bool,
+    pending_dispatch: Option<TerrainGeneratedChunkInflight>,
+    pending_map: Option<TerrainGeneratedChunkInflight>,
+    mapped_meta: Option<TerrainGeneratedChunkInflight>,
+}
+
+impl Default for TerrainChunkReadbackState {
+    fn default() -> Self {
+        Self {
+            mapped_ready: Arc::new(AtomicBool::new(false)),
+            inner: Mutex::new(TerrainChunkReadbackStateInner::default()),
+        }
+    }
+}
 
 fn make_near_cache(render_device: &RenderDevice, extent: UVec2) -> TerrainNearGpuCache {
     let near_texture = render_device.create_texture(&TextureDescriptor {
@@ -634,6 +893,31 @@ fn make_near_cache(render_device: &RenderDevice, extent: UVec2) -> TerrainNearGp
     TerrainNearGpuCache {
         _near_texture: near_texture,
         near_texture_view,
+        extent_cells: extent,
+    }
+}
+
+fn make_override_cache(render_device: &RenderDevice, extent: UVec2) -> TerrainNearGpuCache {
+    let override_texture = render_device.create_texture(&TextureDescriptor {
+        label: Some("terrain_near_override_cache"),
+        size: Extent3d {
+            width: extent.x,
+            height: extent.y,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::R16Uint,
+        usage: TextureUsages::TEXTURE_BINDING
+            | TextureUsages::STORAGE_BINDING
+            | TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let override_texture_view = override_texture.create_view(&TextureViewDescriptor::default());
+    TerrainNearGpuCache {
+        _near_texture: override_texture,
+        near_texture_view: override_texture_view,
         extent_cells: extent,
     }
 }
@@ -698,6 +982,54 @@ fn make_dirty_cells_buffer(render_device: &RenderDevice, dirty_cells_capacity: u
     })
 }
 
+fn make_override_runs_buffer(render_device: &RenderDevice, runs_capacity: u32) -> Buffer {
+    let cap = runs_capacity.max(1);
+    render_device.create_buffer(&BufferDescriptor {
+        label: Some("terrain_override_runs"),
+        size: cap as u64 * std::mem::size_of::<TerrainOverrideRunGpu>() as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn make_far_override_hash_buffer(render_device: &RenderDevice, capacity: u32) -> Buffer {
+    let cap = capacity.max(1);
+    render_device.create_buffer(&BufferDescriptor {
+        label: Some("terrain_far_override_hash"),
+        size: cap as u64 * std::mem::size_of::<TerrainFarOverrideHashEntry>() as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn make_far_override_cells_buffer(render_device: &RenderDevice, capacity: u32) -> Buffer {
+    let cap = capacity.max(1);
+    render_device.create_buffer(&BufferDescriptor {
+        label: Some("terrain_far_override_cells"),
+        size: cap as u64 * std::mem::size_of::<u32>() as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn make_chunk_generated_buffer(render_device: &RenderDevice) -> Buffer {
+    render_device.create_buffer(&BufferDescriptor {
+        label: Some("terrain_chunk_generated_materials"),
+        size: (TERRAIN_CHUNK_CELLS * std::mem::size_of::<u32>()) as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    })
+}
+
+fn make_chunk_readback_buffer(render_device: &RenderDevice) -> Buffer {
+    render_device.create_buffer(&BufferDescriptor {
+        label: Some("terrain_chunk_generated_readback"),
+        size: (TERRAIN_CHUNK_CELLS * std::mem::size_of::<u32>()) as u64,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    })
+}
+
 // ── Compute (TerrainNearUpdate) pipeline & node ───────────────────────────────
 
 #[derive(Resource)]
@@ -753,6 +1085,7 @@ impl Node for TerrainNearUpdateNode {
                 resources.near_params_buf.as_entire_binding(),
                 resources.dirty_cells_buf.as_entire_binding(),
                 BindingResource::TextureView(&resources.near_cache.near_texture_view),
+                BindingResource::TextureView(&resources.override_cache.near_texture_view),
             )),
         );
 
@@ -780,6 +1113,169 @@ struct TerrainFarUpdatePipeline {
     bind_group_layout: BindGroupLayoutDescriptor,
     pipeline_id: CachedComputePipelineId,
     _terrain_gen_shader: Handle<Shader>,
+}
+
+#[derive(Resource)]
+struct TerrainOverrideApplyPipeline {
+    bind_group_layout: BindGroupLayoutDescriptor,
+    pipeline_id: CachedComputePipelineId,
+}
+
+#[derive(Resource)]
+struct TerrainChunkGeneratePipeline {
+    bind_group_layout: BindGroupLayoutDescriptor,
+    pipeline_id: CachedComputePipelineId,
+    _terrain_gen_shader: Handle<Shader>,
+}
+
+#[derive(Default)]
+struct TerrainOverrideApplyNode;
+
+impl Node for TerrainOverrideApplyNode {
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        if !world
+            .get_resource::<TerrainOverrideCacheDirty>()
+            .is_some_and(|d| d.0)
+        {
+            return Ok(());
+        }
+        let Some(resources) = world.get_resource::<TerrainNearGpuResources>() else {
+            return Ok(());
+        };
+        let Some(pipeline_res) = world.get_resource::<TerrainOverrideApplyPipeline>() else {
+            return Ok(());
+        };
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipeline_res.pipeline_id) else {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                match pipeline_cache.get_compute_pipeline_state(pipeline_res.pipeline_id) {
+                    CachedPipelineState::Err(e) => {
+                        warn!("terrain_gpu: override_apply pipeline error: {e}")
+                    }
+                    s => warn!("terrain_gpu: override_apply pipeline not ready: {s:?}"),
+                }
+            }
+            return Ok(());
+        };
+
+        let run_count = resources.pending_override_dispatch_runs;
+        if run_count == 0 {
+            return Ok(());
+        }
+        let layout = pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout);
+        let bind_group = render_context.render_device().create_bind_group(
+            "terrain_override_apply_bg",
+            &layout,
+            &BindGroupEntries::sequential((
+                resources.override_params_buf.as_entire_binding(),
+                resources.override_runs_buf.as_entire_binding(),
+                BindingResource::TextureView(&resources.override_cache.near_texture_view),
+            )),
+        );
+
+        let dispatch = run_count.div_ceil(OVERRIDE_APPLY_WORKGROUP);
+        let encoder = render_context.command_encoder();
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("terrain_override_apply"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(dispatch, 1, 1);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct TerrainChunkGenerateNode;
+
+impl Node for TerrainChunkGenerateNode {
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        if !world
+            .get_resource::<TerrainChunkGenerateDirty>()
+            .is_some_and(|d| d.0)
+        {
+            return Ok(());
+        }
+        let Some(resources) = world.get_resource::<TerrainChunkGenerateGpuResources>() else {
+            return Ok(());
+        };
+        let Some(pipeline_res) = world.get_resource::<TerrainChunkGeneratePipeline>() else {
+            return Ok(());
+        };
+        let readback_state = world.resource::<TerrainChunkReadbackState>();
+        let Some(meta) = readback_state
+            .inner
+            .lock()
+            .ok()
+            .and_then(|mut inner| inner.pending_dispatch.take())
+        else {
+            return Ok(());
+        };
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(pipeline) = pipeline_cache.get_compute_pipeline(pipeline_res.pipeline_id) else {
+            if let Ok(mut inner) = readback_state.inner.lock() {
+                inner.pending_dispatch = Some(meta);
+            }
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                match pipeline_cache.get_compute_pipeline_state(pipeline_res.pipeline_id) {
+                    CachedPipelineState::Err(e) => {
+                        warn!("terrain_gpu: chunk_generate pipeline error: {e}")
+                    }
+                    s => warn!("terrain_gpu: chunk_generate pipeline not ready: {s:?}"),
+                }
+            }
+            return Ok(());
+        };
+
+        let layout = pipeline_cache.get_bind_group_layout(&pipeline_res.bind_group_layout);
+        let bind_group = render_context.render_device().create_bind_group(
+            "terrain_chunk_generate_bg",
+            &layout,
+            &BindGroupEntries::sequential((
+                resources.params_buf.as_entire_binding(),
+                resources.generated_buf.as_entire_binding(),
+            )),
+        );
+
+        let cell_count = TERRAIN_CHUNK_CELLS as u32;
+        let dispatch = cell_count.div_ceil(CHUNK_GENERATE_WORKGROUP);
+        let byte_size = (TERRAIN_CHUNK_CELLS * std::mem::size_of::<u32>()) as u64;
+        let encoder = render_context.command_encoder();
+        let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some("terrain_chunk_generate"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(dispatch, 1, 1);
+        drop(pass);
+        encoder.copy_buffer_to_buffer(
+            &resources.generated_buf,
+            0,
+            &resources.readback_buf,
+            0,
+            byte_size,
+        );
+        if let Ok(mut inner) = readback_state.inner.lock() {
+            inner.pending_map = Some(meta);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -832,6 +1328,10 @@ impl Node for TerrainFarUpdateNode {
             &BindGroupEntries::sequential((
                 resources.far_params_buf.as_entire_binding(),
                 BindingResource::TextureView(&resources.far_cache.far_texture_view),
+                BindingResource::TextureView(&resources.near_cache.near_texture_view),
+                BindingResource::TextureView(&resources.override_cache.near_texture_view),
+                resources.far_override_hash_buf.as_entire_binding(),
+                resources.far_override_cells_buf.as_entire_binding(),
             )),
         );
 
@@ -900,6 +1400,10 @@ impl Node for TerrainBackUpdateNode {
             &BindGroupEntries::sequential((
                 resources.back_params_buf.as_entire_binding(),
                 BindingResource::TextureView(&resources.back_cache.back_texture_view),
+                BindingResource::TextureView(&resources.near_cache.near_texture_view),
+                BindingResource::TextureView(&resources.override_cache.near_texture_view),
+                resources.far_override_hash_buf.as_entire_binding(),
+                resources.far_override_cells_buf.as_entire_binding(),
             )),
         );
 
@@ -1023,6 +1527,7 @@ impl ViewNode for TerrainComposeNode {
                 view_binding,
                 resources.compose_params_buf.as_entire_binding(),
                 BindingResource::TextureView(&resources.near_cache.near_texture_view),
+                BindingResource::TextureView(&resources.override_cache.near_texture_view),
                 BindingResource::TextureView(&resources.far_cache.far_texture_view),
                 BindingResource::TextureView(&resources.back_cache.back_texture_view),
             )),
@@ -1048,6 +1553,8 @@ impl ViewNode for TerrainComposeNode {
 #[derive(Resource, Default)]
 pub struct TerrainNearUpdateRequest {
     dirty: bool,
+    override_dirty: bool,
+    far_override_dirty: bool,
     far_refresh_dirty: bool,
     back_refresh_dirty: bool,
     initialized: bool,
@@ -1081,12 +1588,20 @@ pub struct TerrainNearUpdateRequest {
     ring_offset_x: i32,
     ring_offset_y: i32,
     dirty_cells: Vec<TerrainDirtyCellGpu>,
+    override_runs: Vec<TerrainOverrideRunGpu>,
+    far_override_hash_mask: u32,
+    far_override_hash_len: u32,
+    far_override_chunk_count: u32,
+    far_override_hash_entries: Vec<TerrainFarOverrideHashEntry>,
+    far_override_cells: Vec<u32>,
 }
 
 impl Clone for TerrainNearUpdateRequest {
     fn clone(&self) -> Self {
         Self {
             dirty: self.dirty,
+            override_dirty: self.override_dirty,
+            far_override_dirty: self.far_override_dirty,
             far_refresh_dirty: self.far_refresh_dirty,
             back_refresh_dirty: self.back_refresh_dirty,
             initialized: self.initialized,
@@ -1120,6 +1635,12 @@ impl Clone for TerrainNearUpdateRequest {
             ring_offset_x: self.ring_offset_x,
             ring_offset_y: self.ring_offset_y,
             dirty_cells: self.dirty_cells.clone(),
+            override_runs: self.override_runs.clone(),
+            far_override_hash_mask: self.far_override_hash_mask,
+            far_override_hash_len: self.far_override_hash_len,
+            far_override_chunk_count: self.far_override_chunk_count,
+            far_override_hash_entries: self.far_override_hash_entries.clone(),
+            far_override_cells: self.far_override_cells.clone(),
         }
     }
 }
@@ -1149,14 +1670,149 @@ fn encode_terrain_cell(cell: TerrainCell) -> u32 {
     }
 }
 
-fn override_material_or_none(terrain: &TerrainWorld, global_cell: IVec2) -> u32 {
-    if !TERRAIN_OVERRIDE_UPLOAD_ENABLED {
-        return TERRAIN_OVERRIDE_NONE;
+fn override_material_or_none(_terrain: &TerrainWorld, _global_cell: IVec2) -> u32 {
+    TERRAIN_OVERRIDE_NONE
+}
+
+fn chunk_local_to_index(local_cell: IVec2) -> usize {
+    (local_cell.y as usize) * crate::physics::world::terrain::CHUNK_SIZE + (local_cell.x as usize)
+}
+
+fn append_override_chunk_runs(
+    terrain: &TerrainWorld,
+    chunk_coord: IVec2,
+    out_runs: &mut VecDeque<TerrainOverrideRunGpu>,
+) {
+    let Some(overrides) = terrain.override_chunk_cells(chunk_coord) else {
+        return;
+    };
+    let mut encoded = [TERRAIN_OVERRIDE_NONE;
+        crate::physics::world::terrain::CHUNK_SIZE * crate::physics::world::terrain::CHUNK_SIZE];
+    for (local_cell, cell) in overrides.iter_overrides() {
+        encoded[chunk_local_to_index(local_cell)] = encode_terrain_cell(cell);
     }
-    terrain
-        .get_loaded_or_overridden_cell(global_cell)
-        .map(encode_terrain_cell)
-        .unwrap_or(TERRAIN_OVERRIDE_NONE)
+
+    let mut run_start = 0usize;
+    while run_start < encoded.len() {
+        let material = encoded[run_start];
+        let mut run_len = 1usize;
+        while run_start + run_len < encoded.len()
+            && encoded[run_start + run_len] == material
+            && run_len < u32::MAX as usize
+        {
+            run_len += 1;
+        }
+        out_runs.push_back(TerrainOverrideRunGpu {
+            chunk_x: chunk_coord.x,
+            chunk_y: chunk_coord.y,
+            start_index: run_start as u32,
+            run_length: run_len as u32,
+            material,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        });
+        run_start += run_len;
+    }
+}
+
+fn append_override_chunk_dense_materials(
+    terrain: &TerrainWorld,
+    chunk_coord: IVec2,
+    out_cells: &mut Vec<u32>,
+) {
+    let mut encoded = [TERRAIN_OVERRIDE_NONE;
+        crate::physics::world::terrain::CHUNK_SIZE * crate::physics::world::terrain::CHUNK_SIZE];
+    if let Some(overrides) = terrain.override_chunk_cells(chunk_coord) {
+        for (local_cell, cell) in overrides.iter_overrides() {
+            encoded[chunk_local_to_index(local_cell)] = encode_terrain_cell(cell);
+        }
+    }
+    out_cells.extend_from_slice(&encoded);
+}
+
+fn far_override_chunk_hash(chunk_coord: IVec2) -> u32 {
+    let x = chunk_coord.x as u32;
+    let y = chunk_coord.y as u32;
+    let mut h = x.wrapping_mul(0x9E37_79B1u32) ^ y.wrapping_mul(0x85EB_CA77u32).rotate_left(16);
+    h ^= h >> 16;
+    h
+}
+
+fn build_far_override_hash_entries(
+    chunks: &[IVec2],
+) -> (Vec<TerrainFarOverrideHashEntry>, u32, u32) {
+    let hash_len = if chunks.is_empty() {
+        1
+    } else {
+        (chunks.len() as u32).saturating_mul(2).next_power_of_two()
+    };
+    let hash_mask = hash_len.saturating_sub(1);
+    let mut entries = vec![
+        TerrainFarOverrideHashEntry {
+            chunk_x: 0,
+            chunk_y: 0,
+            chunk_index: -1,
+            _pad0: 0,
+        };
+        hash_len as usize
+    ];
+    for (index, chunk) in chunks.iter().copied().enumerate() {
+        let mut slot = (far_override_chunk_hash(chunk) & hash_mask) as usize;
+        loop {
+            if entries[slot].chunk_index < 0 {
+                entries[slot] = TerrainFarOverrideHashEntry {
+                    chunk_x: chunk.x,
+                    chunk_y: chunk.y,
+                    chunk_index: index as i32,
+                    _pad0: 0,
+                };
+                break;
+            }
+            slot = (slot + 1) & hash_mask as usize;
+        }
+    }
+    (entries, hash_mask, hash_len)
+}
+
+fn append_override_chunks_for_rect(
+    terrain: &TerrainWorld,
+    rect_origin: IVec2,
+    rect_extent: UVec2,
+    out_chunks: &mut HashSet<IVec2>,
+) {
+    if rect_extent.x == 0 || rect_extent.y == 0 {
+        return;
+    }
+    let max_cell = rect_origin
+        + IVec2::new(
+            saturating_u32_to_i32(rect_extent.x).saturating_sub(1),
+            saturating_u32_to_i32(rect_extent.y).saturating_sub(1),
+        );
+    let min_chunk = IVec2::new(
+        rect_origin
+            .x
+            .div_euclid(crate::physics::world::terrain::CHUNK_SIZE_I32),
+        rect_origin
+            .y
+            .div_euclid(crate::physics::world::terrain::CHUNK_SIZE_I32),
+    );
+    let max_chunk = IVec2::new(
+        max_cell
+            .x
+            .div_euclid(crate::physics::world::terrain::CHUNK_SIZE_I32),
+        max_cell
+            .y
+            .div_euclid(crate::physics::world::terrain::CHUNK_SIZE_I32),
+    );
+    for cy in min_chunk.y..=max_chunk.y {
+        for cx in min_chunk.x..=max_chunk.x {
+            let chunk = IVec2::new(cx, cy);
+            if terrain.override_chunk_cells(chunk).is_some() {
+                out_chunks.insert(chunk);
+            }
+        }
+    }
 }
 
 fn append_dirty_rect_cells(
@@ -1185,7 +1841,7 @@ fn append_dirty_rect_cells(
 }
 
 pub fn prepare_terrain_near_update_request(
-    terrain: Res<TerrainWorld>,
+    mut terrain: ResMut<TerrainWorld>,
     render_params: Res<ActiveRenderParams>,
     windows: Query<&Window, With<PrimaryWindow>>,
     mut request: ResMut<TerrainNearUpdateRequest>,
@@ -1199,6 +1855,15 @@ pub fn prepare_terrain_near_update_request(
     diagnostics.terrain_generation_origin_delta_y_frame = 0;
     diagnostics.terrain_generation_full_refresh_frame = false;
     diagnostics.terrain_generation_full_refresh_reason_bits = 0;
+    diagnostics.terrain_override_runs_frame = 0;
+    diagnostics.terrain_override_cells_frame = 0;
+    diagnostics.terrain_override_pending_runs = cache_state.override_run_queue.len() as u32;
+    diagnostics.terrain_override_budget_completion_frame =
+        if diagnostics.terrain_override_pending_runs == 0 {
+            1.0
+        } else {
+            0.0
+        };
 
     const FULL_REFRESH_INIT: u32 = 1 << 0;
     const FULL_REFRESH_TERRAIN_CHANGED: u32 = 1 << 1;
@@ -1339,10 +2004,14 @@ pub fn prepare_terrain_near_update_request(
         && !sky_color_changed
         && !palette_seed_changed
         && !near_mode_changed
+        && cache_state.override_run_queue.is_empty()
     {
         request.dirty = false;
+        request.override_dirty = false;
+        request.far_override_dirty = false;
         request.far_refresh_dirty = false;
         request.back_refresh_dirty = false;
+        request.override_runs.clear();
         return;
     }
 
@@ -1457,6 +2126,85 @@ pub fn prepare_terrain_near_update_request(
         diagnostics.terrain_generation_eval_count_frame = dirty_cells.len() as u32;
     }
 
+    let dirty_override_chunks = terrain.take_dirty_override_chunks();
+    let near_max = new_origin + near_extent_i - IVec2::ONE;
+    let mut override_chunks = HashSet::new();
+    for dirty_tile in &cache_state.near_dirty_queue {
+        append_override_chunks_for_rect(
+            terrain.as_ref(),
+            dirty_tile._world_origin,
+            dirty_tile._extent_cells,
+            &mut override_chunks,
+        );
+    }
+    for chunk in dirty_override_chunks {
+        let chunk_min = chunk * crate::physics::world::terrain::CHUNK_SIZE_I32;
+        let chunk_max =
+            chunk_min + IVec2::splat(crate::physics::world::terrain::CHUNK_SIZE_I32 - 1);
+        let intersects = chunk_min.x <= near_max.x
+            && chunk_max.x >= new_origin.x
+            && chunk_min.y <= near_max.y
+            && chunk_max.y >= new_origin.y;
+        if intersects {
+            override_chunks.insert(chunk);
+        }
+    }
+    let mut override_chunk_vec: Vec<_> = override_chunks.into_iter().collect();
+    override_chunk_vec.sort_by_key(|coord| (coord.y, coord.x));
+    for chunk in override_chunk_vec {
+        append_override_chunk_runs(terrain.as_ref(), chunk, &mut cache_state.override_run_queue);
+    }
+
+    let mut override_runs = Vec::new();
+    let mut override_cells_frame = 0u32;
+    while override_runs.len() < MAX_OVERRIDE_RUNS_PER_FRAME {
+        let Some(run) = cache_state.override_run_queue.pop_front() else {
+            break;
+        };
+        override_cells_frame = override_cells_frame.saturating_add(run.run_length);
+        override_runs.push(run);
+    }
+    diagnostics.terrain_override_runs_frame = override_runs.len() as u32;
+    diagnostics.terrain_override_cells_frame = override_cells_frame;
+    diagnostics.terrain_override_pending_runs = cache_state.override_run_queue.len() as u32;
+    diagnostics.terrain_override_runs_total = diagnostics
+        .terrain_override_runs_total
+        .saturating_add(diagnostics.terrain_override_runs_frame as u64);
+    diagnostics.terrain_override_cells_total = diagnostics
+        .terrain_override_cells_total
+        .saturating_add(diagnostics.terrain_override_cells_frame as u64);
+    let override_total = diagnostics
+        .terrain_override_runs_frame
+        .saturating_add(diagnostics.terrain_override_pending_runs);
+    diagnostics.terrain_override_budget_completion_frame = if override_total == 0 {
+        1.0
+    } else {
+        diagnostics.terrain_override_runs_frame as f32 / override_total as f32
+    };
+    let override_dirty = !override_runs.is_empty();
+    let far_override_dirty = !request.initialized || terrain_changed;
+    let mut far_override_hash_mask = request.far_override_hash_mask;
+    let mut far_override_hash_len = request.far_override_hash_len.max(1);
+    let mut far_override_chunk_count = request.far_override_chunk_count;
+    if far_override_dirty {
+        let override_chunk_coords = terrain.override_chunk_coords();
+        let mut far_override_cells = Vec::with_capacity(
+            override_chunk_coords.len()
+                * crate::physics::world::terrain::CHUNK_SIZE
+                * crate::physics::world::terrain::CHUNK_SIZE,
+        );
+        for &chunk in &override_chunk_coords {
+            append_override_chunk_dense_materials(terrain.as_ref(), chunk, &mut far_override_cells);
+        }
+        let (far_override_hash_entries, hash_mask, hash_len) =
+            build_far_override_hash_entries(&override_chunk_coords);
+        far_override_hash_mask = hash_mask;
+        far_override_hash_len = hash_len.max(1);
+        far_override_chunk_count = override_chunk_coords.len() as u32;
+        request.far_override_hash_entries = far_override_hash_entries;
+        request.far_override_cells = far_override_cells;
+    }
+
     request.generation_enabled = terrain.generation_enabled();
     request.terrain_render_version = terrain.terrain_render_version();
     request.near_lod_k = near_lod_k;
@@ -1487,7 +2235,13 @@ pub fn prepare_terrain_near_update_request(
     request.ring_offset_x = cache_state.ring_offset.x;
     request.ring_offset_y = cache_state.ring_offset.y;
     request.dirty_cells = dirty_cells;
+    request.override_runs = override_runs;
     request.dirty = near_dirty;
+    request.override_dirty = override_dirty;
+    request.far_override_dirty = far_override_dirty;
+    request.far_override_hash_mask = far_override_hash_mask;
+    request.far_override_hash_len = far_override_hash_len;
+    request.far_override_chunk_count = far_override_chunk_count;
     request.far_refresh_dirty = !request.initialized
         || terrain_changed
         || far_downsample_changed
@@ -1499,6 +2253,52 @@ pub fn prepare_terrain_near_update_request(
         || back_origin_changed
         || back_extent_changed;
     request.initialized = true;
+}
+
+fn drive_generated_chunk_readback_requests(
+    mut cache: ResMut<TerrainGeneratedChunkCache>,
+    terrain_world: Res<TerrainWorld>,
+    mut request: ResMut<TerrainGeneratedChunkReadbackRequest>,
+) {
+    if cache.inflight.is_some() {
+        request.active = false;
+        return;
+    }
+    let Some((request_id, chunk_coord)) = cache.begin_next_request() else {
+        request.active = false;
+        return;
+    };
+    if terrain_world.chunk(chunk_coord).is_some() {
+        let _ = cache.finish_request(request_id, chunk_coord);
+        request.active = false;
+        return;
+    }
+    request.active = true;
+    request.request_id = request_id;
+    request.chunk_coord = chunk_coord;
+    request.generation_enabled = terrain_world.generation_enabled();
+}
+
+fn apply_generated_chunk_readback_results(
+    mut terrain_world: ResMut<TerrainWorld>,
+    mut cache: ResMut<TerrainGeneratedChunkCache>,
+    readback_result: Res<TerrainGeneratedChunkReadbackResult>,
+) {
+    let Some(payload) = readback_result.take() else {
+        return;
+    };
+    if payload.cells.len() != TERRAIN_CHUNK_CELLS {
+        return;
+    }
+    if !cache.finish_request(payload.request_id, payload.chunk_coord) {
+        return;
+    }
+    let mut cells = [0u16; TERRAIN_CHUNK_CELLS];
+    cells.copy_from_slice(&payload.cells);
+    cache.cache_generated_chunk(payload.chunk_coord, cells);
+    if terrain_world.chunk(payload.chunk_coord).is_none() {
+        terrain_world.load_generated_chunk_from_material_ids(payload.chunk_coord, &cells);
+    }
 }
 
 // ── Render startup systems ────────────────────────────────────────────────────
@@ -1523,10 +2323,19 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
         settings,
     );
     let near_cache = make_near_cache(&render_device, near_extent);
+    let override_cache = make_override_cache(&render_device, near_extent);
     let far_cache = make_far_cache(&render_device, far_extent);
     let back_cache = make_back_cache(&render_device, back_extent);
     let dirty_cells_capacity = near_extent.x.saturating_mul(near_extent.y).max(1);
     let dirty_cells_buf = make_dirty_cells_buffer(&render_device, dirty_cells_capacity);
+    let override_runs_capacity = MAX_OVERRIDE_RUNS_PER_DISPATCH.max(1);
+    let override_runs_buf = make_override_runs_buffer(&render_device, override_runs_capacity);
+    let far_override_hash_capacity = 1;
+    let far_override_hash_buf =
+        make_far_override_hash_buffer(&render_device, far_override_hash_capacity);
+    let far_override_cells_capacity = 1;
+    let far_override_cells_buf =
+        make_far_override_cells_buffer(&render_device, far_override_cells_capacity);
     let far_origin = compute_far_origin_world(IVec2::ZERO, far_extent, far_downsample);
     let back_origin = compute_far_origin_world(IVec2::ZERO, back_extent, back_downsample);
 
@@ -1552,6 +2361,27 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         },
     );
+    let override_params = TerrainOverrideParams {
+        cache_origin_x: 0,
+        cache_origin_y: 0,
+        cache_width: near_extent.x,
+        cache_height: near_extent.y,
+        ring_offset_x: 0,
+        ring_offset_y: 0,
+        override_none: TERRAIN_OVERRIDE_NONE,
+        run_count: 0,
+        chunk_size_i32: crate::physics::world::terrain::CHUNK_SIZE_I32,
+        _pad1: 0,
+        _pad2: 0,
+        _pad3: 0,
+    };
+    let override_params_buf = render_device.create_buffer_with_data(
+        &bevy::render::render_resource::BufferInitDescriptor {
+            label: Some("terrain_override_params"),
+            contents: bytemuck::bytes_of(&override_params),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        },
+    );
 
     let far_params = TerrainFarParams {
         far_origin_x: far_origin.x,
@@ -1560,6 +2390,18 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
         far_height: far_cache.extent_cells.y,
         far_downsample,
         generation_enabled: 1,
+        near_origin_x: 0,
+        near_origin_y: 0,
+        near_width: near_cache.extent_cells.x,
+        near_height: near_cache.extent_cells.y,
+        ring_offset_x: 0,
+        ring_offset_y: 0,
+        override_none: TERRAIN_OVERRIDE_NONE,
+        override_hash_mask: 0,
+        override_hash_len: 1,
+        override_chunk_count: 0,
+        override_chunk_size_i32: CHUNK_SIZE_I32,
+        near_cache_enabled: 1,
         _pad0: 0,
         _pad1: 0,
     };
@@ -1577,6 +2419,18 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
         far_height: back_cache.extent_cells.y,
         far_downsample: back_downsample,
         generation_enabled: 1,
+        near_origin_x: 0,
+        near_origin_y: 0,
+        near_width: near_cache.extent_cells.x,
+        near_height: near_cache.extent_cells.y,
+        ring_offset_x: 0,
+        ring_offset_y: 0,
+        override_none: TERRAIN_OVERRIDE_NONE,
+        override_hash_mask: 0,
+        override_hash_len: 1,
+        override_chunk_count: 0,
+        override_chunk_size_i32: CHUNK_SIZE_I32,
+        near_cache_enabled: 1,
         _pad0: 0,
         _pad1: 0,
     };
@@ -1621,19 +2475,44 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         },
     );
+    let chunk_params = TerrainChunkGenerateParams {
+        chunk_x: 0,
+        chunk_y: 0,
+        chunk_size_i32: CHUNK_SIZE_I32,
+        generation_enabled: 1,
+    };
+    let chunk_params_buf = render_device.create_buffer_with_data(
+        &bevy::render::render_resource::BufferInitDescriptor {
+            label: Some("terrain_chunk_generate_params"),
+            contents: bytemuck::bytes_of(&chunk_params),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        },
+    );
+    let chunk_generated_buf = make_chunk_generated_buffer(&render_device);
+    let chunk_readback_buf = make_chunk_readback_buffer(&render_device);
 
     commands.insert_resource(TerrainNearGpuResources {
         near_cache,
+        override_cache,
         far_cache,
         back_cache,
         dirty_cells_buf,
         dirty_cells_capacity,
+        override_runs_buf,
+        override_runs_capacity,
+        far_override_hash_buf,
+        far_override_hash_capacity,
+        far_override_cells_buf,
+        far_override_cells_capacity,
         near_params_buf,
+        override_params_buf,
         far_params_buf,
         back_params_buf,
         compose_params_buf,
         pending_dispatch_frames: 0,
         pending_dispatch_cells: 0,
+        pending_override_dispatch_frames: 0,
+        pending_override_dispatch_runs: 0,
         pending_far_dispatch_frames: 0,
         pending_far_dispatch_width: 0,
         pending_far_dispatch_height: 0,
@@ -1642,8 +2521,16 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
         pending_back_dispatch_height: 0,
     });
     commands.insert_resource(TerrainNearCacheDirty(false));
+    commands.insert_resource(TerrainOverrideCacheDirty(false));
     commands.insert_resource(TerrainFarCacheDirty(false));
     commands.insert_resource(TerrainBackCacheDirty(false));
+    commands.insert_resource(TerrainChunkGenerateGpuResources {
+        params_buf: chunk_params_buf,
+        generated_buf: chunk_generated_buf,
+        readback_buf: chunk_readback_buf,
+    });
+    commands.insert_resource(TerrainChunkGenerateDirty(false));
+    commands.insert_resource(TerrainChunkReadbackState::default());
 }
 
 fn init_terrain_near_update_pipeline(
@@ -1661,6 +2548,7 @@ fn init_terrain_near_update_pipeline(
                 (
                     uniform_buffer_sized(false, core::num::NonZeroU64::new(48)),
                     storage_buffer_read_only_sized(false, None),
+                    texture_storage_2d(TextureFormat::R16Uint, StorageTextureAccess::WriteOnly),
                     texture_storage_2d(TextureFormat::R16Uint, StorageTextureAccess::WriteOnly),
                 ),
             ),
@@ -1697,8 +2585,12 @@ fn init_terrain_far_update_pipeline(
             &BindGroupLayoutEntries::sequential(
                 ShaderStages::COMPUTE,
                 (
-                    uniform_buffer_sized(false, core::num::NonZeroU64::new(32)),
+                    uniform_buffer_sized(false, core::num::NonZeroU64::new(80)),
                     texture_storage_2d(TextureFormat::Rgba8Uint, StorageTextureAccess::WriteOnly),
+                    texture_2d(TextureSampleType::Uint),
+                    texture_2d(TextureSampleType::Uint),
+                    storage_buffer_read_only_sized(false, None),
+                    storage_buffer_read_only_sized(false, None),
                 ),
             ),
         )
@@ -1722,6 +2614,75 @@ fn init_terrain_far_update_pipeline(
     });
 }
 
+fn init_terrain_override_apply_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    pipeline_cache: Res<PipelineCache>,
+) {
+    let make_layout = || {
+        BindGroupLayoutDescriptor::new(
+            "terrain_override_apply_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::COMPUTE,
+                (
+                    uniform_buffer_sized(false, core::num::NonZeroU64::new(48)),
+                    storage_buffer_read_only_sized(false, None),
+                    texture_storage_2d(TextureFormat::R16Uint, StorageTextureAccess::WriteOnly),
+                ),
+            ),
+        )
+    };
+    let shader = asset_server.load(TERRAIN_OVERRIDE_APPLY_SHADER_PATH);
+    let pipeline_id = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("terrain_override_apply_compute".into()),
+        layout: vec![make_layout()],
+        push_constant_ranges: vec![],
+        shader,
+        shader_defs: vec![],
+        entry_point: Some("main".into()),
+        zero_initialize_workgroup_memory: false,
+    });
+    commands.insert_resource(TerrainOverrideApplyPipeline {
+        bind_group_layout: make_layout(),
+        pipeline_id,
+    });
+}
+
+fn init_terrain_chunk_generate_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    pipeline_cache: Res<PipelineCache>,
+) {
+    let make_layout = || {
+        BindGroupLayoutDescriptor::new(
+            "terrain_chunk_generate_layout",
+            &BindGroupLayoutEntries::sequential(
+                ShaderStages::COMPUTE,
+                (
+                    uniform_buffer_sized(false, core::num::NonZeroU64::new(16)),
+                    storage_buffer_sized(false, None),
+                ),
+            ),
+        )
+    };
+    let terrain_gen_shader = asset_server.load(TERRAIN_GEN_SHADER_PATH);
+    let shader = asset_server.load(TERRAIN_CHUNK_GENERATE_SHADER_PATH);
+    let pipeline_id = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("terrain_chunk_generate_compute".into()),
+        layout: vec![make_layout()],
+        push_constant_ranges: vec![],
+        shader,
+        shader_defs: vec![],
+        entry_point: Some("main".into()),
+        zero_initialize_workgroup_memory: false,
+    });
+    commands.insert_resource(TerrainChunkGeneratePipeline {
+        bind_group_layout: make_layout(),
+        pipeline_id,
+        _terrain_gen_shader: terrain_gen_shader,
+    });
+}
+
 fn init_terrain_compose_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
     let bind_group_layout = BindGroupLayoutDescriptor::new(
         "terrain_compose_layout",
@@ -1733,6 +2694,7 @@ fn init_terrain_compose_pipeline(mut commands: Commands, asset_server: Res<Asset
                     false,
                     core::num::NonZeroU64::new(std::mem::size_of::<TerrainComposeParams>() as u64),
                 ),
+                texture_2d(TextureSampleType::Uint),
                 texture_2d(TextureSampleType::Uint),
                 texture_2d(TextureSampleType::Uint),
                 texture_2d(TextureSampleType::Uint),
@@ -1761,22 +2723,32 @@ fn prepare_terrain_near_uploads(
     queue: Res<RenderQueue>,
     pipeline_cache: Res<PipelineCache>,
     near_pipeline: Res<TerrainNearUpdatePipeline>,
+    override_pipeline: Res<TerrainOverrideApplyPipeline>,
     far_pipeline: Res<TerrainFarUpdatePipeline>,
     mut dirty: ResMut<TerrainNearCacheDirty>,
+    mut override_dirty: ResMut<TerrainOverrideCacheDirty>,
     mut far_dirty: ResMut<TerrainFarCacheDirty>,
     mut back_dirty: ResMut<TerrainBackCacheDirty>,
 ) {
     let near_upload_requested = upload.dirty && !upload.dirty_cells.is_empty();
+    let override_upload_requested = upload.override_dirty && !upload.override_runs.is_empty();
+    let far_override_upload_requested = upload.far_override_dirty;
     let far_refresh_requested = upload.far_refresh_dirty;
     let back_refresh_requested = upload.back_refresh_dirty;
     let requested_far_downsample = upload.far_downsample.max(1);
     let requested_back_downsample = upload.back_downsample.max(1);
-    if near_upload_requested || far_refresh_requested || back_refresh_requested {
+    if near_upload_requested
+        || override_upload_requested
+        || far_override_upload_requested
+        || far_refresh_requested
+        || back_refresh_requested
+    {
         let requested_extent = UVec2::new(upload.width.max(1), upload.height.max(1));
         let requested_far_extent = UVec2::new(upload.far_width.max(1), upload.far_height.max(1));
         let requested_back_extent = UVec2::new(upload.back_width.max(1), upload.back_height.max(1));
         if near_upload_requested && resources.near_cache.extent_cells != requested_extent {
             resources.near_cache = make_near_cache(&render_device, requested_extent);
+            resources.override_cache = make_override_cache(&render_device, requested_extent);
         }
         if resources.far_cache.extent_cells != requested_far_extent {
             resources.far_cache = make_far_cache(&render_device, requested_far_extent);
@@ -1840,6 +2812,88 @@ fn prepare_terrain_near_uploads(
             resources.pending_dispatch_cells = dirty_count;
         }
 
+        if override_upload_requested {
+            let run_count_full = upload.override_runs.len() as u32;
+            let run_count = run_count_full.min(MAX_OVERRIDE_RUNS_PER_DISPATCH);
+            if run_count_full > run_count {
+                static RUN_CLAMP_WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if !RUN_CLAMP_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    warn!(
+                        "terrain_gpu: override run count {} exceeds dispatch limit {}, clamping",
+                        run_count_full, MAX_OVERRIDE_RUNS_PER_DISPATCH
+                    );
+                }
+            }
+            if run_count > resources.override_runs_capacity {
+                let new_capacity = run_count.next_power_of_two();
+                resources.override_runs_buf =
+                    make_override_runs_buffer(&render_device, new_capacity);
+                resources.override_runs_capacity = new_capacity;
+            }
+            queue.write_buffer(
+                &resources.override_runs_buf,
+                0,
+                cast_slice(&upload.override_runs[..run_count as usize]),
+            );
+            let override_params = TerrainOverrideParams {
+                cache_origin_x: upload.origin_x,
+                cache_origin_y: upload.origin_y,
+                cache_width: upload.width,
+                cache_height: upload.height,
+                ring_offset_x: upload.ring_offset_x,
+                ring_offset_y: upload.ring_offset_y,
+                override_none: TERRAIN_OVERRIDE_NONE,
+                run_count,
+                chunk_size_i32: crate::physics::world::terrain::CHUNK_SIZE_I32,
+                _pad1: 0,
+                _pad2: 0,
+                _pad3: 0,
+            };
+            queue.write_buffer(
+                &resources.override_params_buf,
+                0,
+                bytemuck::bytes_of(&override_params),
+            );
+            let override_pipeline_ready = pipeline_cache
+                .get_compute_pipeline(override_pipeline.pipeline_id)
+                .is_some();
+            resources.pending_override_dispatch_frames =
+                if override_pipeline_ready { 1 } else { 32 };
+            resources.pending_override_dispatch_runs = run_count;
+        }
+
+        if far_override_upload_requested {
+            let hash_count = upload.far_override_hash_entries.len() as u32;
+            if hash_count > resources.far_override_hash_capacity {
+                let new_capacity = hash_count.next_power_of_two();
+                resources.far_override_hash_buf =
+                    make_far_override_hash_buffer(&render_device, new_capacity);
+                resources.far_override_hash_capacity = new_capacity;
+            }
+            if hash_count > 0 {
+                queue.write_buffer(
+                    &resources.far_override_hash_buf,
+                    0,
+                    cast_slice(&upload.far_override_hash_entries),
+                );
+            }
+            let cell_count = upload.far_override_cells.len() as u32;
+            if cell_count > resources.far_override_cells_capacity {
+                let new_capacity = cell_count.next_power_of_two();
+                resources.far_override_cells_buf =
+                    make_far_override_cells_buffer(&render_device, new_capacity);
+                resources.far_override_cells_capacity = new_capacity;
+            }
+            if cell_count > 0 {
+                queue.write_buffer(
+                    &resources.far_override_cells_buf,
+                    0,
+                    cast_slice(&upload.far_override_cells),
+                );
+            }
+        }
+
         // Update far-aggregation params and request full far refresh.
         let far_params = TerrainFarParams {
             far_origin_x: upload.far_origin_x,
@@ -1848,6 +2902,18 @@ fn prepare_terrain_near_uploads(
             far_height: resources.far_cache.extent_cells.y,
             far_downsample: requested_far_downsample,
             generation_enabled: u32::from(upload.generation_enabled),
+            near_origin_x: upload.origin_x,
+            near_origin_y: upload.origin_y,
+            near_width: upload.width,
+            near_height: upload.height,
+            ring_offset_x: upload.ring_offset_x,
+            ring_offset_y: upload.ring_offset_y,
+            override_none: TERRAIN_OVERRIDE_NONE,
+            override_hash_mask: upload.far_override_hash_mask,
+            override_hash_len: upload.far_override_hash_len,
+            override_chunk_count: upload.far_override_chunk_count,
+            override_chunk_size_i32: CHUNK_SIZE_I32,
+            near_cache_enabled: u32::from(upload.near_render_enabled),
             _pad0: 0,
             _pad1: 0,
         };
@@ -1863,6 +2929,18 @@ fn prepare_terrain_near_uploads(
             far_height: resources.back_cache.extent_cells.y,
             far_downsample: requested_back_downsample,
             generation_enabled: u32::from(upload.generation_enabled),
+            near_origin_x: upload.origin_x,
+            near_origin_y: upload.origin_y,
+            near_width: upload.width,
+            near_height: upload.height,
+            ring_offset_x: upload.ring_offset_x,
+            ring_offset_y: upload.ring_offset_y,
+            override_none: TERRAIN_OVERRIDE_NONE,
+            override_hash_mask: upload.far_override_hash_mask,
+            override_hash_len: upload.far_override_hash_len,
+            override_chunk_count: upload.far_override_chunk_count,
+            override_chunk_size_i32: CHUNK_SIZE_I32,
+            near_cache_enabled: u32::from(upload.near_render_enabled),
             _pad0: 0,
             _pad1: 0,
         };
@@ -1925,6 +3003,12 @@ fn prepare_terrain_near_uploads(
         dirty.0 = true;
         resources.pending_dispatch_frames -= 1;
     }
+    if resources.pending_override_dispatch_frames > 0
+        && resources.pending_override_dispatch_runs > 0
+    {
+        override_dirty.0 = true;
+        resources.pending_override_dispatch_frames -= 1;
+    }
     if resources.pending_far_dispatch_frames > 0
         && resources.pending_far_dispatch_width > 0
         && resources.pending_far_dispatch_height > 0
@@ -1939,6 +3023,94 @@ fn prepare_terrain_near_uploads(
         back_dirty.0 = true;
         resources.pending_back_dispatch_frames -= 1;
     }
+}
+
+fn prepare_terrain_chunk_generate_uploads(
+    request: Res<TerrainGeneratedChunkReadbackRequest>,
+    resources: Res<TerrainChunkGenerateGpuResources>,
+    queue: Res<RenderQueue>,
+    readback_state: Res<TerrainChunkReadbackState>,
+    mut dirty: ResMut<TerrainChunkGenerateDirty>,
+) {
+    let Ok(mut inner) = readback_state.inner.lock() else {
+        return;
+    };
+    if inner.pending_dispatch.is_some() {
+        dirty.0 = true;
+        return;
+    }
+    if !request.active {
+        return;
+    }
+    if inner.mapped || inner.pending_map.is_some() || inner.pending_dispatch.is_some() {
+        return;
+    }
+    let params = TerrainChunkGenerateParams {
+        chunk_x: request.chunk_coord.x,
+        chunk_y: request.chunk_coord.y,
+        chunk_size_i32: CHUNK_SIZE_I32,
+        generation_enabled: u32::from(request.generation_enabled),
+    };
+    queue.write_buffer(&resources.params_buf, 0, bytemuck::bytes_of(&params));
+    inner.pending_dispatch = Some(TerrainGeneratedChunkInflight {
+        request_id: request.request_id,
+        chunk_coord: request.chunk_coord,
+    });
+    dirty.0 = true;
+}
+
+fn readback_generated_chunks(
+    resources: Res<TerrainChunkGenerateGpuResources>,
+    state: Res<TerrainChunkReadbackState>,
+    result: Res<TerrainGeneratedChunkReadbackResult>,
+) {
+    let byte_size = (TERRAIN_CHUNK_CELLS * std::mem::size_of::<u32>()) as u64;
+    let ready = state
+        .mapped_ready
+        .load(std::sync::atomic::Ordering::Acquire);
+    let Ok(mut inner) = state.inner.lock() else {
+        return;
+    };
+    if inner.mapped {
+        if !ready {
+            return;
+        }
+        let Some(meta) = inner.mapped_meta.take() else {
+            return;
+        };
+        let slice = resources.readback_buf.slice(..byte_size);
+        let data = slice.get_mapped_range();
+        let words: &[u32] = bytemuck::cast_slice(data.as_ref());
+        let values: Vec<u16> = words
+            .iter()
+            .take(TERRAIN_CHUNK_CELLS)
+            .map(|v| *v as u16)
+            .collect();
+        drop(data);
+        resources.readback_buf.unmap();
+        state
+            .mapped_ready
+            .store(false, std::sync::atomic::Ordering::Release);
+        inner.mapped = false;
+        result.store(TerrainGeneratedChunkReadbackPayload {
+            request_id: meta.request_id,
+            chunk_coord: meta.chunk_coord,
+            cells: values,
+        });
+        return;
+    }
+    let Some(meta) = inner.pending_map.take() else {
+        return;
+    };
+    let slice = resources.readback_buf.slice(..byte_size);
+    let flag = state.mapped_ready.clone();
+    slice.map_async(wgpu::MapMode::Read, move |map_result| {
+        if map_result.is_ok() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+    });
+    inner.mapped = true;
+    inner.mapped_meta = Some(meta);
 }
 
 fn prepare_terrain_compose_pipeline(
@@ -1976,12 +3148,16 @@ fn prepare_terrain_compose_pipeline(
 /// Clear dirty flags after render graph compute passes have run.
 fn clear_terrain_cache_dirty(
     mut near_dirty: ResMut<TerrainNearCacheDirty>,
+    mut override_dirty: ResMut<TerrainOverrideCacheDirty>,
     mut far_dirty: ResMut<TerrainFarCacheDirty>,
     mut back_dirty: ResMut<TerrainBackCacheDirty>,
+    mut chunk_dirty: ResMut<TerrainChunkGenerateDirty>,
 ) {
     near_dirty.0 = false;
+    override_dirty.0 = false;
     far_dirty.0 = false;
     back_dirty.0 = false;
+    chunk_dirty.0 = false;
 }
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
@@ -1990,22 +3166,40 @@ pub struct TerrainGpuPlugin;
 
 impl Plugin for TerrainGpuPlugin {
     fn build(&self, app: &mut App) {
+        let chunk_readback = TerrainGeneratedChunkReadbackResult::default();
+        let chunk_readback_for_render = chunk_readback.clone();
         app.init_resource::<TerrainNearUpdateRequest>()
             .init_resource::<TerrainCacheState>()
+            .init_resource::<TerrainGeneratedChunkCache>()
+            .init_resource::<TerrainGeneratedChunkReadbackRequest>()
+            .insert_resource(chunk_readback)
             .add_systems(
                 Update,
                 prepare_terrain_near_update_request.in_set(SimUpdateSet::Rendering),
             )
-            .add_plugins(ExtractResourcePlugin::<TerrainNearUpdateRequest>::default());
+            .add_systems(
+                Update,
+                (
+                    apply_generated_chunk_readback_results,
+                    drive_generated_chunk_readback_requests,
+                )
+                    .chain()
+                    .in_set(SimUpdateSet::Interaction),
+            )
+            .add_plugins(ExtractResourcePlugin::<TerrainNearUpdateRequest>::default())
+            .add_plugins(ExtractResourcePlugin::<TerrainGeneratedChunkReadbackRequest>::default());
 
         let render_app = app.sub_app_mut(RenderApp);
         render_app
+            .insert_resource(chunk_readback_for_render)
             .init_resource::<SpecializedRenderPipelines<TerrainComposePipeline>>()
             .add_systems(
                 RenderStartup,
                 (
                     init_terrain_near_gpu_resources,
                     init_terrain_near_update_pipeline,
+                    init_terrain_override_apply_pipeline,
+                    init_terrain_chunk_generate_pipeline,
                     init_terrain_far_update_pipeline,
                     init_terrain_compose_pipeline,
                     link_terrain_and_water_graph,
@@ -2015,13 +3209,16 @@ impl Plugin for TerrainGpuPlugin {
                 Render,
                 (
                     prepare_terrain_near_uploads,
+                    prepare_terrain_chunk_generate_uploads,
                     prepare_terrain_compose_pipeline,
                 )
                     .in_set(RenderSystems::Prepare),
             )
             .add_systems(
                 Render,
-                clear_terrain_cache_dirty.in_set(RenderSystems::Cleanup),
+                (readback_generated_chunks, clear_terrain_cache_dirty)
+                    .chain()
+                    .in_set(RenderSystems::Cleanup),
             )
             // TerrainComposeLabel: ViewNode in Core2d graph.
             .add_render_graph_node::<ViewNodeRunner<TerrainComposeNode>>(
@@ -2031,22 +3228,26 @@ impl Plugin for TerrainGpuPlugin {
             .add_render_graph_edges(
                 Core2d,
                 (
-                    Node2d::MainTransparentPass,
+                    Node2d::StartMainPass,
                     TerrainComposeLabel,
-                    Node2d::EndMainPass,
+                    Node2d::MainTransparentPass,
                 ),
             );
 
-        // TerrainNearUpdateLabel / TerrainFarUpdateLabel / TerrainBackUpdateLabel:
+        // TerrainNearUpdateLabel / TerrainOverrideApplyLabel / TerrainFarUpdateLabel / TerrainBackUpdateLabel:
         // non-view compute nodes in main render graph.
         {
             let mut main_graph = render_app.world_mut().resource_mut::<RenderGraph>();
             main_graph.add_node(TerrainNearUpdateLabel, TerrainNearUpdateNode);
+            main_graph.add_node(TerrainOverrideApplyLabel, TerrainOverrideApplyNode);
             main_graph.add_node(TerrainFarUpdateLabel, TerrainFarUpdateNode);
             main_graph.add_node(TerrainBackUpdateLabel, TerrainBackUpdateNode);
-            main_graph.add_node_edge(TerrainNearUpdateLabel, TerrainFarUpdateLabel);
+            main_graph.add_node(TerrainChunkGenerateLabel, TerrainChunkGenerateNode);
+            main_graph.add_node_edge(TerrainNearUpdateLabel, TerrainOverrideApplyLabel);
+            main_graph.add_node_edge(TerrainOverrideApplyLabel, TerrainFarUpdateLabel);
             main_graph.add_node_edge(TerrainFarUpdateLabel, TerrainBackUpdateLabel);
-            main_graph.add_node_edge(TerrainBackUpdateLabel, CameraDriverLabel);
+            main_graph.add_node_edge(TerrainBackUpdateLabel, TerrainChunkGenerateLabel);
+            main_graph.add_node_edge(TerrainChunkGenerateLabel, CameraDriverLabel);
         }
     }
 }

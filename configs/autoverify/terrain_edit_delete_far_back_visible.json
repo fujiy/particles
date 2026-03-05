@@ -1,0 +1,18 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "default_world",
+    "output_path": "artifacts/autoverify/terrain_edit_delete_far_back_visible.png",
+    "warmup_frames": 90,
+    "max_wait_after_capture_frames": 240,
+    "run_simulation": false,
+    "camera_scale": 18.0,
+    "terrain_ops": [
+      {
+        "op": "delete_rect",
+        "min_cell": [-400, -400],
+        "max_cell": [400, 0]
+      }
+    ]
+  }
+}
