@@ -146,8 +146,6 @@ pub struct ScenarioMetrics {
     pub sleeping_ratio: f32,
     pub max_speed_mps: f32,
     pub terrain_penetration_rate: f32,
-    pub object_penetration_rate: f32,
-    pub combined_penetration_rate: f32,
     pub granular_repose_angle_deg: Option<f32>,
     pub material_interaction_contact_ratio: Option<f32>,
 }
@@ -507,8 +505,6 @@ fn compute_metrics(
         .count();
 
     let mut terrain_penetration_count = 0usize;
-    let object_penetration_count = 0usize;
-
     for (index, &position) in particles.positions().iter().enumerate() {
         if let Some((distance, _)) = terrain.sample_signed_distance_and_normal(position) {
             if distance < -DEFAULT_PENETRATION_EPSILON_M {
@@ -521,7 +517,6 @@ fn compute_metrics(
     }
 
     let particle_denominator = particle_count.max(1) as f32;
-    let combined_penetration_count = terrain_penetration_count.max(object_penetration_count);
     let granular_repose_angle_deg = spec
         .granular_repose_assertion
         .and_then(|cfg| granular_repose_angle_deg(particles, cfg.material));
@@ -536,8 +531,6 @@ fn compute_metrics(
         sleeping_ratio: sleeping_count as f32 / particle_denominator,
         max_speed_mps: max_speed,
         terrain_penetration_rate: terrain_penetration_count as f32 / particle_denominator,
-        object_penetration_rate: object_penetration_count as f32 / particle_denominator,
-        combined_penetration_rate: combined_penetration_count as f32 / particle_denominator,
         granular_repose_angle_deg,
         material_interaction_contact_ratio,
     }
@@ -712,8 +705,8 @@ fn evaluate_assertions_with_context(
         rows.push(ScenarioAssertionResult {
             label: "penetration_rate".to_string(),
             expected: format!("<= {:.6}", max_penetration_rate),
-            actual: format!("{:.6}", metrics.combined_penetration_rate),
-            ok: metrics.combined_penetration_rate <= max_penetration_rate,
+            actual: format!("{:.6}", metrics.terrain_penetration_rate),
+            ok: metrics.terrain_penetration_rate <= max_penetration_rate,
             active: true,
             condition: "always".to_string(),
         });

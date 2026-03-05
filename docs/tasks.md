@@ -67,6 +67,7 @@
   - 2026-03-05: `save_load` の旧剛体互換フィールド `objects` を削除（`SaveSnapshot.objects` / `ObjectSnapshot` / object整合性検証）。セーブ読込は未知フィールド無視で後方互換を維持。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
   - 2026-03-05: `save_load` テスト用JSONに残っていた `\"objects\":[]` を削除し、現行スナップショット構造と整合。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
   - 2026-03-05: テストワールド整理として `default_scenario_specs` を `water_drop` / `soil_repose_drop` / `sand_water_interaction_drop` の3件に限定。`objects_drop` と `terrain_contact_stability` を削除。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
+  - 2026-03-05: object撤去後に実質重複していたシナリオ侵入率指標を整理。`ScenarioMetrics` から `object_penetration_rate` / `combined_penetration_rate` を削除し、assertions の `penetration_rate` は `terrain_penetration_rate` を直接評価する形へ簡素化。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
 - 完了条件:
   - 設計文書が新方針へ整合し、GPU一本化とCPU撤去の実施手順が定義されている。
 
