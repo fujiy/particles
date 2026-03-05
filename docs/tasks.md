@@ -59,6 +59,7 @@
   - 2026-03-05: overlay の sub-block 表示経路を削除（`overlay/grid.rs` の sub-block rate digit 描画と補助関数、`overlay/ui.rs` の sub-block 件数/debt 表示）。これに伴い `world/sub_block.rs` を削除し、`world/mod.rs` から `sub_block` export を撤去。`cargo check` 警告0件・`cargo test --lib` 全通過（34件）を確認。
   - 2026-03-05: `SolverParams` から未使用の `sub_block_*` 設定群（サイズ/容量/負荷閾値）を削除（`params_types.rs` / `params_defaults.rs`）。あわせて `TerrainRenderDiagnostics` に残っていた `particle_updated_sub_block_highlight_frames` を撤去し、step profiler の旧 `particle_step::*` 名称依存分類をGPU現行ステップ名基準へ整理。`cargo check` / `cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（34件）を確認。
   - 2026-03-05: `StepSimulationTiming` に残っていた CPU 粒子破砕由来の `terrain_fracture_commit_*` 計測を削除し、`fixed_update.rs` の同セグメント出力も撤去。step profiler での分類条件も追随して整理。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（34件）を確認。
+  - 2026-03-05: `fixed_update` から `ObjectWorld/ObjectPhysicsField` 更新を撤去し、固定更新のCPU object field再構築負荷を削除。`step_simulation_once` の object 引数も削除し、`runtime.rs` の呼び出しを追従。`cargo check` / `cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（34件）を確認。
 - 完了条件:
   - 設計文書が新方針へ整合し、GPU一本化とCPU撤去の実施手順が定義されている。
 

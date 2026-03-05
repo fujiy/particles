@@ -16,7 +16,6 @@ use crate::physics::world::constants::{
     CHUNK_SIZE_I32,
 };
 use crate::physics::world::continuum::ContinuumParticleWorld;
-use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::{ParticleActivityState, ParticleWorld};
 use crate::physics::world::terrain::{TerrainWorld, world_to_cell};
 use crate::render::TerrainGeneratedChunkCache;
@@ -25,8 +24,6 @@ pub(crate) fn initialize_default_world(
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
-    mut object_world: ResMut<ObjectWorld>,
-    mut object_field: ResMut<ObjectPhysicsField>,
     mut sim_state: ResMut<SimulationState>,
     solver_params: Res<SolverParams>,
     material_params: Res<MaterialParams>,
@@ -39,8 +36,6 @@ pub(crate) fn initialize_default_world(
     terrain_world.rebuild_static_particles_if_dirty(terrain_boundary_radius_m);
     *particle_world = ParticleWorld::default();
     continuum_world.clear();
-    object_world.clear();
-    object_field.clear();
     sim_state.running = false;
     sim_state.step_once = false;
 }
@@ -57,7 +52,6 @@ pub(crate) fn step_physics(
     mut generated_chunk_cache: ResMut<TerrainGeneratedChunkCache>,
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
-    object_resources: (ResMut<ObjectWorld>, ResMut<ObjectPhysicsField>),
     profiling_resources: (
         ResMut<SimulationPerfMetrics>,
         ResMut<PhysicsStepProfiler>,
@@ -91,7 +85,6 @@ pub(crate) fn step_physics(
         return;
     }
 
-    let (mut object_world, mut object_field) = object_resources;
     let (mut perf_metrics, mut step_profiler) = profiling_resources;
     particle_world.set_solver_params(*solver_params);
     particle_world.set_material_params(*material_params);
@@ -187,20 +180,6 @@ pub(crate) fn step_physics(
         active_region.chunk_min = None;
         active_region.chunk_max = None;
     }
-    let object_update_start = Instant::now();
-    let object_update_cpu_start = process_cpu_time_seconds().unwrap_or(0.0);
-    {
-        let _span = tracing::info_span!("physics::object_field_update").entered();
-        object_world.update_physics_field(
-            particle_world.positions(),
-            particle_world.masses(),
-            &mut object_field,
-        );
-    }
-    let object_update_secs = object_update_start.elapsed().as_secs_f64();
-    let object_update_cpu_secs = (process_cpu_time_seconds().unwrap_or(object_update_cpu_start)
-        - object_update_cpu_start)
-        .max(0.0);
     particle_world.set_parallel_enabled(parallel_settings.enabled);
     if should_step {
         let terrain_rebuild_start = Instant::now();
@@ -227,8 +206,6 @@ pub(crate) fn step_physics(
                 &mut terrain_world,
                 &mut particle_world,
                 &mut continuum_world,
-                &mut object_world,
-                &mut object_field,
                 parallel_settings.enabled,
                 terrain_boundary_radius_m,
             )
@@ -239,11 +216,6 @@ pub(crate) fn step_physics(
         if sim_state.running {
             step_profiler.total_duration_ms = total_secs * 1000.0;
             step_profiler.segments = vec![
-                PhysicsStepProfileSegment {
-                    name: "object_field_update".to_string(),
-                    wall_duration_ms: object_update_secs * 1000.0,
-                    cpu_duration_ms: object_update_cpu_secs * 1000.0,
-                },
                 PhysicsStepProfileSegment {
                     name: "terrain_rebuild_if_dirty".to_string(),
                     wall_duration_ms: terrain_rebuild_secs * 1000.0,

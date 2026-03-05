@@ -3,7 +3,6 @@ use super::mpm_water::{
 };
 use super::types::StepSimulationTiming;
 use crate::physics::world::continuum::ContinuumParticleWorld;
-use crate::physics::world::object::{ObjectPhysicsField, ObjectWorld};
 use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::TerrainWorld;
 
@@ -11,8 +10,6 @@ pub(crate) fn step_simulation_once(
     _terrain_world: &mut TerrainWorld,
     particle_world: &mut ParticleWorld,
     continuum_world: &mut ContinuumParticleWorld,
-    _object_world: &mut ObjectWorld,
-    _object_field: &mut ObjectPhysicsField,
     _parallel_enabled: bool,
     _terrain_boundary_radius_m: f32,
 ) -> StepSimulationTiming {

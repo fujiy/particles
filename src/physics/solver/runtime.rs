@@ -163,8 +163,6 @@ pub(crate) fn handle_replay_requests(
                     &mut terrain_world,
                     &mut particle_world,
                     &mut continuum_world,
-                    &mut object_world,
-                    &mut object_field,
                     parallel_settings.enabled,
                     terrain_boundary_radius_m(*material_params),
                 );
