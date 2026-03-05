@@ -62,6 +62,8 @@
   - 2026-03-05: `fixed_update` から `ObjectWorld/ObjectPhysicsField` 更新を撤去し、固定更新のCPU object field再構築負荷を削除。`step_simulation_once` の object 引数も削除し、`runtime.rs` の呼び出しを追従。`cargo check` / `cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（34件）を確認。
   - 2026-03-05: 剛体系先送りに合わせて object 連成経路を縮退。`world/object.rs` を最小スタブ実装へ置換（重いSDF/広域場/分割ロジック削除）、`runtime/main/interface/scenario` から `ObjectPhysicsField` 依存を全廃。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
   - 2026-03-05: object 生成/可視化経路を停止。`world_edit` の石ストローク object 化と break/delete 後 object 後処理を撤去し、`overlay/grid` の object 形状/姿勢描画を削除。`scenario` の object spawn は粒子生成のみ維持する形に変更。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
+  - 2026-03-05: `ObjectWorld` を完全撤去。`world/mod.rs` から `object` module export を削除し、`world/object.rs` を削除。`physics/mod.rs` の resource 登録、`runtime/main/interface/scenario/save_load` の `ObjectWorld` 引数・依存を全撤去して、GPU粒子+地形のみの実行経路へ整理。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
+  - 2026-03-05: シナリオ定義から旧剛体入力 `ScenarioSpec.objects` / `ObjectSpawnSpec` を削除。`objects_drop` は同等の stone solid 粒子配置へ置換し、`apply_scenario_spec` は `free_particles` のみ生成する形へ簡素化。`cargo check --all-targets` 警告0件・`cargo test --lib` 全通過（29件）を確認。
 - 完了条件:
   - 設計文書が新方針へ整合し、GPU一本化とCPU撤去の実施手順が定義されている。
 

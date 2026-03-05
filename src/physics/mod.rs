@@ -24,7 +24,6 @@ use self::state::{
     SimUpdateSet, SimulationParallelSettings, SimulationPerfMetrics, SimulationState,
     TerrainStreamingSettings,
 };
-use self::world::object::ObjectWorld;
 use self::world::particle::ParticleWorld;
 use self::world::terrain::TerrainWorld;
 use self::world::continuum::ContinuumParticleWorld;
@@ -50,7 +49,6 @@ impl Plugin for PhysicsPlugin {
             .init_resource::<TerrainWorld>()
             .init_resource::<ParticleWorld>()
             .init_resource::<ContinuumParticleWorld>()
-            .init_resource::<ObjectWorld>()
             .init_resource::<SimulationState>()
             .init_resource::<SimulationParallelSettings>()
             .init_resource::<PhysicsRegionSettings>()

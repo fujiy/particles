@@ -20,7 +20,6 @@ use particles::physics::state::{ReplayLoadScenarioRequest, ReplayState, Simulati
 use particles::physics::world::continuum::{
     ContinuumParticleWorld, MATERIAL_ID_GRANULAR_SAND, MATERIAL_ID_GRANULAR_SOIL,
 };
-use particles::physics::world::object::ObjectWorld;
 use particles::physics::world::particle::{ParticleMaterial, ParticleWorld};
 use particles::physics::world::terrain::{
     CELL_SIZE_M, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,
@@ -817,7 +816,6 @@ fn run_mpm_autoverify(
     continuum_world: Res<ContinuumParticleWorld>,
     active_physics_params: Res<ActivePhysicsParams>,
     terrain_world: Res<TerrainWorld>,
-    object_world: Res<ObjectWorld>,
     mut sim_state: ResMut<SimulationState>,
     mut gpu_control: ResMut<MpmGpuControl>,
     mut scenario_writer: MessageWriter<ReplayLoadScenarioRequest>,
@@ -1053,7 +1051,6 @@ fn run_mpm_autoverify(
             replay_state.baseline_solid_cell_count,
             &terrain_world,
             &particle_world,
-            &object_world,
         );
         max_speed_mps = metrics.max_speed_mps;
         for row in assertions {
@@ -1160,7 +1157,6 @@ fn apply_terrain_autoverify_ops(
     ops: &[TerrainAutoVerifyOp],
     terrain_world: &mut TerrainWorld,
     particle_world: &mut ParticleWorld,
-    object_world: &mut ObjectWorld,
     sim_state: &mut SimulationState,
 ) -> Result<(), String> {
     let mut terrain_cell_changed = false;
@@ -1182,14 +1178,12 @@ fn apply_terrain_autoverify_ops(
                 path,
                 terrain_world,
                 particle_world,
-                object_world,
                 sim_state,
             )?,
             TerrainAutoVerifyOp::LoadSnapshot { path } => save_load::load_from_path(
                 path,
                 terrain_world,
                 particle_world,
-                object_world,
                 sim_state,
             )?,
         }
@@ -1210,7 +1204,6 @@ fn run_screenshot_autoverify(
     mut camera_query: Query<(&mut Projection, &mut Transform), With<Camera2d>>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
-    mut object_world: ResMut<ObjectWorld>,
     mut overlay_visibility_overrides: ResMut<OverlayVisibilityOverrides>,
     replay_state: Res<ReplayState>,
     terrain_render_diagnostics: Res<TerrainRenderDiagnostics>,
@@ -1256,7 +1249,6 @@ fn run_screenshot_autoverify(
             &state.terrain_ops,
             &mut terrain_world,
             &mut particle_world,
-            &mut object_world,
             &mut sim_state,
         ) {
             bevy::log::error!("[autoverify] failed to apply terrain ops: {error}");

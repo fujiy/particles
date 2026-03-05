@@ -15,7 +15,6 @@ use crate::physics::state::{
     SimulationState, TerrainStreamingSettings,
 };
 use crate::physics::world::continuum::ContinuumParticleWorld;
-use crate::physics::world::object::ObjectWorld;
 use crate::physics::world::particle::ParticleWorld;
 use crate::physics::world::terrain::{CHUNK_SIZE_I32, TerrainWorld, world_to_cell};
 
@@ -87,7 +86,6 @@ pub(crate) fn handle_replay_requests(
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
-    mut object_world: ResMut<ObjectWorld>,
     parallel_settings: Res<SimulationParallelSettings>,
     material_params: Res<MaterialParams>,
 ) {
@@ -98,11 +96,9 @@ pub(crate) fn handle_replay_requests(
         };
         *particle_world = ParticleWorld::default();
         continuum_world.clear();
-        object_world.clear();
         sim_state.running = false;
         sim_state.step_once = false;
-        match apply_scenario_spec(&spec, &mut terrain_world, &mut particle_world, &mut object_world)
-        {
+        match apply_scenario_spec(&spec, &mut terrain_world, &mut particle_world) {
             Ok(()) => {
                 if spec.name == "water_drop" {
                     let _ = rebuild_continuum_from_particle_world(
@@ -168,7 +164,6 @@ pub(crate) fn handle_replay_requests(
             replay_state.current_step,
             &terrain_world,
             &particle_world,
-            &object_world,
         ) {
             Ok(path) => {
                 replay_state.status_message = format!("Saved replay artifact: {}", path.display());
@@ -188,7 +183,6 @@ pub(crate) fn apply_sim_reset(
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
     mut continuum_world: ResMut<ContinuumParticleWorld>,
-    mut object_world: ResMut<ObjectWorld>,
     material_params: Res<MaterialParams>,
 ) {
     let has_default_world_request = default_world_reader.read().next().is_some();
@@ -204,7 +198,6 @@ pub(crate) fn apply_sim_reset(
                     &spec,
                     &mut terrain_world,
                     &mut particle_world,
-                    &mut object_world,
                 ) {
                     replay_state.status_message =
                         format!("Replay reset failed for {}: {error}", spec.name);
@@ -247,7 +240,6 @@ pub(crate) fn apply_sim_reset(
     terrain_world.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(*material_params));
     *particle_world = ParticleWorld::default();
     continuum_world.clear();
-    object_world.clear();
     sim_state.running = false;
     sim_state.step_once = false;
     replay_state.enabled = false;
@@ -267,14 +259,12 @@ pub(crate) fn apply_save_load_requests(
     mut replay_state: ResMut<ReplayState>,
     mut terrain_world: ResMut<TerrainWorld>,
     mut particle_world: ResMut<ParticleWorld>,
-    mut object_world: ResMut<ObjectWorld>,
 ) {
     for request in save_reader.read() {
         match save_load::save_to_slot(
             &request.slot_name,
             &terrain_world,
             &particle_world,
-            &object_world,
             &sim_state,
         ) {
             Ok(path) => tracing::info!("saved map to {}", path.display()),
@@ -287,7 +277,6 @@ pub(crate) fn apply_save_load_requests(
             &request.slot_name,
             &mut terrain_world,
             &mut particle_world,
-            &mut object_world,
             &mut sim_state,
         ) {
             Ok(path) => {

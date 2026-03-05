@@ -219,7 +219,6 @@ pub(super) fn update_test_assert_panel(
     replay_state: Res<ReplayState>,
     terrain: Res<TerrainWorld>,
     particles: Res<ParticleWorld>,
-    objects: Res<ObjectWorld>,
     mut panel_node: Single<&mut Node, With<TestAssertPanelRoot>>,
     title_entity: Single<Entity, With<TestAssertTitleText>>,
     list_entity: Single<Entity, With<TestAssertList>>,
@@ -247,7 +246,6 @@ pub(super) fn update_test_assert_panel(
         replay_state.baseline_solid_cell_count,
         &terrain,
         &particles,
-        &objects,
     );
     let overall_ok = assertions.iter().filter(|row| row.active).all(|row| row.ok);
 

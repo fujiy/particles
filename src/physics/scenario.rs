@@ -10,9 +10,6 @@ use super::material::{
     DEFAULT_MATERIAL_PARAMS, ParticleMaterial, TerrainMaterial, terrain_boundary_radius_m,
 };
 use super::solver::params_defaults::DEFAULT_SOLVER_PARAMS;
-use super::world::object::{
-    OBJECT_SHAPE_ITERS, OBJECT_SHAPE_STIFFNESS_ALPHA, ObjectWorld,
-};
 use super::world::particle::{ParticleActivityState, ParticleWorld};
 use super::world::terrain::world_to_cell;
 use super::world::terrain::{
@@ -65,39 +62,6 @@ pub struct ParticleSpawnSpec {
     pub initial_velocity: Vec2,
 }
 
-#[derive(Clone, Debug)]
-pub struct ObjectSpawnSpec {
-    pub cells: Vec<IVec2>,
-    pub material: ParticleMaterial,
-    pub initial_velocity: Vec2,
-    pub shape_stiffness_alpha: f32,
-    pub shape_iters: usize,
-}
-
-impl ObjectSpawnSpec {
-    fn from_rects(
-        rects: &[CellRect],
-        material: ParticleMaterial,
-        initial_velocity: Vec2,
-        shape_stiffness_alpha: f32,
-        shape_iters: usize,
-    ) -> Self {
-        let mut cells = Vec::new();
-        for rect in rects {
-            cells.extend(rect.cells());
-        }
-        cells.sort_by_key(|cell| (cell.y, cell.x));
-        cells.dedup();
-        Self {
-            cells,
-            material,
-            initial_velocity,
-            shape_stiffness_alpha,
-            shape_iters,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScenarioThresholds {
     pub max_penetration_rate: Option<f32>,
@@ -139,7 +103,6 @@ pub struct ScenarioSpec {
     pub loaded_chunk_max: Option<IVec2>,
     pub terrain_fills: Vec<TerrainFillSpec>,
     pub free_particles: Vec<ParticleSpawnSpec>,
-    pub objects: Vec<ObjectSpawnSpec>,
     pub step_count: usize,
     pub thresholds: ScenarioThresholds,
     pub water_surface_assertion: Option<WaterSurfaceAssertionSpec>,
@@ -180,7 +143,6 @@ pub struct ScenarioMetrics {
     pub scenario: String,
     pub steps: usize,
     pub particle_count: usize,
-    pub object_count: usize,
     pub sleeping_ratio: f32,
     pub max_speed_mps: f32,
     pub terrain_penetration_rate: f32,
@@ -215,20 +177,11 @@ struct TerrainCellJson {
 }
 
 #[derive(Debug, Serialize)]
-struct ObjectStateJson {
-    id: u32,
-    particle_count: usize,
-    shape_stiffness_alpha: f32,
-    shape_iters: usize,
-}
-
-#[derive(Debug, Serialize)]
 struct FinalStateJson {
     scenario: String,
     steps: usize,
     particles: Vec<ParticleStateJson>,
     terrain_cells: Vec<TerrainCellJson>,
-    objects: Vec<ObjectStateJson>,
 }
 
 pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
@@ -275,38 +228,37 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                     material: TerrainMaterial::Stone,
                 },
             ],
-            free_particles: Vec::new(),
-            objects: vec![
-                ObjectSpawnSpec::from_rects(
-                    &[
-                        CellRect::new(IVec2::new(-24, -14), IVec2::new(-22, -14)),
-                        CellRect::new(IVec2::new(-24, -13), IVec2::new(-24, -12)),
-                    ],
-                    ParticleMaterial::StoneSolid,
-                    Vec2::ZERO,
-                    OBJECT_SHAPE_STIFFNESS_ALPHA,
-                    OBJECT_SHAPE_ITERS,
-                ),
-                ObjectSpawnSpec::from_rects(
-                    &[
-                        CellRect::new(IVec2::new(-2, -14), IVec2::new(0, -14)),
-                        CellRect::new(IVec2::new(0, -13), IVec2::new(0, -12)),
-                    ],
-                    ParticleMaterial::StoneSolid,
-                    Vec2::ZERO,
-                    OBJECT_SHAPE_STIFFNESS_ALPHA,
-                    OBJECT_SHAPE_ITERS,
-                ),
-                ObjectSpawnSpec::from_rects(
-                    &[
-                        CellRect::new(IVec2::new(17, -14), IVec2::new(19, -14)),
-                        CellRect::new(IVec2::new(18, -13), IVec2::new(18, -12)),
-                    ],
-                    ParticleMaterial::StoneSolid,
-                    Vec2::ZERO,
-                    OBJECT_SHAPE_STIFFNESS_ALPHA,
-                    OBJECT_SHAPE_ITERS,
-                ),
+            free_particles: vec![
+                ParticleSpawnSpec {
+                    rect: CellRect::new(IVec2::new(-24, -14), IVec2::new(-22, -14)),
+                    material: ParticleMaterial::StoneSolid,
+                    initial_velocity: Vec2::ZERO,
+                },
+                ParticleSpawnSpec {
+                    rect: CellRect::new(IVec2::new(-24, -13), IVec2::new(-24, -12)),
+                    material: ParticleMaterial::StoneSolid,
+                    initial_velocity: Vec2::ZERO,
+                },
+                ParticleSpawnSpec {
+                    rect: CellRect::new(IVec2::new(-2, -14), IVec2::new(0, -14)),
+                    material: ParticleMaterial::StoneSolid,
+                    initial_velocity: Vec2::ZERO,
+                },
+                ParticleSpawnSpec {
+                    rect: CellRect::new(IVec2::new(0, -13), IVec2::new(0, -12)),
+                    material: ParticleMaterial::StoneSolid,
+                    initial_velocity: Vec2::ZERO,
+                },
+                ParticleSpawnSpec {
+                    rect: CellRect::new(IVec2::new(17, -14), IVec2::new(19, -14)),
+                    material: ParticleMaterial::StoneSolid,
+                    initial_velocity: Vec2::ZERO,
+                },
+                ParticleSpawnSpec {
+                    rect: CellRect::new(IVec2::new(18, -13), IVec2::new(18, -12)),
+                    material: ParticleMaterial::StoneSolid,
+                    initial_velocity: Vec2::ZERO,
+                },
             ],
             step_count: 300,
             thresholds: ScenarioThresholds {
@@ -351,7 +303,6 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 material: ParticleMaterial::WaterLiquid,
                 initial_velocity: Vec2::ZERO,
             }],
-            objects: Vec::new(),
             step_count: 600,
             thresholds: ScenarioThresholds {
                 max_penetration_rate: Some(0.05),
@@ -404,7 +355,6 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 material: ParticleMaterial::WaterLiquid,
                 initial_velocity: Vec2::ZERO,
             }],
-            objects: Vec::new(),
             step_count: 180,
             thresholds: ScenarioThresholds {
                 max_penetration_rate: Some(0.02),
@@ -448,7 +398,6 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 material: ParticleMaterial::SoilGranular,
                 initial_velocity: Vec2::ZERO,
             }],
-            objects: Vec::new(),
             step_count: 900,
             thresholds: ScenarioThresholds {
                 max_penetration_rate: Some(0.05),
@@ -505,7 +454,6 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                     initial_velocity: Vec2::ZERO,
                 },
             ],
-            objects: Vec::new(),
             step_count: 900,
             thresholds: ScenarioThresholds {
                 max_penetration_rate: Some(0.06),
@@ -542,7 +490,6 @@ pub fn apply_scenario_spec(
     spec: &ScenarioSpec,
     terrain: &mut TerrainWorld,
     particles: &mut ParticleWorld,
-    objects: &mut ObjectWorld,
 ) -> Result<(), String> {
     if spec.reset_fixed_world {
         terrain.set_generation_enabled(true);
@@ -579,14 +526,6 @@ pub fn apply_scenario_spec(
         );
     }
 
-    objects.clear();
-    for object_spawn in &spec.objects {
-        let _ = particles.spawn_material_particles_from_cells(
-            &object_spawn.cells,
-            object_spawn.material,
-            object_spawn.initial_velocity,
-        );
-    }
     Ok(())
 }
 
@@ -595,14 +534,12 @@ pub fn write_scenario_artifacts_for_state(
     step_count: usize,
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
-    objects: &ObjectWorld,
 ) -> Result<PathBuf, String> {
     write_scenario_artifacts_for_state_with_options(
         spec,
         step_count,
         terrain,
         particles,
-        objects,
         ScenarioArtifactOptions::from_env(),
     )
 }
@@ -612,14 +549,13 @@ pub fn write_scenario_artifacts_for_state_with_options(
     step_count: usize,
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
-    objects: &ObjectWorld,
     options: ScenarioArtifactOptions,
 ) -> Result<PathBuf, String> {
-    let metrics = compute_metrics(spec, step_count, terrain, particles, objects);
+    let metrics = compute_metrics(spec, step_count, terrain, particles);
     let artifact_dir = artifact_dir_for_scenario(&spec.name);
     fs::create_dir_all(&artifact_dir)
         .map_err(|error| format!("failed to create artifact directory: {error}"))?;
-    let final_state = capture_final_state_json(spec, step_count, terrain, particles, objects);
+    let final_state = capture_final_state_json(spec, step_count, terrain, particles);
     write_json_file(&artifact_dir.join("final_state.json"), &final_state)?;
     write_json_file(&artifact_dir.join("metrics.json"), &metrics)?;
     if options.write_final_state_png {
@@ -654,9 +590,8 @@ pub fn evaluate_scenario_state(
     baseline_solid_cell_count: usize,
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
-    objects: &ObjectWorld,
 ) -> (ScenarioMetrics, Vec<ScenarioAssertionResult>) {
-    let metrics = compute_metrics(spec, step_count, terrain, particles, objects);
+    let metrics = compute_metrics(spec, step_count, terrain, particles);
     let assertions = evaluate_assertions_with_context(
         spec,
         step_count,
@@ -675,7 +610,6 @@ fn compute_metrics(
     step_count: usize,
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
-    objects: &ObjectWorld,
 ) -> ScenarioMetrics {
     let mut max_speed = 0.0f32;
     for &velocity in &particles.vel {
@@ -716,7 +650,6 @@ fn compute_metrics(
         scenario: spec.name.clone(),
         steps: step_count,
         particle_count,
-        object_count: objects.objects().len(),
         sleeping_ratio: sleeping_count as f32 / particle_denominator,
         max_speed_mps: max_speed,
         terrain_penetration_rate: terrain_penetration_count as f32 / particle_denominator,
@@ -1097,7 +1030,6 @@ fn capture_final_state_json(
     step_count: usize,
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
-    objects: &ObjectWorld,
 ) -> FinalStateJson {
     let particle_states = particles
         .positions()
@@ -1131,23 +1063,11 @@ fn capture_final_state_json(
         }
     }
 
-    let objects_json = objects
-        .snapshot_data()
-        .into_iter()
-        .map(|snapshot| ObjectStateJson {
-            id: snapshot.id,
-            particle_count: snapshot.particle_indices.len(),
-            shape_stiffness_alpha: snapshot.shape_stiffness_alpha,
-            shape_iters: snapshot.shape_iters,
-        })
-        .collect();
-
     FinalStateJson {
         scenario: spec.name.clone(),
         steps: step_count,
         particles: particle_states,
         terrain_cells,
-        objects: objects_json,
     }
 }
 
@@ -1426,7 +1346,6 @@ fn activity_label(state: ParticleActivityState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{apply_scenario_spec, default_scenario_spec_by_name, parse_toggle_value};
-    use crate::physics::world::object::ObjectWorld;
     use crate::physics::world::particle::ParticleWorld;
     use crate::physics::world::terrain::{TerrainCell, TerrainWorld};
     use bevy::prelude::IVec2;
@@ -1457,9 +1376,7 @@ mod tests {
         let spec = default_scenario_spec_by_name("water_drop").expect("water_drop must exist");
         let mut terrain = TerrainWorld::default();
         let mut particles = ParticleWorld::default();
-        let mut objects = ObjectWorld::default();
-        apply_scenario_spec(&spec, &mut terrain, &mut particles, &mut objects)
-            .expect("scenario apply should succeed");
+        apply_scenario_spec(&spec, &mut terrain, &mut particles).expect("scenario apply should succeed");
 
         assert!(!terrain.generation_enabled());
         assert_eq!(

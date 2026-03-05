@@ -11,7 +11,6 @@ use super::material::{
     DEFAULT_MATERIAL_PARAMS, ParticleMaterial, TerrainMaterial, terrain_boundary_radius_m,
 };
 use super::state::SimulationState;
-use super::world::object::{ObjectSnapshotData, ObjectWorld};
 use super::world::particle::ParticleWorld;
 use super::world::terrain::{CHUNK_SIZE_I32, TERRAIN_GENERATOR_VERSION, TerrainCell, TerrainWorld};
 
@@ -30,6 +29,7 @@ struct SaveSnapshot {
     loaded_chunks: Vec<ChunkSnapshot>,
     terrain_cells: Vec<TerrainCellSnapshot>,
     particles: Vec<ParticleSnapshot>,
+    #[serde(default)]
     objects: Vec<ObjectSnapshot>,
 }
 
@@ -182,7 +182,6 @@ pub fn save_to_slot(
     slot_name: &str,
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
-    objects: &ObjectWorld,
     sim_state: &SimulationState,
 ) -> Result<PathBuf, String> {
     let slot = sanitize_slot_name(slot_name)?;
@@ -191,7 +190,6 @@ pub fn save_to_slot(
         path.to_string_lossy().as_ref(),
         terrain,
         particles,
-        objects,
         sim_state,
     )?;
     Ok(path)
@@ -201,7 +199,6 @@ pub fn load_from_slot(
     slot_name: &str,
     terrain: &mut TerrainWorld,
     particles: &mut ParticleWorld,
-    objects: &mut ObjectWorld,
     sim_state: &mut SimulationState,
 ) -> Result<PathBuf, String> {
     let slot = sanitize_slot_name(slot_name)?;
@@ -210,7 +207,6 @@ pub fn load_from_slot(
         path.to_string_lossy().as_ref(),
         terrain,
         particles,
-        objects,
         sim_state,
     )?;
     Ok(path)
@@ -220,7 +216,6 @@ pub fn save_to_path(
     path: &str,
     terrain: &TerrainWorld,
     particles: &ParticleWorld,
-    objects: &ObjectWorld,
     sim_state: &SimulationState,
 ) -> Result<(), String> {
     let snapshot = SaveSnapshot {
@@ -249,17 +244,7 @@ pub fn save_to_path(
                 material: material.into(),
             })
             .collect(),
-        objects: objects
-            .snapshot_data()
-            .into_iter()
-            .map(|object| ObjectSnapshot {
-                id: object.id,
-                particle_indices: object.particle_indices,
-                rest_local: object.rest_local.into_iter().map(|v| [v.x, v.y]).collect(),
-                shape_stiffness_alpha: object.shape_stiffness_alpha,
-                shape_iters: object.shape_iters,
-            })
-            .collect(),
+        objects: Vec::new(),
     };
 
     let json = serde_json::to_string_pretty(&snapshot)
@@ -303,7 +288,6 @@ pub fn load_from_path(
     path: &str,
     terrain: &mut TerrainWorld,
     particles: &mut ParticleWorld,
-    objects: &mut ObjectWorld,
     sim_state: &mut SimulationState,
 ) -> Result<(), String> {
     let json =
@@ -373,27 +357,6 @@ pub fn load_from_path(
         .collect();
     particles.restore_from_snapshot(positions, velocities, materials)?;
 
-    let object_snapshots: Vec<ObjectSnapshotData> = snapshot
-        .objects
-        .iter()
-        .map(|object| ObjectSnapshotData {
-            id: object.id,
-            particle_indices: object.particle_indices.clone(),
-            rest_local: object
-                .rest_local
-                .iter()
-                .map(|rest| Vec2::new(rest[0], rest[1]))
-                .collect(),
-            shape_stiffness_alpha: object.shape_stiffness_alpha,
-            shape_iters: object.shape_iters,
-        })
-        .collect();
-    objects.restore_from_snapshot_data(
-        &object_snapshots,
-        particles.positions(),
-        particles.masses(),
-    )?;
-
     sim_state.running = snapshot.simulation.running;
     Ok(())
 }
@@ -461,14 +424,12 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::physics::world::object::ObjectWorld;
     use crate::physics::world::particle::ParticleWorld;
 
     #[test]
     fn load_restores_loaded_chunks_as_empty_when_terrain_cells_are_empty() {
         let mut terrain = TerrainWorld::default();
         let mut particles = ParticleWorld::default();
-        let mut objects = ObjectWorld::default();
         let mut sim_state = SimulationState::default();
 
         let nanos = SystemTime::now()
@@ -485,7 +446,6 @@ mod tests {
             path.to_str().expect("temp path should be utf-8"),
             &mut terrain,
             &mut particles,
-            &mut objects,
             &mut sim_state,
         )
         .expect("loading regeneration-only snapshot should succeed");
@@ -504,7 +464,6 @@ mod tests {
     fn load_rejects_incompatible_generator_version() {
         let mut terrain = TerrainWorld::default();
         let mut particles = ParticleWorld::default();
-        let mut objects = ObjectWorld::default();
         let mut sim_state = SimulationState::default();
 
         let nanos = SystemTime::now()
@@ -522,7 +481,6 @@ mod tests {
             path.to_str().expect("temp path should be utf-8"),
             &mut terrain,
             &mut particles,
-            &mut objects,
             &mut sim_state,
         )
         .expect_err("mismatched generator version should fail");
@@ -534,7 +492,6 @@ mod tests {
     fn save_and_load_restores_modified_terrain_outside_fixed_bounds() {
         let mut terrain = TerrainWorld::default();
         let particles = ParticleWorld::default();
-        let objects = ObjectWorld::default();
         let sim_state = SimulationState::default();
 
         let far_chunk = IVec2::new(12, -9);
@@ -557,20 +514,17 @@ mod tests {
             path.to_str().expect("temp path should be utf-8"),
             &terrain,
             &particles,
-            &objects,
             &sim_state,
         )
         .expect("saving snapshot should succeed");
 
         let mut loaded_terrain = TerrainWorld::default();
         let mut loaded_particles = ParticleWorld::default();
-        let mut loaded_objects = ObjectWorld::default();
         let mut loaded_sim_state = SimulationState::default();
         load_from_path(
             path.to_str().expect("temp path should be utf-8"),
             &mut loaded_terrain,
             &mut loaded_particles,
-            &mut loaded_objects,
             &mut loaded_sim_state,
         )
         .expect("loading snapshot should succeed");
