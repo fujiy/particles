@@ -1,0 +1,14 @@
+{
+  "mpm": {
+    "enabled": true,
+    "scenario_name": "water_drop",
+    "output_path": "artifacts/autoverify/water_drop_motion.json",
+    "sample_material": "water_liquid",
+    "run_frames": 600,
+    "run_steps": 1200,
+    "min_avg_fps": 10.0,
+    "max_penetration_ratio": 1.0,
+    "min_mean_drop": 0.01
+  },
+  "gpu_readback_interval_frames": 1
+}

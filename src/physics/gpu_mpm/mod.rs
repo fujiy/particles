@@ -49,7 +49,15 @@ pub struct MpmComputeLabel;
 impl ExtractResource for MpmGpuUploadRequest {
     type Source = MpmGpuUploadRequest;
     fn extract_resource(source: &Self::Source) -> Self {
-        source.clone()
+        Self {
+            upload_particles: source.upload_particles_frame,
+            upload_particles_frame: false,
+            upload_terrain: source.upload_terrain,
+            particles: source.particles.clone(),
+            terrain_sdf: source.terrain_sdf.clone(),
+            terrain_normal: source.terrain_normal.clone(),
+            last_uploaded_terrain_version: source.last_uploaded_terrain_version,
+        }
     }
 }
 
@@ -57,6 +65,7 @@ impl Clone for MpmGpuUploadRequest {
     fn clone(&self) -> Self {
         Self {
             upload_particles: self.upload_particles,
+            upload_particles_frame: self.upload_particles_frame,
             upload_terrain: self.upload_terrain,
             particles: self.particles.clone(),
             terrain_sdf: self.terrain_sdf.clone(),

@@ -39,6 +39,7 @@
   - [x] GPUバッファレイアウト（particle/grid/active tile/metrics）を確定する。
   - [ ] 不要になったCPU実装を削除し、関連テストとドキュメント参照を整理する。
 - 進捗:
+  - 2026-03-06: ランタイム不具合を修正。`overlay/ui` の `Node`/`TextFont` 多重可変Query競合（Bevy B0001）を `ParamSet` 化で解消。さらに GPU MPM の粒子uploadを one-shot 化（`upload_particles` request と `upload_particles_frame` latch を分離）し、`water_drop` で毎フレーム再uploadされて落下しない問題を解消。`configs/autoverify/water_drop_motion.json` を追加して再検証し、`artifacts/autoverify/water_drop_motion.json` で `passed=true`（`gpu_count_water_liquid=5712`, `mean_drop=11.172575`）を確認。
   - 2026-03-05: 未使用コード整理として `interface/world_edit` の未参照ストローク分割関数群、`ParticleWorld::particle_execution_dt_substep`、`pack_pair_key` を削除。併せて `solver/mpm_water.rs` と `solver/terrain_boundary.rs` の `#[cfg(test)]` ブロック、および `tests/physics_scenarios.rs` を削除。
   - 2026-03-05: CPU MPM撤去を前進。`solver/mpm_water.rs` を GPU同期で必要な最小API（`is_mpm_managed_particle`, `rebuild_continuum_from_particle_world`, `sync_continuum_to_particle_world`）へ縮退し、CPU MPMステップ実装と `world/kernel.rs` を削除。
   - 2026-03-05: 警告駆動の機械的削減を継続。未使用化していた `solver/terrain_boundary.rs` を最小Resource（`clear()`のみ）へ縮退し、`cargo check` 警告0件を確認。

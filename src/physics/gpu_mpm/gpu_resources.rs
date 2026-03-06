@@ -195,8 +195,10 @@ impl MpmGpuBuffers {
 /// Bevy main-world resource: tracks what CPU needs to upload each frame.
 #[derive(Resource, Default)]
 pub struct MpmGpuUploadRequest {
-    /// If true, upload full particle array this frame.
+    /// Main-world request bit: request full particle array upload on next extraction.
     pub upload_particles: bool,
+    /// One-frame latched bit extracted into render world.
+    pub upload_particles_frame: bool,
     /// If true, upload terrain SDF/normals this frame.
     pub upload_terrain: bool,
     /// Particle data to upload.

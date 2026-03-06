@@ -358,25 +358,21 @@ pub fn prepare_particle_upload(
 ) {
     if control.init_only {
         upload.upload_particles = false;
+        upload.upload_particles_frame = false;
         sim_state.gpu_mpm_active = false;
         upload.particles.clear();
         return;
     }
-    let has_particles = if upload.upload_particles {
-        !upload.particles.is_empty()
-    } else {
-        !readback_snapshot.particles.is_empty()
-    };
+    let upload_requested = upload.upload_particles;
+    upload.upload_particles_frame = upload_requested;
+    // Consume main-world request flag; explicit requests set this again when needed.
+    upload.upload_particles = false;
+
+    // Keep GPU run-state stable regardless of one-shot upload flag consumption.
+    // `upload.particles` is the authoritative CPU-side snapshot for the current set.
+    let has_particles = !upload.particles.is_empty() || !readback_snapshot.particles.is_empty();
     // Pure GPU mode: no CPU fallback; active when MPM is enabled and particles exist.
     sim_state.gpu_mpm_active = sim_state.mpm_enabled && has_particles;
-
-    // Preserve explicit upload requests (save/load/manual clear+replace).
-    if upload.upload_particles {
-        return;
-    }
-
-    // Default: no particle upload this frame unless explicitly requested below.
-    upload.upload_particles = false;
 }
 
 /// System: build terrain SDF/normal upload request.
@@ -447,7 +443,7 @@ pub fn prepare_gpu_params(
         p.sand.hardening,
     );
     let boundary_threshold_m = h * p.runtime.boundary_velocity_sdf_threshold_h;
-    let particle_count = if upload.upload_particles {
+    let particle_count = if !upload.particles.is_empty() {
         upload.particles.len()
     } else {
         readback_snapshot.particles.len()

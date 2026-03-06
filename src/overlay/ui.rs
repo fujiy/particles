@@ -112,46 +112,55 @@ pub(super) fn setup_overlay_ui(mut commands: Commands, overlay_params: Res<Activ
 
 pub(super) fn apply_overlay_ui_params(
     overlay_params: Res<ActiveOverlayParams>,
-    mut tile_node: Single<&mut Node, With<TileOverlayToggleButton>>,
-    mut sdf_node: Single<&mut Node, With<SdfOverlayToggleButton>>,
-    mut physics_node: Single<&mut Node, With<PhysicsAreaOverlayToggleButton>>,
-    mut particle_node: Single<&mut Node, With<ParticleOverlayToggleButton>>,
-    mut info_node: Single<&mut Node, With<OverlayInfoText>>,
-    mut tile_font: Single<&mut TextFont, With<TileOverlayToggleButtonLabel>>,
-    mut sdf_font: Single<&mut TextFont, With<SdfOverlayToggleButtonLabel>>,
-    mut physics_font: Single<&mut TextFont, With<PhysicsAreaOverlayToggleButtonLabel>>,
-    mut particle_font: Single<&mut TextFont, With<ParticleOverlayToggleButtonLabel>>,
-    mut info_font: Single<&mut TextFont, With<OverlayInfoText>>,
+    mut nodes: ParamSet<(
+        Single<&mut Node, With<TileOverlayToggleButton>>,
+        Single<&mut Node, With<SdfOverlayToggleButton>>,
+        Single<&mut Node, With<PhysicsAreaOverlayToggleButton>>,
+        Single<&mut Node, With<ParticleOverlayToggleButton>>,
+        Single<&mut Node, With<OverlayInfoText>>,
+    )>,
+    mut fonts: ParamSet<(
+        Single<&mut TextFont, With<TileOverlayToggleButtonLabel>>,
+        Single<&mut TextFont, With<SdfOverlayToggleButtonLabel>>,
+        Single<&mut TextFont, With<PhysicsAreaOverlayToggleButtonLabel>>,
+        Single<&mut TextFont, With<ParticleOverlayToggleButtonLabel>>,
+        Single<&mut TextFont, With<OverlayInfoText>>,
+    )>,
 ) {
     if !overlay_params.is_changed() {
         return;
     }
     let ui = &overlay_params.0.ui;
 
+    let mut tile_node = nodes.p0();
     tile_node.right = px(ui.right_px);
     tile_node.bottom = px(ui.tile_button_bottom_px);
     tile_node.padding = UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px));
 
+    let mut sdf_node = nodes.p1();
     sdf_node.right = px(ui.right_px);
     sdf_node.bottom = px(ui.sdf_button_bottom_px);
     sdf_node.padding = UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px));
 
+    let mut physics_node = nodes.p2();
     physics_node.right = px(ui.right_px);
     physics_node.bottom = px(ui.physics_area_button_bottom_px);
     physics_node.padding = UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px));
 
+    let mut particle_node = nodes.p3();
     particle_node.right = px(ui.right_px);
     particle_node.bottom = px(ui.particle_button_bottom_px);
     particle_node.padding = UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px));
 
+    let mut info_node = nodes.p4();
     info_node.left = px(ui.info_left_px);
     info_node.top = px(ui.info_top_px);
 
-    tile_font.font_size = ui.button_font_size_px;
-    sdf_font.font_size = ui.button_font_size_px;
-    physics_font.font_size = ui.button_font_size_px;
-    particle_font.font_size = ui.button_font_size_px;
-    info_font.font_size = ui.info_font_size_px;
+    fonts.p0().font_size = ui.button_font_size_px;
+    fonts.p1().font_size = ui.button_font_size_px;
+    fonts.p2().font_size = ui.button_font_size_px;
+    fonts.p3().font_size = ui.button_font_size_px;
+    fonts.p4().font_size = ui.info_font_size_px;
 }
 
 pub(super) fn handle_particle_overlay_button(
