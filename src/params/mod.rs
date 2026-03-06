@@ -3,14 +3,10 @@
 // `assets/params/` 配下の RON ファイルを Bevy Asset として管理し、
 // hot reload で実行中に値を更新する。
 //
-// 5 ファイル構成:
+// 3 ファイル構成:
 //   physics.ron    — GPU MPM 物性・境界・連成
 //   render.ron     — 水ドット・地形ドット描画
 //   palette.ron    — 水ドット材質パレット
-//   overlay.ron    — SDF・グリッドオーバーレイ閾値
-//   material.ron   — 材料種ごとの摩擦・反発・破壊閾値
-pub mod material;
-pub mod overlay;
 pub mod palette;
 pub mod physics;
 pub mod render;
@@ -19,8 +15,6 @@ use bevy::ecs::message::MessageReader;
 use bevy::prelude::*;
 use bevy::render::extract_resource::ExtractResource;
 
-use material::{MaterialAssetParams, MaterialAssetParamsLoader};
-use overlay::{OverlayParams, OverlayParamsLoader};
 use palette::{PaletteParams, PaletteParamsLoader};
 use physics::{PhysicsParams, PhysicsParamsLoader};
 use render::{RenderParams, RenderParamsLoader};
@@ -35,10 +29,6 @@ pub struct PhysicsParamsHandle(pub Handle<PhysicsParams>);
 pub struct RenderParamsHandle(pub Handle<RenderParams>);
 #[derive(Resource, Default)]
 pub struct PaletteParamsHandle(pub Handle<PaletteParams>);
-#[derive(Resource, Default)]
-pub struct OverlayParamsHandle(pub Handle<OverlayParams>);
-#[derive(Resource, Default)]
-pub struct MaterialAssetParamsHandle(pub Handle<MaterialAssetParams>);
 // ---------------------------------------------------------------------------
 // Active resources (最後に検証済みのスナップショット)
 // ---------------------------------------------------------------------------
@@ -49,10 +39,6 @@ pub struct ActivePhysicsParams(pub PhysicsParams);
 pub struct ActiveRenderParams(pub RenderParams);
 #[derive(Resource, Clone, ExtractResource)]
 pub struct ActivePaletteParams(pub PaletteParams);
-#[derive(Resource)]
-pub struct ActiveOverlayParams(pub OverlayParams);
-#[derive(Resource)]
-pub struct ActiveMaterialAssetParams(pub MaterialAssetParams);
 impl Default for ActivePhysicsParams {
     fn default() -> Self {
         Self(PhysicsParams::default())
@@ -68,16 +54,6 @@ impl Default for ActivePaletteParams {
         Self(PaletteParams::default())
     }
 }
-impl Default for ActiveOverlayParams {
-    fn default() -> Self {
-        Self(OverlayParams::default())
-    }
-}
-impl Default for ActiveMaterialAssetParams {
-    fn default() -> Self {
-        Self(MaterialAssetParams::default())
-    }
-}
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -89,33 +65,19 @@ impl Plugin for ParamsPlugin {
         app.init_asset::<PhysicsParams>()
             .init_asset::<RenderParams>()
             .init_asset::<PaletteParams>()
-            .init_asset::<OverlayParams>()
-            .init_asset::<MaterialAssetParams>()
             .register_asset_loader(PhysicsParamsLoader)
             .register_asset_loader(RenderParamsLoader)
             .register_asset_loader(PaletteParamsLoader)
-            .register_asset_loader(OverlayParamsLoader)
-            .register_asset_loader(MaterialAssetParamsLoader)
             .init_resource::<PhysicsParamsHandle>()
             .init_resource::<RenderParamsHandle>()
             .init_resource::<PaletteParamsHandle>()
-            .init_resource::<OverlayParamsHandle>()
-            .init_resource::<MaterialAssetParamsHandle>()
             .init_resource::<ActivePhysicsParams>()
             .init_resource::<ActiveRenderParams>()
             .init_resource::<ActivePaletteParams>()
-            .init_resource::<ActiveOverlayParams>()
-            .init_resource::<ActiveMaterialAssetParams>()
             .add_systems(Startup, load_all_params)
             .add_systems(
                 Update,
-                (
-                    hot_reload_physics,
-                    hot_reload_render,
-                    hot_reload_palette,
-                    hot_reload_overlay,
-                    hot_reload_material,
-                ),
+                (hot_reload_physics, hot_reload_render, hot_reload_palette),
             );
     }
 }
@@ -129,14 +91,10 @@ fn load_all_params(
     mut physics_h: ResMut<PhysicsParamsHandle>,
     mut render_h: ResMut<RenderParamsHandle>,
     mut palette_h: ResMut<PaletteParamsHandle>,
-    mut overlay_h: ResMut<OverlayParamsHandle>,
-    mut material_h: ResMut<MaterialAssetParamsHandle>,
 ) {
     physics_h.0 = asset_server.load("params/physics.ron");
     render_h.0 = asset_server.load("params/render.ron");
     palette_h.0 = asset_server.load("params/palette.ron");
-    overlay_h.0 = asset_server.load("params/overlay.ron");
-    material_h.0 = asset_server.load("params/material.ron");
 }
 
 // ---------------------------------------------------------------------------
@@ -182,36 +140,6 @@ fn hot_reload_palette(
     );
 }
 
-fn hot_reload_overlay(
-    handle: Res<OverlayParamsHandle>,
-    assets: Res<Assets<OverlayParams>>,
-    mut active: ResMut<ActiveOverlayParams>,
-    mut events: MessageReader<AssetEvent<OverlayParams>>,
-) {
-    apply_if_valid(
-        &handle.0,
-        &assets,
-        &mut active.0,
-        &mut events,
-        "overlay.ron",
-    );
-}
-
-fn hot_reload_material(
-    handle: Res<MaterialAssetParamsHandle>,
-    assets: Res<Assets<MaterialAssetParams>>,
-    mut active: ResMut<ActiveMaterialAssetParams>,
-    mut events: MessageReader<AssetEvent<MaterialAssetParams>>,
-) {
-    apply_if_valid(
-        &handle.0,
-        &assets,
-        &mut active.0,
-        &mut events,
-        "material.ron",
-    );
-}
-
 // ---------------------------------------------------------------------------
 // 共通ヘルパー
 // ---------------------------------------------------------------------------
@@ -231,16 +159,6 @@ impl Validatable for RenderParams {
     }
 }
 impl Validatable for PaletteParams {
-    fn validate(&self) -> Result<(), String> {
-        self.validate()
-    }
-}
-impl Validatable for OverlayParams {
-    fn validate(&self) -> Result<(), String> {
-        self.validate()
-    }
-}
-impl Validatable for MaterialAssetParams {
     fn validate(&self) -> Result<(), String> {
         self.validate()
     }

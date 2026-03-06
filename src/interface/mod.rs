@@ -84,7 +84,6 @@ const MATERIAL_PATTERN_SOLID: MaterialPattern8 = [
     [true, true, true, true, true, true, true, true],
 ];
 
-#[allow(dead_code)]
 const MATERIAL_PATTERN_GRANULAR: MaterialPattern8 = [
     [false, false, false, true, true, false, false, false],
     [false, false, false, true, true, false, false, false],

@@ -242,12 +242,6 @@ impl TerrainWorld {
         self.ensure_chunk_mut(chunk_coord);
     }
 
-    #[allow(dead_code)]
-    pub fn get_cell(&mut self, global_cell: IVec2) -> TerrainCell {
-        let (chunk_coord, local_cell) = global_to_chunk_local(global_cell);
-        self.ensure_chunk_mut(chunk_coord).get(local_cell)
-    }
-
     pub fn set_cell(&mut self, global_cell: IVec2, next: TerrainCell) -> bool {
         let (chunk_coord, local_cell) = global_to_chunk_local(global_cell);
         let changed = self.ensure_chunk_mut(chunk_coord).set(local_cell, next);
@@ -270,27 +264,6 @@ impl TerrainWorld {
         for y in min_y..=max_y {
             for x in min_x..=max_x {
                 self.set_cell(IVec2::new(x, y), value);
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn for_each_in_chunk<F>(&mut self, chunk_coord: IVec2, mut f: F)
-    where
-        F: FnMut(IVec2, TerrainCell),
-    {
-        self.ensure_chunk_loaded(chunk_coord);
-
-        let Some(chunk) = self.chunks.get(&chunk_coord) else {
-            return;
-        };
-
-        let base_cell = chunk_coord * CHUNK_SIZE_I32;
-        for local_y in 0..CHUNK_SIZE_I32 {
-            for local_x in 0..CHUNK_SIZE_I32 {
-                let local_cell = IVec2::new(local_x, local_y);
-                let global_cell = base_cell + local_cell;
-                f(global_cell, chunk.get(local_cell));
             }
         }
     }
@@ -388,7 +361,6 @@ impl TerrainWorld {
         self.static_particles_dirty = true;
     }
 
-    #[allow(dead_code)]
     pub fn get_loaded_cell_or_empty(&self, global_cell: IVec2) -> TerrainCell {
         let (chunk_coord, local_cell) = global_to_chunk_local(global_cell);
         self.chunks
@@ -520,29 +492,6 @@ impl TerrainWorld {
         Some((d, normal))
     }
 
-    #[allow(dead_code)]
-    pub fn gather_static_neighbors(
-        &self,
-        position: Vec2,
-        grid_cell_size: f32,
-        out_neighbors: &mut Vec<usize>,
-    ) {
-        out_neighbors.clear();
-        let center = IVec2::new(
-            (position.x / grid_cell_size).floor() as i32,
-            (position.y / grid_cell_size).floor() as i32,
-        );
-
-        for y in (center.y - 1)..=(center.y + 1) {
-            for x in (center.x - 1)..=(center.x + 1) {
-                let Some(indices) = self.static_particle_grid.get(&IVec2::new(x, y)) else {
-                    continue;
-                };
-                out_neighbors.extend(indices.iter().copied());
-            }
-        }
-    }
-
     pub fn static_particle_positions(&self) -> &[Vec2] {
         &self.static_particle_pos
     }
@@ -643,7 +592,6 @@ fn material_id_to_terrain_cell(material_id: u16) -> TerrainCell {
     }
 }
 
-#[allow(dead_code)]
 pub fn world_to_cell(world_position: Vec2) -> IVec2 {
     IVec2::new(
         (world_position.x / CELL_SIZE_M).floor() as i32,

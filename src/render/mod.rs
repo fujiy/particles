@@ -32,4 +32,4 @@ pub struct TerrainRenderDiagnostics {
 }
 
 pub use terrain_gpu::{TerrainGeneratedChunkCache, TerrainGpuPlugin};
-pub use water_dot_gpu::{WaterDotGpuLabel, WaterDotGpuPlugin};
+pub use water_dot_gpu::WaterDotGpuPlugin;

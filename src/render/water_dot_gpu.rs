@@ -47,10 +47,10 @@ const DEFAULT_WATER_PALETTE_SEED: u32 = 0xA53C_9E4D;
 const WORKGROUP_SIZE: u32 = 64;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct WaterDotPreprocessLabel;
+struct WaterDotPreprocessLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct WaterDotGpuLabel;
+pub(super) struct WaterDotGpuLabel;
 
 #[derive(Default)]
 struct WaterDotPreprocessNode;

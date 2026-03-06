@@ -159,13 +159,13 @@ fn terrain_runtime_settings_from_active(
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct TerrainDirtyTile {
+struct TerrainDirtyTile {
     pub _world_origin: IVec2,
     pub _extent_cells: UVec2,
 }
 
 #[derive(Resource, Debug)]
-pub struct TerrainCacheState {
+struct TerrainCacheState {
     pub cache_origin_world: IVec2,
     pub ring_offset: IVec2,
     pub lod_k: i32,
@@ -434,7 +434,7 @@ fn normalize_ring_offset(ring_offset: IVec2, extent: UVec2) -> IVec2 {
     )
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn world_cell_to_texture_index(
     world_cell: IVec2,
     cache_origin_world: IVec2,
@@ -551,7 +551,7 @@ impl TerrainGeneratedChunkCache {
 }
 
 #[derive(Resource, Clone, Debug, Default)]
-pub struct TerrainGeneratedChunkReadbackRequest {
+struct TerrainGeneratedChunkReadbackRequest {
     active: bool,
     request_id: u64,
     chunk_coord: IVec2,
@@ -597,22 +597,22 @@ impl TerrainGeneratedChunkReadbackResult {
 // ── Render labels ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct TerrainNearUpdateLabel;
+struct TerrainNearUpdateLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct TerrainFarUpdateLabel;
+struct TerrainFarUpdateLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct TerrainOverrideApplyLabel;
+struct TerrainOverrideApplyLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct TerrainBackUpdateLabel;
+struct TerrainBackUpdateLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct TerrainComposeLabel;
+struct TerrainComposeLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-pub struct TerrainChunkGenerateLabel;
+struct TerrainChunkGenerateLabel;
 
 // ── GPU uniform structs ───────────────────────────────────────────────────────
 
@@ -1551,7 +1551,7 @@ impl ViewNode for TerrainComposeNode {
 // ── CPU-side request (main world → render world via ExtractResource) ──────────
 
 #[derive(Resource, Default)]
-pub struct TerrainNearUpdateRequest {
+struct TerrainNearUpdateRequest {
     dirty: bool,
     override_dirty: bool,
     far_override_dirty: bool,
@@ -1840,7 +1840,7 @@ fn append_dirty_rect_cells(
     }
 }
 
-pub fn prepare_terrain_near_update_request(
+fn prepare_terrain_near_update_request(
     mut terrain: ResMut<TerrainWorld>,
     render_params: Res<ActiveRenderParams>,
     windows: Query<&Window, With<PrimaryWindow>>,

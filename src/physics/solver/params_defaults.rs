@@ -4,7 +4,7 @@ use super::params_types::SolverParams;
 use crate::physics::material::{DEFAULT_MATERIAL_PARAMS, particle_radius_m, water_kernel_radius_m};
 use crate::physics::world::constants::{CELL_SIZE_M, CHUNK_SIZE_I32};
 
-pub const DEFAULT_SOLVER_PARAMS: SolverParams = SolverParams {
+pub(crate) const DEFAULT_SOLVER_PARAMS: SolverParams = SolverParams {
     gravity_mps2: Vec2::new(0.0, -9.81),
     fixed_dt: 1.0 / 240.0,
     mpm_block_rate_level_min: 0,
@@ -42,21 +42,12 @@ pub const DEFAULT_SOLVER_PARAMS: SolverParams = SolverParams {
     granular_contact_normal_damping: 0.50,
     terrain_contact_normal_damping: 0.65,
     granular_spawn_jitter_ratio: 0.01,
-    object_reaction_max_dv_per_substep_mps: 1.5,
     fracture_min_impact_speed_mps: 2.0,
     particle_escape_margin_x_cells: CHUNK_SIZE_I32,
     particle_escape_margin_bottom_cells: CHUNK_SIZE_I32,
     particle_escape_margin_top_cells: CHUNK_SIZE_I32 * 8,
     far_field_edge_inset_m: particle_radius_m(DEFAULT_MATERIAL_PARAMS) * 1.25,
     neighbor_list_skin_m: water_kernel_radius_m(DEFAULT_MATERIAL_PARAMS) * 0.25,
-    object_shape_stiffness_alpha: 0.92,
-    object_shape_iters: 3,
-    object_local_sdf_samples_per_cell: 2,
-    object_physics_sdf_cell_size_m: CELL_SIZE_M * 0.5,
-    object_broadphase_cell_size_m: CELL_SIZE_M * 4.0,
-    object_sdf_max_distance_m: CELL_SIZE_M * 2.5,
-    object_sdf_max_splats_per_cell: 4,
-    object_sdf_max_contacts_per_query: 4,
 };
 
 impl Default for SolverParams {

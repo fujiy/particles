@@ -13,7 +13,3 @@ pub fn mpm_phase_id_for_particle(material: ParticleMaterial) -> Option<u8> {
         _ => None,
     }
 }
-
-pub fn is_mpm_managed_particle(material: ParticleMaterial) -> bool {
-    mpm_phase_id_for_particle(material).is_some()
-}
