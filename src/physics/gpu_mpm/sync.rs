@@ -6,24 +6,53 @@
 use bevy::prelude::*;
 use std::collections::HashSet;
 
-use super::buffers::{self, GpuMpmParams, GpuParticle, GpuStatisticsScalars};
+use super::buffers::{
+    self, GpuChunkMeta, GpuGridLayout, GpuMpmParams, GpuParticle, GpuStatisticsScalars,
+    INVALID_CHUNK_SLOT_ID,
+};
 use super::gpu_resources::{
-    MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest,
-    world_grid_layout,
+    MAX_RESIDENT_CHUNK_SLOTS, MPM_CHUNK_NODE_DIM, MpmGpuControl, MpmGpuParamsRequest,
+    MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest, world_grid_layout,
 };
 use super::phase::mpm_phase_id_for_particle;
 use super::readback::{GpuReadbackResult, GpuStatisticsReadbackResult};
 use crate::params::ActivePhysicsParams;
 use crate::physics::material::{ParticleMaterial, particle_properties};
 use crate::physics::state::{ReplayState, SimulationState};
-use crate::physics::world::constants::CELL_SIZE_M;
+use crate::physics::world::constants::{CELL_SIZE_M, CHUNK_SIZE_I32};
 use crate::physics::world::terrain::{TerrainWorld, cell_to_world_center, world_to_cell};
 
 const TERRAIN_SDF_DISABLED_DISTANCE_M: f32 = 1.0e6;
+const CHUNK_HALO_RADIUS: i32 = 2;
 
 #[derive(Resource, Debug, Default)]
 pub struct MpmReadbackSnapshot {
     pub particles: Vec<GpuParticle>,
+}
+
+#[derive(Resource, Debug, Clone, Copy)]
+pub struct MpmChunkResidencyState {
+    pub initialized: bool,
+    pub chunk_origin: IVec2,
+    pub chunk_dims: UVec2,
+    pub grid_layout: GpuGridLayout,
+    pub resident_chunk_count: u32,
+    pub chunk_sdf_samples: u32,
+    pub invalid_slot_access_count: u64,
+}
+
+impl Default for MpmChunkResidencyState {
+    fn default() -> Self {
+        Self {
+            initialized: false,
+            chunk_origin: IVec2::ZERO,
+            chunk_dims: UVec2::ZERO,
+            grid_layout: world_grid_layout(),
+            resident_chunk_count: 0,
+            chunk_sdf_samples: 0,
+            invalid_slot_access_count: 0,
+        }
+    }
 }
 
 #[derive(Resource, Debug, Clone, Copy)]
@@ -359,6 +388,7 @@ pub fn prepare_particle_upload(
     if control.init_only {
         upload.upload_particles = false;
         upload.upload_particles_frame = false;
+        upload.upload_chunks = false;
         sim_state.gpu_mpm_active = false;
         upload.particles.clear();
         return;
@@ -381,36 +411,66 @@ pub fn prepare_particle_upload(
 pub fn prepare_terrain_upload(
     control: Res<MpmGpuControl>,
     sim_state: Res<SimulationState>,
-    _terrain: Res<TerrainWorld>,
+    terrain: Res<TerrainWorld>,
+    readback_snapshot: Res<MpmReadbackSnapshot>,
+    mut residency: ResMut<MpmChunkResidencyState>,
     mut upload: ResMut<MpmGpuUploadRequest>,
 ) {
-    // Default: no terrain upload this frame unless explicitly requested below.
+    // Default: no chunk/terrain upload this frame unless explicitly requested below.
+    upload.upload_chunks = false;
     upload.upload_terrain = false;
 
     if control.init_only {
+        upload.chunk_meta.clear();
         upload.terrain_sdf.clear();
         upload.terrain_normal.clear();
         upload.last_uploaded_terrain_version = None;
+        residency.initialized = false;
+        residency.resident_chunk_count = 0;
+        residency.chunk_sdf_samples = 0;
+        residency.invalid_slot_access_count = 0;
         return;
     }
     // When MLS-MPM stepping is disabled, terrain upload is unnecessary for overlay debug.
     if !sim_state.mpm_enabled {
         return;
     }
-    // Temporary: CPU-side terrain SDF generation is disabled.
-    // Upload a single "always outside terrain" field so GPU側での地形SDF生成へ移行するまで
-    // CPU再生成コストを発生させない。
-    if upload.last_uploaded_terrain_version == Some(u64::MAX) {
+
+    // MPM-CHUNK-01: static residency.
+    // Rebuild only on initial bring-up or explicit particle upload (scenario/reset/edit).
+    let should_rebuild = !residency.initialized || upload.upload_particles_frame;
+    if !should_rebuild {
         return;
     }
-    let layout = world_grid_layout();
-    let node_count = layout.node_count();
-    upload
-        .terrain_sdf
-        .resize(node_count, TERRAIN_SDF_DISABLED_DISTANCE_M);
-    upload.terrain_normal.resize(node_count, [0.0_f32, 1.0]);
+
+    let particle_source = if !upload.particles.is_empty() {
+        upload.particles.as_slice()
+    } else {
+        readback_snapshot.particles.as_slice()
+    };
+    let Some(build) = build_static_chunk_upload(&terrain, particle_source) else {
+        upload.chunk_meta.clear();
+        upload.terrain_sdf.clear();
+        upload.terrain_normal.clear();
+        residency.initialized = false;
+        residency.resident_chunk_count = 0;
+        residency.chunk_sdf_samples = 0;
+        return;
+    };
+
+    upload.chunk_meta = build.chunk_meta;
+    upload.upload_chunks = true;
+    upload.terrain_sdf = build.terrain_sdf;
+    upload.terrain_normal = build.terrain_normal;
     upload.upload_terrain = true;
-    upload.last_uploaded_terrain_version = Some(u64::MAX);
+
+    residency.initialized = true;
+    residency.chunk_origin = build.chunk_origin;
+    residency.chunk_dims = build.chunk_dims;
+    residency.grid_layout = build.grid_layout;
+    residency.resident_chunk_count = residency.chunk_dims.x.saturating_mul(residency.chunk_dims.y);
+    residency.chunk_sdf_samples = build.grid_layout.node_count() as u32;
+    residency.invalid_slot_access_count = 0;
 }
 
 /// System: update MpmGpuParamsRequest from simulation state and PhysicsParams asset.
@@ -419,13 +479,18 @@ pub fn prepare_gpu_params(
     active_params: Res<ActivePhysicsParams>,
     upload: Res<MpmGpuUploadRequest>,
     readback_snapshot: Res<MpmReadbackSnapshot>,
+    residency: Res<MpmChunkResidencyState>,
     stats_status: Res<MpmStatisticsStatus>,
     mut params_req: ResMut<MpmGpuParamsRequest>,
 ) {
     if control.init_only {
         return;
     }
-    let layout = world_grid_layout();
+    let layout = if residency.initialized {
+        residency.grid_layout
+    } else {
+        world_grid_layout()
+    };
     let h = CELL_SIZE_M;
     let p = &active_params.0;
     let soil = drucker_prager_params(
@@ -491,7 +556,13 @@ pub fn prepare_gpu_params(
         stats_interaction_secondary_phase_id: stats_status.interaction_secondary_phase_id,
         stats_penetration_epsilon_m: p.runtime.stats_penetration_epsilon_m,
         stats_position_fp_scale: 100.0,
-        _pad: [0; 7],
+        chunk_origin_x: residency.chunk_origin.x,
+        chunk_origin_y: residency.chunk_origin.y,
+        chunk_dims_x: residency.chunk_dims.x,
+        chunk_dims_y: residency.chunk_dims.y,
+        resident_chunk_count: residency.resident_chunk_count,
+        chunk_node_dim: MPM_CHUNK_NODE_DIM,
+        _pad_tail: [0; 1],
     };
 }
 
@@ -574,6 +645,7 @@ pub fn apply_gpu_readback(
     control: Res<MpmGpuControl>,
     readback_result: Res<GpuReadbackResult>,
     mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
+    mut residency: ResMut<MpmChunkResidencyState>,
 ) {
     if !control.readback_enabled {
         return;
@@ -582,6 +654,25 @@ pub fn apply_gpu_readback(
         return;
     };
     readback_snapshot.particles = particles.clone();
+
+    if residency.initialized {
+        let chunk_max = residency.chunk_origin + residency.chunk_dims.as_ivec2();
+        let mut invalid_particles = 0u64;
+        for particle in &particles {
+            let chunk = chunk_coord_from_world_pos(Vec2::from_array(particle.x));
+            if chunk.x < residency.chunk_origin.x
+                || chunk.y < residency.chunk_origin.y
+                || chunk.x >= chunk_max.x
+                || chunk.y >= chunk_max.y
+            {
+                invalid_particles = invalid_particles.saturating_add(1);
+            }
+        }
+        residency.invalid_slot_access_count = residency
+            .invalid_slot_access_count
+            .saturating_add(invalid_particles);
+    }
+
     let frame = GPU_READBACK_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let n = particles.len();
     // Periodic NaN / divergence check (every 60 readback frames).
@@ -708,6 +799,160 @@ fn compact_vec_by_keep<T: Copy>(data: &mut Vec<T>, keep: &[bool]) {
         write += 1;
     }
     data.truncate(write);
+}
+
+#[derive(Debug)]
+struct StaticChunkUploadBuild {
+    chunk_origin: IVec2,
+    chunk_dims: UVec2,
+    grid_layout: GpuGridLayout,
+    chunk_meta: Vec<GpuChunkMeta>,
+    terrain_sdf: Vec<f32>,
+    terrain_normal: Vec<[f32; 2]>,
+}
+
+fn chunk_coord_from_world_pos(world_pos: Vec2) -> IVec2 {
+    let cell = world_to_cell(world_pos);
+    IVec2::new(
+        cell.x.div_euclid(CHUNK_SIZE_I32),
+        cell.y.div_euclid(CHUNK_SIZE_I32),
+    )
+}
+
+fn slot_id_from_chunk_coord(chunk: IVec2, origin: IVec2, dims: UVec2) -> Option<u32> {
+    let lx = chunk.x - origin.x;
+    let ly = chunk.y - origin.y;
+    if lx < 0 || ly < 0 {
+        return None;
+    }
+    let lx_u = lx as u32;
+    let ly_u = ly as u32;
+    if lx_u >= dims.x || ly_u >= dims.y {
+        return None;
+    }
+    Some(ly_u * dims.x + lx_u)
+}
+
+fn build_static_chunk_upload(
+    terrain: &TerrainWorld,
+    particles: &[GpuParticle],
+) -> Option<StaticChunkUploadBuild> {
+    let mut occupied = HashSet::<IVec2>::default();
+    for chunk in terrain.loaded_chunk_coords() {
+        occupied.insert(chunk);
+    }
+    for particle in particles {
+        occupied.insert(chunk_coord_from_world_pos(Vec2::from_array(particle.x)));
+    }
+    if occupied.is_empty() {
+        return None;
+    }
+
+    let mut resident = HashSet::<IVec2>::default();
+    for &chunk in &occupied {
+        for oy in -CHUNK_HALO_RADIUS..=CHUNK_HALO_RADIUS {
+            for ox in -CHUNK_HALO_RADIUS..=CHUNK_HALO_RADIUS {
+                resident.insert(chunk + IVec2::new(ox, oy));
+            }
+        }
+    }
+    if resident.is_empty() {
+        return None;
+    }
+
+    let mut min_chunk = IVec2::new(i32::MAX, i32::MAX);
+    let mut max_chunk = IVec2::new(i32::MIN, i32::MIN);
+    for &chunk in &resident {
+        min_chunk.x = min_chunk.x.min(chunk.x);
+        min_chunk.y = min_chunk.y.min(chunk.y);
+        max_chunk.x = max_chunk.x.max(chunk.x);
+        max_chunk.y = max_chunk.y.max(chunk.y);
+    }
+    if min_chunk.x > max_chunk.x || min_chunk.y > max_chunk.y {
+        return None;
+    }
+
+    let chunk_dims_i = max_chunk - min_chunk + IVec2::ONE;
+    if chunk_dims_i.x <= 0 || chunk_dims_i.y <= 0 {
+        return None;
+    }
+    let chunk_dims = chunk_dims_i.as_uvec2();
+    let resident_chunk_count = chunk_dims.x.saturating_mul(chunk_dims.y);
+    if resident_chunk_count > MAX_RESIDENT_CHUNK_SLOTS {
+        bevy::log::warn!(
+            "[gpu_mpm] static chunk residency exceeds slot capacity: requested={} limit={}",
+            resident_chunk_count,
+            MAX_RESIDENT_CHUNK_SLOTS
+        );
+        return None;
+    }
+
+    let mut chunk_meta = vec![GpuChunkMeta::default(); resident_chunk_count as usize];
+    let neighbor_offsets = [
+        IVec2::new(-1, -1),
+        IVec2::new(0, -1),
+        IVec2::new(1, -1),
+        IVec2::new(-1, 0),
+        IVec2::new(1, 0),
+        IVec2::new(-1, 1),
+        IVec2::new(0, 1),
+        IVec2::new(1, 1),
+    ];
+    for cy in min_chunk.y..=max_chunk.y {
+        for cx in min_chunk.x..=max_chunk.x {
+            let coord = IVec2::new(cx, cy);
+            let Some(slot_id) = slot_id_from_chunk_coord(coord, min_chunk, chunk_dims) else {
+                continue;
+            };
+            let meta = &mut chunk_meta[slot_id as usize];
+            meta.chunk_coord_x = cx;
+            meta.chunk_coord_y = cy;
+            meta.active_tile_mask = 0;
+            for (i, offset) in neighbor_offsets.into_iter().enumerate() {
+                let neighbor = coord + offset;
+                meta.neighbor_slot_id[i] =
+                    slot_id_from_chunk_coord(neighbor, min_chunk, chunk_dims)
+                        .unwrap_or(INVALID_CHUNK_SLOT_ID);
+            }
+        }
+    }
+
+    let chunk_node_dim_i = MPM_CHUNK_NODE_DIM as i32;
+    let grid_layout = GpuGridLayout {
+        origin: IVec2::new(min_chunk.x * chunk_node_dim_i, min_chunk.y * chunk_node_dim_i),
+        dims: UVec2::new(
+            chunk_dims.x * MPM_CHUNK_NODE_DIM,
+            chunk_dims.y * MPM_CHUNK_NODE_DIM,
+        ),
+    };
+    let node_count = grid_layout.node_count();
+    let mut terrain_sdf = vec![TERRAIN_SDF_DISABLED_DISTANCE_M; node_count];
+    let mut terrain_normal = vec![[0.0_f32, 1.0_f32]; node_count];
+    for y in 0..grid_layout.dims.y {
+        for x in 0..grid_layout.dims.x {
+            let node = IVec2::new(grid_layout.origin.x + x as i32, grid_layout.origin.y + y as i32);
+            let world_pos = Vec2::new(node.x as f32 * CELL_SIZE_M, node.y as f32 * CELL_SIZE_M);
+            if let Some((sdf, normal)) = terrain.sample_signed_distance_and_normal(world_pos) {
+                let idx = (y as usize) * (grid_layout.dims.x as usize) + x as usize;
+                terrain_sdf[idx] = sdf;
+                let n = normal.normalize_or_zero();
+                terrain_normal[idx] = if n == Vec2::ZERO {
+                    [0.0, 1.0]
+                } else {
+                    [n.x, n.y]
+                };
+            }
+        }
+    }
+
+    Some(StaticChunkUploadBuild {
+        chunk_origin: min_chunk,
+        chunk_dims,
+        grid_layout,
+        chunk_meta,
+        terrain_sdf,
+        terrain_normal,
+    })
 }
 
 #[derive(Clone, Copy, Debug)]

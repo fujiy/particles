@@ -107,7 +107,7 @@
 
 ### [MPM-CHUNK-01] GPU chunk構造導入 + chunk SDF初期反映（静的residency, water_drop完遂）
 
-- Status: `Planned`
+- Status: `In Progress`
 - 背景:
   - `docs/chunks.md` 仕様に沿って、MPM計算領域を world-dense 前提から resident chunk slot 前提へ移行する。
   - 実装初段では検証容易性を優先し、CPU↔GPU の movers/residency差分更新を導入しない。
@@ -118,16 +118,20 @@
   - 起動時に resident chunk set を一度だけ構築し、実行中は固定（静的residency）とする。
   - CPUとのやりとりによる chunk buffer 更新（movers readback / diff upload）は本WUの対象外とする。
 - Subtasks:
-  - [ ] `ChunkMetaBuffer` / `ChunkSdfBuffer` / `neighbor_slot_id[8]` のGPUレイアウトを確定する。
-  - [ ] 起動時 one-shot の resident chunk 初期化（occupied + 3x3 halo）を実装する。
+  - [x] `ChunkMetaBuffer` / `ChunkSdfBuffer` / `neighbor_slot_id[8]` のGPUレイアウトを確定する。
+  - [x] 起動時 one-shot の resident chunk 初期化（occupied + halo）を実装する。
   - [ ] P2G/Grid/G2P の node 参照を chunk slot addressing 経路へ切替する。
-  - [ ] SDF/normal 参照を chunk SDF バッファ経路へ切替し、境界補正を成立させる。
-  - [ ] `water_drop` 用 autoverify を追加/更新し、`passed=true` を達成する。
-  - [ ] 検証artifactに `resident_chunk_count`, `invalid_slot_access_count`, `chunk_sdf_samples` を出力する。
+  - [x] SDF/normal 参照を chunk SDF バッファ経路へ切替し、境界補正を成立させる。
+  - [x] `water_drop` autoverify で `passed=true` を達成する。
+  - [x] 検証artifactに `resident_chunk_count`, `invalid_slot_access_count`, `chunk_sdf_samples` を出力する。
 - 完了条件:
   - CPUとの chunk 差分同期なしで `water_drop` が最後まで完走し、既存判定を満たす。
   - 実行中に invalid slot 参照が発生しない。
   - chunk SDF 経由の境界反映で侵入率が閾値内に収まる。
+- 進捗:
+  - 2026-03-07: GPU側に `chunk_meta_buf` を追加し、静的residencyの one-shot 構築（起動時 / 粒子再upload時）を導入。resident chunk bbox から `grid_origin/grid_dims` を再計算して MPM 実行領域を world-dense 固定から切替。
+  - 2026-03-07: 初期地形から chunk SDF/normal を one-shot 生成してGPU uploadする経路を実装。`grid_update` と統計passは同バッファを参照。
+  - 2026-03-07: autoverify report へ `resident_chunk_count`, `invalid_slot_access_count`, `chunk_sdf_samples` を追加。`configs/autoverify/water_drop_motion.json` 実行で `passed=true`, `invalid_slot_access_count=0` を確認。
 
 ### [MPM-CHUNK-02] movers抽出 + CPU residency更新 + chunk meta差分反映
 
@@ -233,3 +237,4 @@
 - chunk SDF の離散化仕様（node中心かcell中心か、normal再構成法、境界しきい値）を `design.md` へ固定する必要がある。
 - Render 側地形キャッシュ（Near/override）と MPM用 chunk SDF の更新順序を明文化し、同一フレーム整合を保証する必要がある。
 - mover率が高いケースの fallback 切替閾値（`mover_count` ベース）を事前に決める必要がある。
+- `chunks.md` 目標では `CHUNK_NODE_SIZE=32`（`NODE_SPACING_M=0.125`）を前提としているが、現実装の solver 格子は `h=0.25` のため `MPM-CHUNK-01` では `chunk_node_dim=16` を採用している。`MPM-CHUNK-02` 着手前に解像度移行方針（`h` 引き下げ時の安定条件と閾値再設定）を決める必要がある。

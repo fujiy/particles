@@ -13,7 +13,7 @@ use bevy::render::renderer::RenderContext;
 use std::mem::size_of;
 
 use super::buffers::{GPU_STATS_SCALAR_LANES, GpuStatisticsScalars};
-use super::gpu_resources::{MpmGpuBuffers, MpmGpuControl, MpmGpuRunRequest};
+use super::gpu_resources::{MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest};
 use super::pipeline::MpmComputePipelines;
 use super::readback::{GpuReadbackState, GpuStatisticsReadbackState};
 use super::sync::MpmStatisticsStatus;
@@ -93,13 +93,22 @@ impl Node for MpmComputeNode {
         let Some(run_req) = world.get_resource::<MpmGpuRunRequest>() else {
             return Ok(());
         };
+        let Some(params_req) = world.get_resource::<MpmGpuParamsRequest>() else {
+            return Ok(());
+        };
         let Some(control) = world.get_resource::<MpmGpuControl>() else {
             return Ok(());
         };
 
         let particle_count = buffers.particle_count;
         let particles_wgs = (particle_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
-        let node_count = buffers.layout.node_count() as u32;
+        let node_count = params_req
+            .params
+            .grid_width
+            .saturating_mul(params_req.params.grid_height);
+        if node_count == 0 {
+            return Ok(());
+        }
         let nodes_wgs = (node_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
         let has_particles = buffers.ready && particle_count > 0;
         let should_step = has_particles && run_req.enabled && run_req.substeps > 0;

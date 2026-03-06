@@ -107,8 +107,15 @@ struct MpmParams {
     stats_interaction_secondary_phase_id: u32,
     stats_penetration_epsilon_m: f32,
     stats_position_fp_scale: f32,
+    // Static chunk residency metadata.
+    chunk_origin_x: i32,
+    chunk_origin_y: i32,
+    chunk_dims_x: u32,
+    chunk_dims_y: u32,
+    resident_chunk_count: u32,
+    chunk_node_dim: u32,
     // padding
-    pad_a: vec3<u32>,
+    pad_a: u32,
 }
 
 const PHASE_WATER: u32 = 0u;

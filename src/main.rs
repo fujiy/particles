@@ -17,7 +17,8 @@ use particles::physics::gpu_mpm::phase::{
     mpm_phase_id_for_particle,
 };
 use particles::physics::gpu_mpm::sync::{
-    MpmReadbackSnapshot, MpmStatisticsSnapshot, MpmStatisticsStatus, apply_gpu_readback,
+    MpmChunkResidencyState, MpmReadbackSnapshot, MpmStatisticsSnapshot, MpmStatisticsStatus,
+    apply_gpu_readback,
 };
 use particles::physics::material::{
     DEFAULT_MATERIAL_PARAMS, ParticleMaterial, terrain_boundary_radius_m,
@@ -436,6 +437,9 @@ struct MpmAutoVerifyReport {
     gpu_count_sand_granular: u32,
     gpu_count_unknown: u32,
     gpu_max_speed_mps: f32,
+    resident_chunk_count: u32,
+    invalid_slot_access_count: u64,
+    chunk_sdf_samples: u32,
     failed_assertions: Vec<String>,
 }
 
@@ -692,6 +696,7 @@ fn run_mpm_autoverify(
     time: Res<Time>,
     replay_state: Res<ReplayState>,
     gpu_stats: Res<MpmStatisticsSnapshot>,
+    chunk_residency: Res<MpmChunkResidencyState>,
     readback_snapshot: Res<MpmReadbackSnapshot>,
     active_physics_params: Res<ActivePhysicsParams>,
     terrain_world: Res<TerrainWorld>,
@@ -831,6 +836,9 @@ fn run_mpm_autoverify(
                     gpu_count_sand_granular: gpu_stats.sand_granular,
                     gpu_count_unknown: gpu_stats.unknown,
                     gpu_max_speed_mps: gpu_stats.max_speed_mps,
+                    resident_chunk_count: chunk_residency.resident_chunk_count,
+                    invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
+                    chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
                     failed_assertions: Vec::new(),
                 };
                 write_report(&state.output_path, &report);
@@ -939,6 +947,9 @@ fn run_mpm_autoverify(
             gpu_count_sand_granular: gpu_stats.sand_granular,
             gpu_count_unknown: gpu_stats.unknown,
             gpu_max_speed_mps: gpu_stats.max_speed_mps,
+            resident_chunk_count: chunk_residency.resident_chunk_count,
+            invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
+            chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
             failed_assertions: Vec::new(),
         };
         write_report(&state.output_path, &report);
@@ -1093,6 +1104,9 @@ fn run_mpm_autoverify(
         gpu_count_sand_granular: gpu_stats.sand_granular,
         gpu_count_unknown: gpu_stats.unknown,
         gpu_max_speed_mps: gpu_stats.max_speed_mps,
+        resident_chunk_count: chunk_residency.resident_chunk_count,
+        invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
+        chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
         failed_assertions,
     };
     bevy::log::info!(

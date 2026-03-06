@@ -5,6 +5,38 @@
 use bevy::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
+pub const INVALID_CHUNK_SLOT_ID: u32 = u32::MAX;
+
+// ---------------------------------------------------------------------------
+// GPU-side chunk metadata (static residency for MPM-CHUNK-01)
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct GpuChunkMeta {
+    pub chunk_coord_x: i32,
+    pub chunk_coord_y: i32,
+    /// Moore neighborhood slot ids ordered as:
+    /// (-1,-1), (0,-1), (1,-1), (-1,0), (1,0), (-1,1), (0,1), (1,1)
+    pub neighbor_slot_id: [u32; 8],
+    pub active_tile_mask: u32,
+    pub _pad: u32,
+}
+
+impl Default for GpuChunkMeta {
+    fn default() -> Self {
+        Self {
+            chunk_coord_x: 0,
+            chunk_coord_y: 0,
+            neighbor_slot_id: [INVALID_CHUNK_SLOT_ID; 8],
+            active_tile_mask: 0,
+            _pad: 0,
+        }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<GpuChunkMeta>() == 48);
+
 // ---------------------------------------------------------------------------
 // GPU-side particle layout (matches mpm_types.wgsl::GpuParticle, 72 bytes)
 // Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) v_vol(4) phase_id(4) _pad(8) = 72
@@ -139,7 +171,17 @@ pub struct GpuMpmParams {
     pub stats_penetration_epsilon_m: f32,
     /// Statistics: fixed-point scale for position accumulations.
     pub stats_position_fp_scale: f32,
-    pub _pad: [u32; 7],
+    /// Static chunk residency layout origin in chunk coords.
+    pub chunk_origin_x: i32,
+    pub chunk_origin_y: i32,
+    /// Static chunk residency layout dimensions in chunks.
+    pub chunk_dims_x: u32,
+    pub chunk_dims_y: u32,
+    /// Active resident chunk count for diagnostics and bounds checks.
+    pub resident_chunk_count: u32,
+    /// Nodes per chunk axis on current solver grid.
+    pub chunk_node_dim: u32,
+    pub _pad_tail: [u32; 1],
 }
 
 const _: () = assert!(std::mem::size_of::<GpuMpmParams>() == 192);
@@ -259,7 +301,13 @@ impl Default for GpuMpmParams {
             stats_interaction_secondary_phase_id: 0,
             stats_penetration_epsilon_m: 1.0e-3,
             stats_position_fp_scale: 100.0,
-            _pad: [0; 7],
+            chunk_origin_x: 0,
+            chunk_origin_y: 0,
+            chunk_dims_x: 0,
+            chunk_dims_y: 0,
+            resident_chunk_count: 0,
+            chunk_node_dim: 0,
+            _pad_tail: [0; 1],
         }
     }
 }

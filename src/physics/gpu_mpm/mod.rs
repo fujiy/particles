@@ -52,7 +52,9 @@ impl ExtractResource for MpmGpuUploadRequest {
         Self {
             upload_particles: source.upload_particles_frame,
             upload_particles_frame: false,
+            upload_chunks: source.upload_chunks,
             upload_terrain: source.upload_terrain,
+            chunk_meta: source.chunk_meta.clone(),
             particles: source.particles.clone(),
             terrain_sdf: source.terrain_sdf.clone(),
             terrain_normal: source.terrain_normal.clone(),
@@ -66,7 +68,9 @@ impl Clone for MpmGpuUploadRequest {
         Self {
             upload_particles: self.upload_particles,
             upload_particles_frame: self.upload_particles_frame,
+            upload_chunks: self.upload_chunks,
             upload_terrain: self.upload_terrain,
+            chunk_meta: self.chunk_meta.clone(),
             particles: self.particles.clone(),
             terrain_sdf: self.terrain_sdf.clone(),
             terrain_normal: self.terrain_normal.clone(),
@@ -147,6 +151,12 @@ fn prepare_gpu_uploads(
     } else if buffers.particle_count > 0 {
         buffers.particle_count = params_req.params.particle_count;
         buffers.ready = buffers.particle_count > 0;
+    }
+
+    if upload.upload_chunks {
+        buffers.upload_chunks(&queue, &upload.chunk_meta);
+    } else {
+        buffers.active_chunk_count = params_req.params.resident_chunk_count;
     }
 
     if upload.upload_terrain && !upload.terrain_sdf.is_empty() && !upload.terrain_normal.is_empty()
@@ -304,6 +314,7 @@ impl Plugin for GpuMpmPlugin {
             .init_resource::<sync::MpmStatisticsStatus>()
             .add_message::<sync::GpuWorldEditRequest>()
             .init_resource::<sync::MpmReadbackSnapshot>()
+            .init_resource::<sync::MpmChunkResidencyState>()
             .init_resource::<sync::MpmStatisticsSnapshot>()
             .insert_resource(readback)
             .insert_resource(statistics_readback)
