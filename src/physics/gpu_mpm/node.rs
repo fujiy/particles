@@ -21,14 +21,22 @@ use super::sync::MpmStatisticsStatus;
 const WORKGROUP_SIZE: u32 = 64;
 static GPU_READBACK_FRAME_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
-static CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static P2G_PIPELINE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static GRID_UPDATE_PIPELINE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static G2P_PIPELINE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static STATS_CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static STATS_TOTAL_PIPELINE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static STATS_PHASE_PIPELINE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static STATS_MAX_SPEED_PIPELINE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static P2G_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static GRID_UPDATE_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static G2P_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static STATS_CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static STATS_TOTAL_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static STATS_PHASE_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static STATS_MAX_SPEED_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static STATS_PEN_TRACK_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static STATS_WATER_HIST_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
@@ -101,7 +109,8 @@ impl Node for MpmComputeNode {
         let device = render_context.render_device().clone();
 
         if should_step {
-            let Some(clear_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.clear_pipeline)
+            let Some(clear_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.clear_pipeline)
             else {
                 warn_missing_pipeline_once(
                     &CLEAR_PIPELINE_WARNED,
@@ -246,15 +255,17 @@ impl Node for MpmComputeNode {
                 &BindGroupEntries::sequential((buffers.stats_scalar_buf.as_entire_binding(),)),
             );
             {
-                let mut pass = render_context
-                    .command_encoder()
-                    .begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_stats_clear"),
-                        timestamp_writes: None,
-                    });
+                let mut pass =
+                    render_context
+                        .command_encoder()
+                        .begin_compute_pass(&ComputePassDescriptor {
+                            label: Some("mpm_stats_clear"),
+                            timestamp_writes: None,
+                        });
                 pass.set_pipeline(stats_clear_pipeline);
                 pass.set_bind_group(0, &stats_clear_bg, &[]);
-                let clear_wgs = ((GPU_STATS_SCALAR_LANES as u32) + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+                let clear_wgs =
+                    ((GPU_STATS_SCALAR_LANES as u32) + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
                 pass.dispatch_workgroups(clear_wgs.max(1), 1, 1);
             }
 
@@ -280,13 +291,12 @@ impl Node for MpmComputeNode {
                             buffers.stats_scalar_buf.as_entire_binding(),
                         )),
                     );
-                    let mut pass =
-                        render_context
-                            .command_encoder()
-                            .begin_compute_pass(&ComputePassDescriptor {
-                                label: Some("mpm_stats_total_particles"),
-                                timestamp_writes: None,
-                            });
+                    let mut pass = render_context.command_encoder().begin_compute_pass(
+                        &ComputePassDescriptor {
+                            label: Some("mpm_stats_total_particles"),
+                            timestamp_writes: None,
+                        },
+                    );
                     pass.set_pipeline(stats_total_pipeline);
                     pass.set_bind_group(0, &stats_total_bg, &[]);
                     pass.dispatch_workgroups(particles_wgs, 1, 1);
@@ -313,13 +323,12 @@ impl Node for MpmComputeNode {
                             buffers.stats_scalar_buf.as_entire_binding(),
                         )),
                     );
-                    let mut pass =
-                        render_context
-                            .command_encoder()
-                            .begin_compute_pass(&ComputePassDescriptor {
-                                label: Some("mpm_stats_phase_counts"),
-                                timestamp_writes: None,
-                            });
+                    let mut pass = render_context.command_encoder().begin_compute_pass(
+                        &ComputePassDescriptor {
+                            label: Some("mpm_stats_phase_counts"),
+                            timestamp_writes: None,
+                        },
+                    );
                     pass.set_pipeline(stats_phase_pipeline);
                     pass.set_bind_group(0, &stats_phase_bg, &[]);
                     pass.dispatch_workgroups(particles_wgs, 1, 1);
@@ -346,13 +355,12 @@ impl Node for MpmComputeNode {
                             buffers.stats_scalar_buf.as_entire_binding(),
                         )),
                     );
-                    let mut pass =
-                        render_context
-                            .command_encoder()
-                            .begin_compute_pass(&ComputePassDescriptor {
-                                label: Some("mpm_stats_max_speed"),
-                                timestamp_writes: None,
-                            });
+                    let mut pass = render_context.command_encoder().begin_compute_pass(
+                        &ComputePassDescriptor {
+                            label: Some("mpm_stats_max_speed"),
+                            timestamp_writes: None,
+                        },
+                    );
                     pass.set_pipeline(stats_max_speed_pipeline);
                     pass.set_bind_group(0, &stats_max_speed_bg, &[]);
                     pass.dispatch_workgroups(particles_wgs, 1, 1);
@@ -380,20 +388,20 @@ impl Node for MpmComputeNode {
                             buffers.stats_scalar_buf.as_entire_binding(),
                         )),
                     );
-                    let mut pass = render_context
-                        .command_encoder()
-                        .begin_compute_pass(&ComputePassDescriptor {
+                    let mut pass = render_context.command_encoder().begin_compute_pass(
+                        &ComputePassDescriptor {
                             label: Some("mpm_stats_penetration_tracking"),
                             timestamp_writes: None,
-                        });
+                        },
+                    );
                     pass.set_pipeline(stats_pen_track_pipeline);
                     pass.set_bind_group(0, &bg, &[]);
                     pass.dispatch_workgroups(particles_wgs, 1, 1);
                 }
 
                 if stats_status.water_surface_p95 {
-                    let Some(hist_pipeline) =
-                        pipeline_cache.get_compute_pipeline(pipelines.stats_water_surface_hist_pipeline)
+                    let Some(hist_pipeline) = pipeline_cache
+                        .get_compute_pipeline(pipelines.stats_water_surface_hist_pipeline)
                     else {
                         warn_missing_pipeline_once(
                             &STATS_WATER_HIST_PIPELINE_WARNED,
@@ -413,12 +421,12 @@ impl Node for MpmComputeNode {
                         )),
                     );
                     {
-                        let mut pass = render_context
-                            .command_encoder()
-                            .begin_compute_pass(&ComputePassDescriptor {
+                        let mut pass = render_context.command_encoder().begin_compute_pass(
+                            &ComputePassDescriptor {
                                 label: Some("mpm_stats_water_surface_hist"),
                                 timestamp_writes: None,
-                            });
+                            },
+                        );
                         pass.set_pipeline(hist_pipeline);
                         pass.set_bind_group(0, &hist_bg, &[]);
                         pass.dispatch_workgroups(particles_wgs, 1, 1);
@@ -443,12 +451,12 @@ impl Node for MpmComputeNode {
                             buffers.stats_scalar_buf.as_entire_binding(),
                         )),
                     );
-                    let mut pass = render_context
-                        .command_encoder()
-                        .begin_compute_pass(&ComputePassDescriptor {
+                    let mut pass = render_context.command_encoder().begin_compute_pass(
+                        &ComputePassDescriptor {
                             label: Some("mpm_stats_water_surface_finalize"),
                             timestamp_writes: None,
-                        });
+                        },
+                    );
                     pass.set_pipeline(final_pipeline);
                     pass.set_bind_group(0, &final_bg, &[]);
                     pass.dispatch_workgroups(1, 1, 1);
@@ -476,19 +484,19 @@ impl Node for MpmComputeNode {
                         )),
                     );
                     {
-                        let mut pass = render_context
-                            .command_encoder()
-                            .begin_compute_pass(&ComputePassDescriptor {
+                        let mut pass = render_context.command_encoder().begin_compute_pass(
+                            &ComputePassDescriptor {
                                 label: Some("mpm_stats_repose_bounds"),
                                 timestamp_writes: None,
-                            });
+                            },
+                        );
                         pass.set_pipeline(bounds_pipeline);
                         pass.set_bind_group(0, &bounds_bg, &[]);
                         pass.dispatch_workgroups(particles_wgs, 1, 1);
                     }
 
-                    let Some(final_pipeline) =
-                        pipeline_cache.get_compute_pipeline(pipelines.stats_repose_finalize_pipeline)
+                    let Some(final_pipeline) = pipeline_cache
+                        .get_compute_pipeline(pipelines.stats_repose_finalize_pipeline)
                     else {
                         warn_missing_pipeline_once(
                             &STATS_REPOSE_FINAL_PIPELINE_WARNED,
@@ -506,12 +514,12 @@ impl Node for MpmComputeNode {
                             buffers.stats_scalar_buf.as_entire_binding(),
                         )),
                     );
-                    let mut pass = render_context
-                        .command_encoder()
-                        .begin_compute_pass(&ComputePassDescriptor {
+                    let mut pass = render_context.command_encoder().begin_compute_pass(
+                        &ComputePassDescriptor {
                             label: Some("mpm_stats_repose_finalize"),
                             timestamp_writes: None,
-                        });
+                        },
+                    );
                     pass.set_pipeline(final_pipeline);
                     pass.set_bind_group(0, &final_bg, &[]);
                     pass.dispatch_workgroups(1, 1, 1);
@@ -538,12 +546,12 @@ impl Node for MpmComputeNode {
                         )),
                     );
                     {
-                        let mut pass = render_context
-                            .command_encoder()
-                            .begin_compute_pass(&ComputePassDescriptor {
+                        let mut pass = render_context.command_encoder().begin_compute_pass(
+                            &ComputePassDescriptor {
                                 label: Some("mpm_stats_interaction_clear_cells"),
                                 timestamp_writes: None,
-                            });
+                            },
+                        );
                         pass.set_pipeline(clear_pipeline);
                         pass.set_bind_group(0, &clear_bg, &[]);
                         pass.dispatch_workgroups(nodes_wgs, 1, 1);
@@ -571,12 +579,12 @@ impl Node for MpmComputeNode {
                         )),
                     );
                     {
-                        let mut pass = render_context
-                            .command_encoder()
-                            .begin_compute_pass(&ComputePassDescriptor {
+                        let mut pass = render_context.command_encoder().begin_compute_pass(
+                            &ComputePassDescriptor {
                                 label: Some("mpm_stats_interaction_mark_secondary"),
                                 timestamp_writes: None,
-                            });
+                            },
+                        );
                         pass.set_pipeline(mark_pipeline);
                         pass.set_bind_group(0, &mark_bg, &[]);
                         pass.dispatch_workgroups(particles_wgs, 1, 1);
@@ -604,12 +612,12 @@ impl Node for MpmComputeNode {
                         )),
                     );
                     {
-                        let mut pass = render_context
-                            .command_encoder()
-                            .begin_compute_pass(&ComputePassDescriptor {
+                        let mut pass = render_context.command_encoder().begin_compute_pass(
+                            &ComputePassDescriptor {
                                 label: Some("mpm_stats_interaction_primary_contact"),
                                 timestamp_writes: None,
-                            });
+                            },
+                        );
                         pass.set_pipeline(primary_pipeline);
                         pass.set_bind_group(0, &primary_bg, &[]);
                         pass.dispatch_workgroups(particles_wgs, 1, 1);
@@ -634,12 +642,12 @@ impl Node for MpmComputeNode {
                             buffers.stats_scalar_buf.as_entire_binding(),
                         )),
                     );
-                    let mut pass = render_context
-                        .command_encoder()
-                        .begin_compute_pass(&ComputePassDescriptor {
+                    let mut pass = render_context.command_encoder().begin_compute_pass(
+                        &ComputePassDescriptor {
                             label: Some("mpm_stats_interaction_finalize"),
                             timestamp_writes: None,
-                        });
+                        },
+                    );
                     pass.set_pipeline(final_pipeline);
                     pass.set_bind_group(0, &final_bg, &[]);
                     pass.dispatch_workgroups(1, 1, 1);
@@ -668,12 +676,12 @@ impl Node for MpmComputeNode {
                     )),
                 );
                 {
-                    let mut pass = render_context
-                        .command_encoder()
-                        .begin_compute_pass(&ComputePassDescriptor {
+                    let mut pass = render_context.command_encoder().begin_compute_pass(
+                        &ComputePassDescriptor {
                             label: Some("mpm_stats_grid_density"),
                             timestamp_writes: None,
-                        });
+                        },
+                    );
                     pass.set_pipeline(grid_pipeline);
                     pass.set_bind_group(0, &grid_bg, &[]);
                     pass.dispatch_workgroups(nodes_wgs, 1, 1);
@@ -695,12 +703,13 @@ impl Node for MpmComputeNode {
                     &pipelines.stats_grid_density_finalize_layout,
                     &BindGroupEntries::sequential((buffers.stats_scalar_buf.as_entire_binding(),)),
                 );
-                let mut pass = render_context
-                    .command_encoder()
-                    .begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_stats_grid_density_finalize"),
-                        timestamp_writes: None,
-                    });
+                let mut pass =
+                    render_context
+                        .command_encoder()
+                        .begin_compute_pass(&ComputePassDescriptor {
+                            label: Some("mpm_stats_grid_density_finalize"),
+                            timestamp_writes: None,
+                        });
                 pass.set_pipeline(final_pipeline);
                 pass.set_bind_group(0, &final_bg, &[]);
                 pass.dispatch_workgroups(1, 1, 1);

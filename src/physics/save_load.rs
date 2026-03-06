@@ -181,7 +181,12 @@ pub fn save_to_slot_with_particles(
 ) -> Result<PathBuf, String> {
     let slot = sanitize_slot_name(slot_name)?;
     let path = save_root_dir().join(format!("{slot}.json"));
-    save_to_path_with_particles(path.to_string_lossy().as_ref(), terrain, particles, sim_state)?;
+    save_to_path_with_particles(
+        path.to_string_lossy().as_ref(),
+        terrain,
+        particles,
+        sim_state,
+    )?;
     Ok(path)
 }
 
@@ -192,7 +197,8 @@ pub fn load_from_slot_with_particles(
 ) -> Result<(PathBuf, Vec<SnapshotParticle>), String> {
     let slot = sanitize_slot_name(slot_name)?;
     let path = save_root_dir().join(format!("{slot}.json"));
-    let particles = load_from_path_with_particles(path.to_string_lossy().as_ref(), terrain, sim_state)?;
+    let particles =
+        load_from_path_with_particles(path.to_string_lossy().as_ref(), terrain, sim_state)?;
     Ok((path, particles))
 }
 

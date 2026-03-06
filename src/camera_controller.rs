@@ -1,3 +1,4 @@
+use crate::params::ActiveCameraParams;
 use crate::physics::cell_to_world_center;
 use crate::physics::state::SimUpdateSet;
 use bevy::camera::ScalingMode;
@@ -5,20 +6,16 @@ use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-const CAMERA_VIEWPORT_HEIGHT_M: f32 = 14.0;
-const CAMERA_PAN_SPEED_MPS: f32 = 10.0;
-const CAMERA_ZOOM_SENSITIVITY: f32 = 0.06;
-const CAMERA_MIN_ZOOM: f32 = 0.1;
-const CAMERA_MAX_ZOOM: f32 = 1000.0;
-const CAMERA_START_CELL: IVec2 = IVec2::new(0, 8);
-const CAMERA_START_Z: f32 = 100.0;
-
 pub struct CameraControllerPlugin;
 
 impl Plugin for CameraControllerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_main_camera)
-            .add_systems(Update, control_main_camera.in_set(SimUpdateSet::Controls));
+        app.add_systems(Startup, setup_main_camera).add_systems(
+            Update,
+            (apply_camera_params, control_main_camera)
+                .chain()
+                .in_set(SimUpdateSet::Controls),
+        );
     }
 }
 
@@ -34,27 +31,53 @@ struct CameraController {
     viewport_height_m: f32,
 }
 
-fn setup_main_camera(mut commands: Commands) {
-    let start_xy = cell_to_world_center(CAMERA_START_CELL);
+fn setup_main_camera(mut commands: Commands, camera_params: Res<ActiveCameraParams>) {
+    let p = &camera_params.0;
+    let start_xy = cell_to_world_center(IVec2::new(p.start_cell_x, p.start_cell_y));
     commands.spawn((
         Camera2d,
         Projection::Orthographic(OrthographicProjection {
             scaling_mode: ScalingMode::FixedVertical {
-                viewport_height: CAMERA_VIEWPORT_HEIGHT_M,
+                viewport_height: p.viewport_height_m,
             },
             scale: 1.0,
             ..OrthographicProjection::default_2d()
         }),
-        Transform::from_xyz(start_xy.x, start_xy.y, CAMERA_START_Z),
+        Transform::from_xyz(start_xy.x, start_xy.y, p.start_z),
         MainCamera,
         CameraController {
-            pan_speed_mps: CAMERA_PAN_SPEED_MPS,
-            zoom_sensitivity: CAMERA_ZOOM_SENSITIVITY,
-            min_zoom: CAMERA_MIN_ZOOM,
-            max_zoom: CAMERA_MAX_ZOOM,
-            viewport_height_m: CAMERA_VIEWPORT_HEIGHT_M,
+            pan_speed_mps: p.pan_speed_mps,
+            zoom_sensitivity: p.zoom_sensitivity,
+            min_zoom: p.min_zoom,
+            max_zoom: p.max_zoom,
+            viewport_height_m: p.viewport_height_m,
         },
     ));
+}
+
+fn apply_camera_params(
+    camera_params: Res<ActiveCameraParams>,
+    mut cameras: Query<(&mut Projection, &mut CameraController), With<MainCamera>>,
+) {
+    if !camera_params.is_changed() {
+        return;
+    }
+    let p = &camera_params.0;
+    let min_zoom = p.min_zoom.min(p.max_zoom);
+    let max_zoom = p.max_zoom.max(p.min_zoom);
+    for (mut projection, mut controller) in &mut cameras {
+        controller.pan_speed_mps = p.pan_speed_mps;
+        controller.zoom_sensitivity = p.zoom_sensitivity;
+        controller.min_zoom = min_zoom;
+        controller.max_zoom = max_zoom;
+        controller.viewport_height_m = p.viewport_height_m;
+        if let Projection::Orthographic(orthographic) = projection.as_mut() {
+            orthographic.scaling_mode = ScalingMode::FixedVertical {
+                viewport_height: p.viewport_height_m,
+            };
+            orthographic.scale = orthographic.scale.clamp(min_zoom, max_zoom);
+        }
+    }
 }
 
 fn control_main_camera(

@@ -11,12 +11,11 @@ use super::material::{
     terrain_boundary_radius_m,
 };
 use super::save_load;
-use super::solver::params_defaults::DEFAULT_SOLVER_PARAMS;
-use super::world::terrain::{cell_to_world_center, world_to_cell};
 use super::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainWorld, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y,
     WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };
+use super::world::terrain::{cell_to_world_center, world_to_cell};
 
 pub const TEST_ARTIFACT_ROOT: &str = "artifacts/tests";
 pub const SCENARIO_ARTIFACT_PNG_ENV: &str = "PARTICLES_SCENARIO_ARTIFACT_PNG";
@@ -419,10 +418,7 @@ pub fn scenario_particles_for_spec(spec: &ScenarioSpec) -> Vec<save_load::Snapsh
     particles
 }
 
-fn append_spawn_particles(
-    out: &mut Vec<save_load::SnapshotParticle>,
-    spawn: &ParticleSpawnSpec,
-) {
+fn append_spawn_particles(out: &mut Vec<save_load::SnapshotParticle>, spawn: &ParticleSpawnSpec) {
     let cells = spawn.rect.cells();
     let count = particles_per_cell(spawn.material);
     let axis = particle_grid_axis(count);
@@ -542,6 +538,7 @@ pub fn count_solid_cells(terrain: &TerrainWorld) -> usize {
 pub fn evaluate_scenario_state_from_statistics(
     spec: &ScenarioSpec,
     step_count: usize,
+    fixed_dt: f32,
     baseline_particle_count: usize,
     baseline_solid_cell_count: usize,
     terrain: &TerrainWorld,
@@ -560,6 +557,7 @@ pub fn evaluate_scenario_state_from_statistics(
     let assertions = evaluate_assertions_from_statistics(
         spec,
         step_count,
+        fixed_dt,
         &metrics,
         terrain,
         baseline_particle_count,
@@ -573,6 +571,7 @@ pub fn evaluate_scenario_state_from_statistics(
 fn evaluate_assertions_from_statistics(
     spec: &ScenarioSpec,
     step_count: usize,
+    fixed_dt: f32,
     metrics: &ScenarioMetrics,
     terrain: &TerrainWorld,
     baseline_particle_count: usize,
@@ -630,8 +629,7 @@ fn evaluate_assertions_from_statistics(
     });
 
     if let Some(surface) = spec.water_surface_assertion {
-        let active_after_steps =
-            (surface.active_after_seconds / DEFAULT_SOLVER_PARAMS.fixed_dt).ceil() as usize;
+        let active_after_steps = active_after_steps(surface.active_after_seconds, fixed_dt);
         let active = step_count >= active_after_steps;
         let water_cell_count = initial_water_cell_count(spec).max(1);
         let basin_width = (surface.basin_max_x - surface.basin_min_x + 1).max(1) as usize;
@@ -653,8 +651,7 @@ fn evaluate_assertions_from_statistics(
     }
 
     if let Some(repose) = spec.granular_repose_assertion {
-        let active_after_steps =
-            (repose.active_after_seconds / DEFAULT_SOLVER_PARAMS.fixed_dt).ceil() as usize;
+        let active_after_steps = active_after_steps(repose.active_after_seconds, fixed_dt);
         let active = step_count >= active_after_steps;
         let angle_deg = stats.granular_repose_angle_deg;
         let base_span_cells = stats.granular_repose_base_span_cells;
@@ -687,8 +684,7 @@ fn evaluate_assertions_from_statistics(
     }
 
     if let Some(interaction) = spec.material_interaction_assertion {
-        let active_after_steps =
-            (interaction.active_after_seconds / DEFAULT_SOLVER_PARAMS.fixed_dt).ceil() as usize;
+        let active_after_steps = active_after_steps(interaction.active_after_seconds, fixed_dt);
         let active = step_count >= active_after_steps;
         let contact_ratio = stats.material_interaction_contact_ratio.unwrap_or(0.0);
         rows.push(ScenarioAssertionResult {
@@ -723,6 +719,11 @@ fn evaluate_assertions_from_statistics(
     }
 
     rows
+}
+
+fn active_after_steps(active_after_seconds: f32, fixed_dt: f32) -> usize {
+    let dt = fixed_dt.max(1.0e-5);
+    (active_after_seconds / dt).ceil() as usize
 }
 
 fn initial_water_cell_count(spec: &ScenarioSpec) -> usize {
@@ -1068,7 +1069,9 @@ fn terrain_material_label(material: TerrainMaterial) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_scenario_spec_to_terrain, default_scenario_spec_by_name, parse_toggle_value};
+    use super::{
+        apply_scenario_spec_to_terrain, default_scenario_spec_by_name, parse_toggle_value,
+    };
     use crate::physics::world::terrain::{TerrainCell, TerrainWorld};
     use bevy::prelude::IVec2;
 
@@ -1106,5 +1109,4 @@ mod tests {
             TerrainCell::Empty
         );
     }
-
 }

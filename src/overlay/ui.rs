@@ -1,26 +1,30 @@
 use bevy::prelude::*;
 
 use super::*;
+use crate::params::ActiveOverlayParams;
+use crate::params::overlay::OverlayColorParams;
 use crate::physics::gpu_mpm::gpu_resources::world_grid_layout;
 
-pub(super) fn setup_overlay_ui(mut commands: Commands) {
+pub(super) fn setup_overlay_ui(mut commands: Commands, overlay_params: Res<ActiveOverlayParams>) {
+    let colors = &overlay_params.0.colors;
+    let ui = &overlay_params.0.ui;
     commands
         .spawn((
             Button,
             Node {
                 position_type: PositionType::Absolute,
-                right: px(12.0),
-                bottom: px(TILE_BUTTON_BOTTOM_PX),
-                padding: UiRect::axes(px(10.0), px(6.0)),
+                right: px(ui.right_px),
+                bottom: px(ui.tile_button_bottom_px),
+                padding: UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px)),
                 ..default()
             },
-            BackgroundColor(BUTTON_BG_OFF),
+            BackgroundColor(colors.button_bg_off.to_color()),
             TileOverlayToggleButton,
         ))
         .with_children(|parent| {
             parent.spawn((
                 Text::new("Chunk Overlay: OFF"),
-                TextFont::from_font_size(14.0),
+                TextFont::from_font_size(ui.button_font_size_px),
                 TextColor(Color::WHITE),
                 TileOverlayToggleButtonLabel,
             ));
@@ -31,18 +35,18 @@ pub(super) fn setup_overlay_ui(mut commands: Commands) {
             Button,
             Node {
                 position_type: PositionType::Absolute,
-                right: px(12.0),
-                bottom: px(SDF_BUTTON_BOTTOM_PX),
-                padding: UiRect::axes(px(10.0), px(6.0)),
+                right: px(ui.right_px),
+                bottom: px(ui.sdf_button_bottom_px),
+                padding: UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px)),
                 ..default()
             },
-            BackgroundColor(BUTTON_BG_OFF),
+            BackgroundColor(colors.button_bg_off.to_color()),
             SdfOverlayToggleButton,
         ))
         .with_children(|parent| {
             parent.spawn((
                 Text::new("SDF Overlay: OFF"),
-                TextFont::from_font_size(14.0),
+                TextFont::from_font_size(ui.button_font_size_px),
                 TextColor(Color::WHITE),
                 SdfOverlayToggleButtonLabel,
             ));
@@ -53,18 +57,18 @@ pub(super) fn setup_overlay_ui(mut commands: Commands) {
             Button,
             Node {
                 position_type: PositionType::Absolute,
-                right: px(12.0),
-                bottom: px(PHYSICS_AREA_BUTTON_BOTTOM_PX),
-                padding: UiRect::axes(px(10.0), px(6.0)),
+                right: px(ui.right_px),
+                bottom: px(ui.physics_area_button_bottom_px),
+                padding: UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px)),
                 ..default()
             },
-            BackgroundColor(BUTTON_BG_OFF),
+            BackgroundColor(colors.button_bg_off.to_color()),
             PhysicsAreaOverlayToggleButton,
         ))
         .with_children(|parent| {
             parent.spawn((
                 Text::new("Physics Area Overlay: OFF"),
-                TextFont::from_font_size(14.0),
+                TextFont::from_font_size(ui.button_font_size_px),
                 TextColor(Color::WHITE),
                 PhysicsAreaOverlayToggleButtonLabel,
             ));
@@ -75,18 +79,18 @@ pub(super) fn setup_overlay_ui(mut commands: Commands) {
             Button,
             Node {
                 position_type: PositionType::Absolute,
-                right: px(12.0),
-                bottom: px(PARTICLE_BUTTON_BOTTOM_PX),
-                padding: UiRect::axes(px(10.0), px(6.0)),
+                right: px(ui.right_px),
+                bottom: px(ui.particle_button_bottom_px),
+                padding: UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px)),
                 ..default()
             },
-            BackgroundColor(BUTTON_BG_OFF),
+            BackgroundColor(colors.button_bg_off.to_color()),
             ParticleOverlayToggleButton,
         ))
         .with_children(|parent| {
             parent.spawn((
                 Text::new("Particle Overlay: OFF"),
-                TextFont::from_font_size(14.0),
+                TextFont::from_font_size(ui.button_font_size_px),
                 TextColor(Color::WHITE),
                 ParticleOverlayToggleButtonLabel,
             ));
@@ -94,16 +98,60 @@ pub(super) fn setup_overlay_ui(mut commands: Commands) {
 
     commands.spawn((
         Text::new(""),
-        TextFont::from_font_size(14.0),
+        TextFont::from_font_size(ui.info_font_size_px),
         TextColor(Color::srgba(0.96, 0.96, 0.98, 0.95)),
         Node {
             position_type: PositionType::Absolute,
-            left: px(12.0),
-            top: px(12.0),
+            left: px(ui.info_left_px),
+            top: px(ui.info_top_px),
             ..default()
         },
         OverlayInfoText,
     ));
+}
+
+pub(super) fn apply_overlay_ui_params(
+    overlay_params: Res<ActiveOverlayParams>,
+    mut tile_node: Single<&mut Node, With<TileOverlayToggleButton>>,
+    mut sdf_node: Single<&mut Node, With<SdfOverlayToggleButton>>,
+    mut physics_node: Single<&mut Node, With<PhysicsAreaOverlayToggleButton>>,
+    mut particle_node: Single<&mut Node, With<ParticleOverlayToggleButton>>,
+    mut info_node: Single<&mut Node, With<OverlayInfoText>>,
+    mut tile_font: Single<&mut TextFont, With<TileOverlayToggleButtonLabel>>,
+    mut sdf_font: Single<&mut TextFont, With<SdfOverlayToggleButtonLabel>>,
+    mut physics_font: Single<&mut TextFont, With<PhysicsAreaOverlayToggleButtonLabel>>,
+    mut particle_font: Single<&mut TextFont, With<ParticleOverlayToggleButtonLabel>>,
+    mut info_font: Single<&mut TextFont, With<OverlayInfoText>>,
+) {
+    if !overlay_params.is_changed() {
+        return;
+    }
+    let ui = &overlay_params.0.ui;
+
+    tile_node.right = px(ui.right_px);
+    tile_node.bottom = px(ui.tile_button_bottom_px);
+    tile_node.padding = UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px));
+
+    sdf_node.right = px(ui.right_px);
+    sdf_node.bottom = px(ui.sdf_button_bottom_px);
+    sdf_node.padding = UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px));
+
+    physics_node.right = px(ui.right_px);
+    physics_node.bottom = px(ui.physics_area_button_bottom_px);
+    physics_node.padding = UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px));
+
+    particle_node.right = px(ui.right_px);
+    particle_node.bottom = px(ui.particle_button_bottom_px);
+    particle_node.padding = UiRect::axes(px(ui.button_padding_x_px), px(ui.button_padding_y_px));
+
+    info_node.left = px(ui.info_left_px);
+    info_node.top = px(ui.info_top_px);
+
+    tile_font.font_size = ui.button_font_size_px;
+    sdf_font.font_size = ui.button_font_size_px;
+    physics_font.font_size = ui.button_font_size_px;
+    particle_font.font_size = ui.button_font_size_px;
+    info_font.font_size = ui.info_font_size_px;
 }
 
 pub(super) fn handle_particle_overlay_button(
@@ -111,19 +159,21 @@ pub(super) fn handle_particle_overlay_button(
         (&Interaction, &mut BackgroundColor),
         (Changed<Interaction>, With<ParticleOverlayToggleButton>),
     >,
+    overlay_params: Res<ActiveOverlayParams>,
     mut overlay_state: ResMut<ParticleOverlayState>,
 ) {
+    let colors = &overlay_params.0.colors;
     for (interaction, mut bg) in &mut interactions {
         match *interaction {
             Interaction::Pressed => {
                 overlay_state.enabled = !overlay_state.enabled;
-                *bg = BUTTON_BG_PRESS.into();
+                *bg = colors.button_bg_press.to_color().into();
             }
             Interaction::Hovered => {
-                *bg = BUTTON_BG_HOVER.into();
+                *bg = colors.button_bg_hover.to_color().into();
             }
             Interaction::None => {
-                *bg = toggle_button_bg(overlay_state.enabled);
+                *bg = toggle_button_bg(overlay_state.enabled, colors);
             }
         }
     }
@@ -134,19 +184,21 @@ pub(super) fn handle_tile_overlay_button(
         (&Interaction, &mut BackgroundColor),
         (Changed<Interaction>, With<TileOverlayToggleButton>),
     >,
+    overlay_params: Res<ActiveOverlayParams>,
     mut overlay_state: ResMut<TileOverlayState>,
 ) {
+    let colors = &overlay_params.0.colors;
     for (interaction, mut bg) in &mut interactions {
         match *interaction {
             Interaction::Pressed => {
                 overlay_state.enabled = !overlay_state.enabled;
-                *bg = BUTTON_BG_PRESS.into();
+                *bg = colors.button_bg_press.to_color().into();
             }
             Interaction::Hovered => {
-                *bg = BUTTON_BG_HOVER.into();
+                *bg = colors.button_bg_hover.to_color().into();
             }
             Interaction::None => {
-                *bg = toggle_button_bg(overlay_state.enabled);
+                *bg = toggle_button_bg(overlay_state.enabled, colors);
             }
         }
     }
@@ -157,19 +209,21 @@ pub(super) fn handle_physics_area_overlay_button(
         (&Interaction, &mut BackgroundColor),
         (Changed<Interaction>, With<PhysicsAreaOverlayToggleButton>),
     >,
+    overlay_params: Res<ActiveOverlayParams>,
     mut overlay_state: ResMut<PhysicsAreaOverlayState>,
 ) {
+    let colors = &overlay_params.0.colors;
     for (interaction, mut bg) in &mut interactions {
         match *interaction {
             Interaction::Pressed => {
                 overlay_state.enabled = !overlay_state.enabled;
-                *bg = BUTTON_BG_PRESS.into();
+                *bg = colors.button_bg_press.to_color().into();
             }
             Interaction::Hovered => {
-                *bg = BUTTON_BG_HOVER.into();
+                *bg = colors.button_bg_hover.to_color().into();
             }
             Interaction::None => {
-                *bg = toggle_button_bg(overlay_state.enabled);
+                *bg = toggle_button_bg(overlay_state.enabled, colors);
             }
         }
     }
@@ -180,19 +234,21 @@ pub(super) fn handle_sdf_overlay_button(
         (&Interaction, &mut BackgroundColor),
         (Changed<Interaction>, With<SdfOverlayToggleButton>),
     >,
+    overlay_params: Res<ActiveOverlayParams>,
     mut overlay_state: ResMut<SdfOverlayState>,
 ) {
+    let colors = &overlay_params.0.colors;
     for (interaction, mut bg) in &mut interactions {
         match *interaction {
             Interaction::Pressed => {
                 overlay_state.enabled = !overlay_state.enabled;
-                *bg = BUTTON_BG_PRESS.into();
+                *bg = colors.button_bg_press.to_color().into();
             }
             Interaction::Hovered => {
-                *bg = BUTTON_BG_HOVER.into();
+                *bg = colors.button_bg_hover.to_color().into();
             }
             Interaction::None => {
-                *bg = toggle_button_bg(overlay_state.enabled);
+                *bg = toggle_button_bg(overlay_state.enabled, colors);
             }
         }
     }
@@ -248,9 +304,7 @@ pub(super) fn update_physics_area_overlay_button_label(
     render_diagnostics: Res<TerrainRenderDiagnostics>,
     mut labels: Query<&mut Text, With<PhysicsAreaOverlayToggleButtonLabel>>,
 ) {
-    if !overlay_state.is_changed()
-        && !render_diagnostics.is_changed()
-    {
+    if !overlay_state.is_changed() && !render_diagnostics.is_changed() {
         return;
     }
 
@@ -338,10 +392,10 @@ pub(super) fn update_overlay_info_text(
         label.0 = lines.join("\n");
     }
 }
-fn toggle_button_bg(enabled: bool) -> BackgroundColor {
+fn toggle_button_bg(enabled: bool, colors: &OverlayColorParams) -> BackgroundColor {
     if enabled {
-        BUTTON_BG_ON.into()
+        colors.button_bg_on.to_color().into()
     } else {
-        BUTTON_BG_OFF.into()
+        colors.button_bg_off.to_color().into()
     }
 }

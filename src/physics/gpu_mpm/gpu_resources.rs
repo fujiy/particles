@@ -10,9 +10,7 @@ use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bytemuck::cast_slice;
 use std::mem::size_of;
 
-use super::buffers::{
-    GpuGridLayout, GpuGridNode, GpuMpmParams, GpuParticle, GpuStatisticsScalars,
-};
+use super::buffers::{GpuGridLayout, GpuGridNode, GpuMpmParams, GpuParticle, GpuStatisticsScalars};
 use crate::physics::world::constants::{
     CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };

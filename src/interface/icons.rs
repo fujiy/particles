@@ -3,6 +3,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use super::*;
+use crate::params::interface::{InterfaceIconPaletteParams, UiColor8};
 
 impl WorldToolIconSet {
     pub(super) fn icon_for(&self, tool: WorldTool) -> Handle<Image> {
@@ -20,39 +21,47 @@ impl WorldToolIconSet {
     }
 }
 
-pub(super) fn create_world_tool_icon_set(images: &mut Assets<Image>) -> WorldToolIconSet {
+pub(super) fn create_world_tool_icon_set(
+    images: &mut Assets<Image>,
+    icon_palette: &InterfaceIconPaletteParams,
+) -> WorldToolIconSet {
+    let water_palette = to_material_palette(icon_palette.water);
+    let stone_palette = to_material_palette(icon_palette.stone);
+    let sand_palette = to_material_palette(icon_palette.sand);
+    let soil_palette = to_material_palette(icon_palette.soil);
+
     let water_liquid = images.add(build_material_icon_image(
-        MATERIAL_PALETTE_WATER,
+        water_palette,
         &MATERIAL_PATTERN_LIQUID,
         0x4e23_1f91,
     ));
     let stone_solid = images.add(build_material_icon_image(
-        MATERIAL_PALETTE_STONE,
+        stone_palette,
         &MATERIAL_PATTERN_SOLID,
         0x8a52_d9b7,
     ));
     let stone_granular = images.add(build_material_icon_image(
-        MATERIAL_PALETTE_STONE,
+        stone_palette,
         &MATERIAL_PATTERN_GRANULAR,
         0x77bc_26f1,
     ));
     let soil_solid = images.add(build_material_icon_image(
-        MATERIAL_PALETTE_SOIL,
+        soil_palette,
         &MATERIAL_PATTERN_SOLID,
         0x68a2_1bd4,
     ));
     let soil_granular = images.add(build_material_icon_image(
-        MATERIAL_PALETTE_SOIL,
+        soil_palette,
         &MATERIAL_PATTERN_GRANULAR,
         0xb86a_c921,
     ));
     let sand_solid = images.add(build_material_icon_image(
-        MATERIAL_PALETTE_SAND,
+        sand_palette,
         &MATERIAL_PATTERN_SOLID,
         0x2f9a_43ce,
     ));
     let sand_granular = images.add(build_material_icon_image(
-        MATERIAL_PALETTE_SAND,
+        sand_palette,
         &MATERIAL_PATTERN_GRANULAR,
         0x9133_257e,
     ));
@@ -69,6 +78,10 @@ pub(super) fn create_world_tool_icon_set(images: &mut Assets<Image>) -> WorldToo
         break_icon,
         delete,
     }
+}
+
+fn to_material_palette(colors: [UiColor8; 4]) -> [[u8; 4]; 4] {
+    colors.map(UiColor8::as_rgba)
 }
 
 fn build_material_icon_image(

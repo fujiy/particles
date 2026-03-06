@@ -116,7 +116,10 @@ impl FromWorld for MpmComputePipelines {
         let p2g_layout = render_device.create_bind_group_layout("mpm_p2g_layout", &*p2g_entries);
         let p2g_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("mpm_p2g".into()),
-            layout: vec![BindGroupLayoutDescriptor::new("mpm_p2g_layout", &*p2g_entries)],
+            layout: vec![BindGroupLayoutDescriptor::new(
+                "mpm_p2g_layout",
+                &*p2g_entries,
+            )],
             push_constant_ranges: vec![],
             shader: shaders.p2g.clone(),
             shader_defs: vec![],
@@ -162,7 +165,10 @@ impl FromWorld for MpmComputePipelines {
         let g2p_layout = render_device.create_bind_group_layout("mpm_g2p_layout", &*g2p_entries);
         let g2p_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("mpm_g2p".into()),
-            layout: vec![BindGroupLayoutDescriptor::new("mpm_g2p_layout", &*g2p_entries)],
+            layout: vec![BindGroupLayoutDescriptor::new(
+                "mpm_g2p_layout",
+                &*g2p_entries,
+            )],
             push_constant_ranges: vec![],
             shader: shaders.g2p.clone(),
             shader_defs: vec![],
@@ -177,18 +183,19 @@ impl FromWorld for MpmComputePipelines {
         );
         let stats_clear_layout =
             render_device.create_bind_group_layout("mpm_stats_clear_layout", &*stats_clear_entries);
-        let stats_clear_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("mpm_stats_clear".into()),
-            layout: vec![BindGroupLayoutDescriptor::new(
-                "mpm_stats_clear_layout",
-                &*stats_clear_entries,
-            )],
-            push_constant_ranges: vec![],
-            shader: shaders.stats_clear.clone(),
-            shader_defs: vec![],
-            entry_point: Some("clear_stats_scalars".into()),
-            zero_initialize_workgroup_memory: false,
-        });
+        let stats_clear_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_clear".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_clear_layout",
+                    &*stats_clear_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_clear.clone(),
+                shader_defs: vec![],
+                entry_point: Some("clear_stats_scalars".into()),
+                zero_initialize_workgroup_memory: false,
+            });
 
         // Shared layout for particle-stat passes: 0=params, 1=particles(read), 2=stats_scalars(rw)
         let stats_particle_entries = BindGroupLayoutEntries::sequential(
@@ -199,35 +206,37 @@ impl FromWorld for MpmComputePipelines {
                 binding_types::storage_buffer_sized(false, None),
             ),
         );
-        let stats_total_layout =
-            render_device.create_bind_group_layout("mpm_stats_total_layout", &*stats_particle_entries);
-        let stats_total_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("mpm_stats_total_particles".into()),
-            layout: vec![BindGroupLayoutDescriptor::new(
-                "mpm_stats_total_layout",
-                &*stats_particle_entries,
-            )],
-            push_constant_ranges: vec![],
-            shader: shaders.stats_total_particles.clone(),
-            shader_defs: vec![],
-            entry_point: Some("count_total_particles".into()),
-            zero_initialize_workgroup_memory: false,
-        });
+        let stats_total_layout = render_device
+            .create_bind_group_layout("mpm_stats_total_layout", &*stats_particle_entries);
+        let stats_total_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_total_particles".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_total_layout",
+                    &*stats_particle_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_total_particles.clone(),
+                shader_defs: vec![],
+                entry_point: Some("count_total_particles".into()),
+                zero_initialize_workgroup_memory: false,
+            });
 
-        let stats_phase_layout =
-            render_device.create_bind_group_layout("mpm_stats_phase_layout", &*stats_particle_entries);
-        let stats_phase_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("mpm_stats_phase_counts".into()),
-            layout: vec![BindGroupLayoutDescriptor::new(
-                "mpm_stats_phase_layout",
-                &*stats_particle_entries,
-            )],
-            push_constant_ranges: vec![],
-            shader: shaders.stats_phase_counts.clone(),
-            shader_defs: vec![],
-            entry_point: Some("count_phase_particles".into()),
-            zero_initialize_workgroup_memory: false,
-        });
+        let stats_phase_layout = render_device
+            .create_bind_group_layout("mpm_stats_phase_layout", &*stats_particle_entries);
+        let stats_phase_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_stats_phase_counts".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_stats_phase_layout",
+                    &*stats_particle_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.stats_phase_counts.clone(),
+                shader_defs: vec![],
+                entry_point: Some("count_phase_particles".into()),
+                zero_initialize_workgroup_memory: false,
+            });
 
         let stats_max_speed_layout = render_device
             .create_bind_group_layout("mpm_stats_max_speed_layout", &*stats_particle_entries);
@@ -317,10 +326,8 @@ impl FromWorld for MpmComputePipelines {
                 zero_initialize_workgroup_memory: false,
             });
 
-        let stats_repose_bounds_layout = render_device.create_bind_group_layout(
-            "mpm_stats_repose_bounds_layout",
-            &*stats_particle_entries,
-        );
+        let stats_repose_bounds_layout = render_device
+            .create_bind_group_layout("mpm_stats_repose_bounds_layout", &*stats_particle_entries);
         let stats_repose_bounds_pipeline =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("mpm_stats_repose_bounds".into()),
@@ -335,10 +342,8 @@ impl FromWorld for MpmComputePipelines {
                 zero_initialize_workgroup_memory: false,
             });
 
-        let stats_repose_finalize_layout = render_device.create_bind_group_layout(
-            "mpm_stats_repose_finalize_layout",
-            &*stats_finalize_entries,
-        );
+        let stats_repose_finalize_layout = render_device
+            .create_bind_group_layout("mpm_stats_repose_finalize_layout", &*stats_finalize_entries);
         let stats_repose_finalize_pipeline =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("mpm_stats_repose_finalize".into()),

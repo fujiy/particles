@@ -77,6 +77,17 @@ pub struct CouplingParams {
     pub interface_normal_eps: f32,
 }
 
+/// 実行制御・検証向けのランタイム調整パラメータ
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuntimeTuningParams {
+    /// 境界速度補正で使う SDF 閾値（h倍率）. 許容: 0.0 – 4.0
+    pub boundary_velocity_sdf_threshold_h: f32,
+    /// 統計の侵入判定ε [m]. 許容: 1e-6 – 0.1
+    pub stats_penetration_epsilon_m: f32,
+    /// 1フレームの最大catch-up substeps. 許容: 1 – 64
+    pub max_substeps_per_frame: u32,
+}
+
 // ---------------------------------------------------------------------------
 // トップレベル Asset 型
 // ---------------------------------------------------------------------------
@@ -84,6 +95,8 @@ pub struct CouplingParams {
 /// GPU MPM 物性パラメータ。`assets/params/physics.ron` から読み込まれる。
 #[derive(Asset, TypePath, Debug, Clone, Serialize, Deserialize)]
 pub struct PhysicsParams {
+    /// 固定サブステップ dt [s]. 許容: 1e-5 – 1.0
+    pub fixed_dt: f32,
     /// 水の状態方程式 [Eq.7, physics.md]
     pub water: WaterEosParams,
     /// 変形勾配クランプ
@@ -100,11 +113,14 @@ pub struct PhysicsParams {
     pub granular_tensile_clamp: f32,
     /// 水-粉体連成パラメータ
     pub coupling: CouplingParams,
+    /// 実行制御・検証向けランタイム調整
+    pub runtime: RuntimeTuningParams,
 }
 
 impl Default for PhysicsParams {
     fn default() -> Self {
         Self {
+            fixed_dt: 1.0 / 240.0,
             water: WaterEosParams {
                 rho0: 1_000.0,
                 sound_speed_mps: 16.0,
@@ -143,6 +159,11 @@ impl Default for PhysicsParams {
                 interface_min_grad: 0.02,
                 interface_normal_eps: 1.0e-6,
             },
+            runtime: RuntimeTuningParams {
+                boundary_velocity_sdf_threshold_h: 0.5,
+                stats_penetration_epsilon_m: 1.0e-3,
+                max_substeps_per_frame: 8,
+            },
         }
     }
 }
@@ -159,6 +180,7 @@ impl PhysicsParams {
                 }
             };
         }
+        check!(self.fixed_dt, "fixed_dt", 1e-5, 1.0);
         check!(self.water.rho0, "water.rho0", 100.0, 10_000.0);
         check!(
             self.water.sound_speed_mps,
@@ -206,6 +228,24 @@ impl PhysicsParams {
             1e-9,
             1.0
         );
+        check!(
+            self.runtime.boundary_velocity_sdf_threshold_h,
+            "runtime.boundary_velocity_sdf_threshold_h",
+            0.0,
+            4.0
+        );
+        check!(
+            self.runtime.stats_penetration_epsilon_m,
+            "runtime.stats_penetration_epsilon_m",
+            1e-6,
+            0.1
+        );
+        if self.runtime.max_substeps_per_frame < 1 || self.runtime.max_substeps_per_frame > 64 {
+            return Err(format!(
+                "runtime.max_substeps_per_frame: {} は [1, 64] の範囲外",
+                self.runtime.max_substeps_per_frame
+            ));
+        }
         Ok(())
     }
 

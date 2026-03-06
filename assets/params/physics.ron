@@ -3,6 +3,9 @@
 //
 // 対応 Rust 型: particles::params::physics::PhysicsParams
 (
+    // 固定サブステップ dt [s]. 許容: 1e-5 – 1.0
+    fixed_dt: 0.004166667,
+
     // 水の状態方程式 [Eq.7, physics.md]
     water: (
         // 基準密度 ρ₀ [kg/m³]. 許容: 100.0 – 10000.0
@@ -78,5 +81,15 @@
         interface_min_grad: 0.001,
         // 界面法線正規化の分母ε. 許容: 1e-9 – 1.0
         interface_normal_eps: 0.5,
+    ),
+
+    // 実行制御・検証向けランタイム調整
+    runtime: (
+        // 境界速度補正で使う SDF 閾値（h倍率）. 許容: 0.0 – 4.0
+        boundary_velocity_sdf_threshold_h: 0.5,
+        // 統計の侵入判定ε [m]. 許容: 1e-6 – 0.1
+        stats_penetration_epsilon_m: 0.001,
+        // 1フレームの最大catch-up substeps. 許容: 1 – 64
+        max_substeps_per_frame: 8,
     ),
 )

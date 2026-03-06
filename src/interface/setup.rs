@@ -1,9 +1,17 @@
 use bevy::prelude::*;
 
 use super::*;
+use crate::params::ActiveInterfaceParams;
 
-pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let icon_set = create_world_tool_icon_set(&mut images);
+pub(super) fn setup_simulation_ui(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    interface_params: Res<ActiveInterfaceParams>,
+) {
+    let colors = &interface_params.0.colors;
+    let layout = &interface_params.0.layout;
+    let icon_palette = &interface_params.0.icon_palette;
+    let icon_set = create_world_tool_icon_set(&mut images, icon_palette);
     commands.insert_resource(icon_set.clone());
 
     commands
@@ -12,17 +20,20 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 position_type: PositionType::Absolute,
                 left: px(10.0),
                 top: px(10.0),
-                width: px(HUD_PANEL_WIDTH_PX),
+                width: px(layout.hud_panel_width_px),
                 padding: UiRect::axes(px(10.0), px(6.0)),
                 row_gap: px(6.0),
                 flex_direction: FlexDirection::Column,
                 ..default()
             },
-            BackgroundColor(HUD_BG_COLOR),
+            BackgroundColor(colors.hud_bg.to_color()),
         ))
         .with_children(|parent| {
             parent.spawn((
-                Text::new("FPS(1s avg/min): --/--"),
+                Text::new(format!(
+                    "FPS({:.1}s avg/min): --/--",
+                    interface_params.0.behavior.hud_fps_window_sec
+                )),
                 TextFont::from_font_size(14.0),
                 TextColor(Color::WHITE),
                 SimulationHudFpsText,
@@ -40,8 +51,8 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
     commands
         .spawn((Node {
             position_type: PositionType::Absolute,
-            left: px(SCALE_BAR_LEFT_PX),
-            bottom: px(SCALE_BAR_BOTTOM_PX),
+            left: px(layout.scale_bar_left_px),
+            bottom: px(layout.scale_bar_bottom_px),
             flex_direction: FlexDirection::Column,
             row_gap: px(6.0),
             ..default()
@@ -49,14 +60,14 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
         .with_children(|parent| {
             parent.spawn((
                 Text::new("10 m"),
-                TextFont::from_font_size(SCALE_BAR_LABEL_FONT_PX),
+                TextFont::from_font_size(layout.scale_bar_label_font_px),
                 TextColor(Color::srgba(0.94, 0.96, 0.99, 0.96)),
                 ScaleBarLabelText,
             ));
             parent.spawn((
                 Node {
-                    width: px(SCALE_BAR_TARGET_WIDTH_PX),
-                    height: px(SCALE_BAR_HEIGHT_PX),
+                    width: px(layout.scale_bar_target_width_px),
+                    height: px(layout.scale_bar_height_px),
                     ..default()
                 },
                 BackgroundColor(Color::srgba(0.94, 0.96, 0.99, 0.96)),
@@ -67,8 +78,8 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
     commands
         .spawn((Node {
             position_type: PositionType::Absolute,
-            right: px(SAVE_LOAD_BAR_RIGHT_PX),
-            top: px(SAVE_LOAD_BAR_TOP_PX),
+            right: px(layout.save_load_bar_right_px),
+            top: px(layout.save_load_bar_top_px),
             column_gap: px(8.0),
             ..default()
         },))
@@ -77,15 +88,15 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 .spawn((
                     Button,
                     Node {
-                        width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
-                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        width: px(layout.save_load_button_width_px),
+                        height: px(layout.save_load_button_height_px),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         border: UiRect::all(px(2.0)),
                         ..default()
                     },
-                    BackgroundColor(BUTTON_BG_OFF),
-                    BorderColor::all(BUTTON_BORDER_OFF),
+                    BackgroundColor(colors.button_bg_off.to_color()),
+                    BorderColor::all(colors.button_border_off.to_color()),
                     SimPlayPauseButton,
                 ))
                 .with_children(|button| {
@@ -101,15 +112,15 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 .spawn((
                     Button,
                     Node {
-                        width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
-                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        width: px(layout.save_load_button_width_px),
+                        height: px(layout.save_load_button_height_px),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         border: UiRect::all(px(2.0)),
                         ..default()
                     },
-                    BackgroundColor(BUTTON_BG_OFF),
-                    BorderColor::all(BUTTON_BORDER_OFF),
+                    BackgroundColor(colors.button_bg_off.to_color()),
+                    BorderColor::all(colors.button_border_off.to_color()),
                     SimStepButton,
                 ))
                 .with_children(|button| {
@@ -124,15 +135,15 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 .spawn((
                     Button,
                     Node {
-                        width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
-                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        width: px(layout.save_load_button_width_px),
+                        height: px(layout.save_load_button_height_px),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         border: UiRect::all(px(2.0)),
                         ..default()
                     },
-                    BackgroundColor(BUTTON_BG_OFF),
-                    BorderColor::all(BUTTON_BORDER_OFF),
+                    BackgroundColor(colors.button_bg_off.to_color()),
+                    BorderColor::all(colors.button_border_off.to_color()),
                     SaveLoadOpenButton {
                         mode: SaveLoadDialogMode::Save,
                     },
@@ -149,15 +160,15 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 .spawn((
                     Button,
                     Node {
-                        width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
-                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        width: px(layout.save_load_button_width_px),
+                        height: px(layout.save_load_button_height_px),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         border: UiRect::all(px(2.0)),
                         ..default()
                     },
-                    BackgroundColor(BUTTON_BG_OFF),
-                    BorderColor::all(BUTTON_BORDER_OFF),
+                    BackgroundColor(colors.button_bg_off.to_color()),
+                    BorderColor::all(colors.button_border_off.to_color()),
                     SaveLoadOpenButton {
                         mode: SaveLoadDialogMode::Load,
                     },
@@ -174,15 +185,15 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 .spawn((
                     Button,
                     Node {
-                        width: px(SAVE_LOAD_BUTTON_WIDTH_PX),
-                        height: px(SAVE_LOAD_BUTTON_HEIGHT_PX),
+                        width: px(layout.save_load_button_width_px),
+                        height: px(layout.save_load_button_height_px),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::Center,
                         border: UiRect::all(px(2.0)),
                         ..default()
                     },
-                    BackgroundColor(BUTTON_BG_OFF),
-                    BorderColor::all(BUTTON_BORDER_OFF),
+                    BackgroundColor(colors.button_bg_off.to_color()),
+                    BorderColor::all(colors.button_border_off.to_color()),
                     SaveLoadResetButton,
                 ))
                 .with_children(|button| {
@@ -198,16 +209,16 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                right: px(TEST_ASSERT_PANEL_RIGHT_PX),
-                top: px(TEST_ASSERT_PANEL_TOP_PX),
-                width: px(TEST_ASSERT_PANEL_WIDTH_PX),
+                right: px(layout.test_assert_panel_right_px),
+                top: px(layout.test_assert_panel_top_px),
+                width: px(layout.test_assert_panel_width_px),
                 display: Display::None,
                 padding: UiRect::all(px(8.0)),
                 row_gap: px(6.0),
                 flex_direction: FlexDirection::Column,
                 ..default()
             },
-            BackgroundColor(HUD_BG_COLOR),
+            BackgroundColor(colors.hud_bg.to_color()),
             TestAssertPanelRoot,
         ))
         .with_children(|panel| {
@@ -234,7 +245,7 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
             position_type: PositionType::Absolute,
             left: px(0.0),
             right: px(0.0),
-            bottom: px(TOOLBAR_BOTTOM_PX),
+            bottom: px(layout.toolbar_bottom_px),
             justify_content: JustifyContent::Center,
             ..default()
         },))
@@ -246,7 +257,7 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                         column_gap: px(8.0),
                         ..default()
                     },
-                    BackgroundColor(TOOLBAR_BG_COLOR),
+                    BackgroundColor(colors.toolbar_bg.to_color()),
                 ))
                 .with_children(|toolbar| {
                     for tool in WORLD_TOOLBAR_TOOLS {
@@ -254,15 +265,15 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                             .spawn((
                                 Button,
                                 Node {
-                                    width: px(TOOLBAR_BUTTON_SIZE_PX),
-                                    height: px(TOOLBAR_BUTTON_SIZE_PX),
+                                    width: px(layout.toolbar_button_size_px),
+                                    height: px(layout.toolbar_button_size_px),
                                     align_items: AlignItems::Center,
                                     justify_content: JustifyContent::Center,
                                     border: UiRect::all(px(2.0)),
                                     ..default()
                                 },
-                                BackgroundColor(BUTTON_BG_OFF),
-                                BorderColor::all(BUTTON_BORDER_OFF),
+                                BackgroundColor(colors.button_bg_off.to_color()),
+                                BorderColor::all(colors.button_border_off.to_color()),
                                 WorldToolButton { tool },
                             ))
                             .with_children(|button| {
@@ -289,8 +300,8 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 padding: UiRect::axes(px(8.0), px(4.0)),
                 ..default()
             },
-            BackgroundColor(TOOLTIP_BG_COLOR),
-            GlobalZIndex(TOOLTIP_GLOBAL_Z_INDEX),
+            BackgroundColor(colors.tooltip_bg.to_color()),
+            GlobalZIndex(layout.tooltip_global_z_index),
             WorldToolTooltip,
         ))
         .with_children(|parent| {
@@ -316,21 +327,21 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                 ..default()
             },
             BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.38)),
-            GlobalZIndex(TOOLTIP_GLOBAL_Z_INDEX - 1),
+            GlobalZIndex(layout.tooltip_global_z_index - 1),
             SaveLoadDialogRoot,
         ))
         .with_children(|parent| {
             parent
                 .spawn((
                     Node {
-                        width: px(DIALOG_WIDTH_PX),
+                        width: px(layout.dialog_width_px),
                         padding: UiRect::all(px(12.0)),
                         row_gap: px(8.0),
                         flex_direction: FlexDirection::Column,
                         ..default()
                     },
-                    BackgroundColor(DIALOG_BG_COLOR),
-                    BorderColor::all(BUTTON_BORDER_ON),
+                    BackgroundColor(colors.dialog_bg.to_color()),
+                    BorderColor::all(colors.button_border_on.to_color()),
                 ))
                 .with_children(|dialog| {
                     dialog.spawn((
@@ -349,15 +360,15 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                             Button,
                             Node {
                                 width: percent(100.0),
-                                height: px(DIALOG_NAME_INPUT_HEIGHT_PX),
+                                height: px(layout.dialog_name_input_height_px),
                                 align_items: AlignItems::Center,
                                 justify_content: JustifyContent::FlexStart,
                                 padding: UiRect::horizontal(px(8.0)),
                                 border: UiRect::all(px(2.0)),
                                 ..default()
                             },
-                            BackgroundColor(BUTTON_BG_OFF),
-                            BorderColor::all(BUTTON_BORDER_OFF),
+                            BackgroundColor(colors.button_bg_off.to_color()),
+                            BorderColor::all(colors.button_border_off.to_color()),
                             SaveLoadDialogNameInputButton,
                         ))
                         .with_children(|button| {
@@ -377,7 +388,7 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                     dialog
                         .spawn((
                             Node {
-                                max_height: px(DIALOG_SLOT_LIST_MAX_HEIGHT_PX),
+                                max_height: px(layout.dialog_slot_list_max_height_px),
                                 flex_direction: FlexDirection::Column,
                                 row_gap: px(4.0),
                                 overflow: Overflow::clip_y(),
@@ -404,8 +415,8 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                                         border: UiRect::all(px(2.0)),
                                         ..default()
                                     },
-                                    BackgroundColor(BUTTON_BG_OFF),
-                                    BorderColor::all(BUTTON_BORDER_OFF),
+                                    BackgroundColor(colors.button_bg_off.to_color()),
+                                    BorderColor::all(colors.button_border_off.to_color()),
                                     SaveLoadDialogCancelButton,
                                 ))
                                 .with_children(|button| {
@@ -426,8 +437,8 @@ pub(super) fn setup_simulation_ui(mut commands: Commands, mut images: ResMut<Ass
                                         border: UiRect::all(px(2.0)),
                                         ..default()
                                     },
-                                    BackgroundColor(BUTTON_BG_OFF),
-                                    BorderColor::all(BUTTON_BORDER_OFF),
+                                    BackgroundColor(colors.button_bg_off.to_color()),
+                                    BorderColor::all(colors.button_border_off.to_color()),
                                     SaveLoadDialogConfirmButton,
                                 ))
                                 .with_children(|button| {

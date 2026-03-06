@@ -9,6 +9,7 @@
 pub mod buffers;
 pub mod gpu_resources;
 pub mod node;
+pub mod phase;
 pub mod pipeline;
 pub mod readback;
 pub mod shaders;
@@ -311,10 +312,7 @@ impl Plugin for GpuMpmPlugin {
             )
             .add_systems(
                 Update,
-                (
-                    sync::apply_gpu_readback,
-                    sync::apply_statistics_readback,
-                )
+                (sync::apply_gpu_readback, sync::apply_statistics_readback)
                     .chain()
                     .in_set(SimUpdateSet::Rendering),
             )

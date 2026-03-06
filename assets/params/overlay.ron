@@ -1,0 +1,47 @@
+// Overlay UI / SDF 描画パラメータ
+// 実行中に編集してホットリロード可能。不正値は無視され直前の有効値を維持する。
+//
+// 対応 Rust 型: particles::params::overlay::OverlayParams
+(
+    colors: (
+        button_bg_off: (r: 0.17, g: 0.18, b: 0.22, a: 0.95),
+        button_bg_on: (r: 0.16, g: 0.30, b: 0.46, a: 0.95),
+        button_bg_hover: (r: 0.24, g: 0.25, b: 0.30, a: 0.98),
+        button_bg_press: (r: 0.38, g: 0.40, b: 0.48, a: 0.98),
+        grid_chunk_boundary: (r: 0.80, g: 0.86, b: 0.93, a: 0.22),
+        grid_cached_chunk: (r: 0.32, g: 0.86, b: 0.98, a: 0.62),
+        grid_modified_chunk: (r: 0.99, g: 0.43, b: 0.22, a: 0.95),
+        grid_terrain_updated: (r: 0.13, g: 0.85, b: 0.92, a: 1.00),
+        grid_particle_updated: (r: 0.76, g: 0.56, b: 0.98, a: 1.00),
+    ),
+
+    sdf: (
+        // SDF 等値線サンプル間隔 [セル倍率]. 許容: 0.1 – 8.0
+        step_cell_scale: 1.0,
+        // SDF 点描半径 [セル倍率]. 許容: 0.05 – 2.0
+        cell_radius_scale: 0.45,
+        // SDF 表示レンジ [セル倍率]. 許容: 0.5 – 30.0
+        range_cell_scale: 6.0,
+        // 地形内部塗り潰し Z. 許容: 0.0 – 2.0
+        negative_fill_z: 0.2,
+    ),
+
+    ui: (
+        // ボタン共通の右余白 [px]. 許容: 0.0 – 200.0
+        right_px: 12.0,
+        // 各トグルボタン下端 [px]. 許容: 0.0 – 400.0
+        tile_button_bottom_px: 88.0,
+        sdf_button_bottom_px: 126.0,
+        physics_area_button_bottom_px: 50.0,
+        particle_button_bottom_px: 12.0,
+        // ボタンパディング [px]. 許容: x:0.0–40.0, y:0.0–24.0
+        button_padding_x_px: 10.0,
+        button_padding_y_px: 6.0,
+        // ボタンラベルフォントサイズ [px]. 許容: 8.0 – 40.0
+        button_font_size_px: 14.0,
+        // 情報ラベル位置/フォント [px]
+        info_left_px: 12.0,
+        info_top_px: 12.0,
+        info_font_size_px: 14.0,
+    ),
+)

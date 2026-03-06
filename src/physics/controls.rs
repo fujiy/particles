@@ -4,16 +4,16 @@ use bevy::prelude::*;
 use crate::params::ActivePhysicsParams;
 use crate::physics::gpu_mpm::buffers::GpuParticle;
 use crate::physics::gpu_mpm::gpu_resources::{MpmGpuControl, MpmGpuUploadRequest};
+use crate::physics::gpu_mpm::phase::{
+    MPM_PHASE_ID_GRANULAR_SAND, MPM_PHASE_ID_GRANULAR_SOIL, MPM_PHASE_ID_WATER,
+    mpm_phase_id_for_particle,
+};
 use crate::physics::gpu_mpm::sync::MpmReadbackSnapshot;
 use crate::physics::material::{MaterialParams, ParticleMaterial, terrain_boundary_radius_m};
 use crate::physics::save_load;
 use crate::physics::scenario::{
     apply_scenario_spec_to_terrain, count_solid_cells, default_scenario_spec_by_name,
     write_scenario_artifacts_for_snapshot,
-};
-use crate::physics::solver::mpm_water::{
-    MPM_PHASE_ID_GRANULAR_SAND, MPM_PHASE_ID_GRANULAR_SOIL, MPM_PHASE_ID_WATER,
-    mpm_phase_id_for_particle,
 };
 use crate::physics::state::{
     LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest, ReplaySaveArtifactRequest,
@@ -183,7 +183,8 @@ pub(crate) fn handle_replay_requests(
         let snapshot_particles = match snapshot_particles_from_gpu_readback(&readback_snapshot) {
             Ok(snapshot_particles) => snapshot_particles,
             Err(error) => {
-                replay_state.status_message = format!("Failed to capture replay particles: {error}");
+                replay_state.status_message =
+                    format!("Failed to capture replay particles: {error}");
                 continue;
             }
         };
@@ -223,14 +224,15 @@ pub(crate) fn apply_sim_reset(
     if !has_default_world_request && replay_state.enabled {
         if let Some(name) = replay_state.scenario_name.clone() {
             if let Some(spec) = default_scenario_spec_by_name(&name) {
-                let snapshot_particles = match apply_scenario_spec_to_terrain(&spec, &mut terrain_world) {
-                    Ok(snapshot_particles) => snapshot_particles,
-                    Err(error) => {
-                        replay_state.status_message =
-                            format!("Replay reset failed for {}: {error}", spec.name);
-                        return;
-                    }
-                };
+                let snapshot_particles =
+                    match apply_scenario_spec_to_terrain(&spec, &mut terrain_world) {
+                        Ok(snapshot_particles) => snapshot_particles,
+                        Err(error) => {
+                            replay_state.status_message =
+                                format!("Replay reset failed for {}: {error}", spec.name);
+                            return;
+                        }
+                    };
                 let rho0 = active_params.0.water.rho0.max(1.0e-6);
                 gpu_upload.particles = gpu_particles_from_snapshot(&snapshot_particles, rho0);
                 gpu_upload.upload_particles = true;

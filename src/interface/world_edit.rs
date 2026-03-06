@@ -4,9 +4,8 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::*;
-use crate::physics::gpu_mpm::sync::{
-    GpuWorldEditCommand, GpuWorldEditRequest,
-};
+use crate::params::ActiveInterfaceParams;
+use crate::physics::gpu_mpm::sync::{GpuWorldEditCommand, GpuWorldEditRequest};
 use crate::physics::material::particles_per_cell;
 use crate::render::TerrainGeneratedChunkCache;
 
@@ -16,6 +15,7 @@ pub(super) fn handle_world_interactions(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
+    interface_params: Res<ActiveInterfaceParams>,
     material_params: Res<MaterialParams>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
@@ -27,6 +27,13 @@ pub(super) fn handle_world_interactions(
     mut generated_chunk_cache: ResMut<TerrainGeneratedChunkCache>,
     mut prefetched_tool: Local<Option<WorldTool>>,
 ) {
+    let step_m = (interface_params.0.behavior.tool_stroke_step_cell_scale * CELL_SIZE_M).max(1e-6);
+    let break_radius_m = (interface_params
+        .0
+        .behavior
+        .tool_break_brush_radius_cell_scale
+        * CELL_SIZE_M)
+        .max(1e-6);
     if save_load_ui_state.mode.is_some() {
         let selected_tool = interaction_state.selected_tool;
         finalize_stone_stroke(
@@ -118,7 +125,7 @@ pub(super) fn handle_world_interactions(
             );
             let mut spawn_cells = Vec::new();
             let mut last_cell = interaction_state.last_water_spawn_cell;
-            stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
+            stroke_cells(previous_world, cursor_world, step_m, |cell| {
                 if last_cell != Some(cell) {
                     spawn_cells.push(cell);
                     last_cell = Some(cell);
@@ -142,7 +149,7 @@ pub(super) fn handle_world_interactions(
             interaction_state.stone_stroke.active = false;
             interaction_state.stone_stroke.generated_cells.clear();
             interaction_state.stone_stroke.candidate_cells.clear();
-            stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
+            stroke_cells(previous_world, cursor_world, step_m, |cell| {
                 let chunk = IVec2::new(
                     cell.x.div_euclid(CHUNK_SIZE_I32),
                     cell.y.div_euclid(CHUNK_SIZE_I32),
@@ -166,7 +173,7 @@ pub(super) fn handle_world_interactions(
             if let Some(material) = tool.material() {
                 let mut spawn_cells = Vec::new();
                 let mut last_cell = interaction_state.last_granular_spawn_cell;
-                stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
+                stroke_cells(previous_world, cursor_world, step_m, |cell| {
                     if last_cell != Some(cell) {
                         spawn_cells.push(cell);
                         last_cell = Some(cell);
@@ -194,7 +201,7 @@ pub(super) fn handle_world_interactions(
             );
             let mut delete_cells = HashSet::new();
             let mut removed_terrain_cells = HashSet::new();
-            stroke_cells(previous_world, cursor_world, TOOL_STROKE_STEP_M, |cell| {
+            stroke_cells(previous_world, cursor_world, step_m, |cell| {
                 delete_cells.insert(cell);
                 let chunk = IVec2::new(
                     cell.x.div_euclid(CHUNK_SIZE_I32),
@@ -230,12 +237,12 @@ pub(super) fn handle_world_interactions(
                 &mut gpu_world_edit_requests,
             );
             let mut removed_terrain_cells = HashSet::new();
-            stroke_points(previous_world, cursor_world, TOOL_STROKE_STEP_M, |point| {
+            stroke_points(previous_world, cursor_world, step_m, |point| {
                 removed_terrain_cells.extend(break_terrain_solids_in_radius(
                     &mut terrain_world,
                     &mut generated_chunk_cache,
                     point,
-                    TOOL_BREAK_BRUSH_RADIUS_M,
+                    break_radius_m,
                 ));
             });
             terrain_changed |= !removed_terrain_cells.is_empty();
@@ -272,6 +279,7 @@ pub(super) fn draw_world_tool_hover_highlight(
     mut gizmos: Gizmos,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
+    interface_params: Res<ActiveInterfaceParams>,
     interaction_state: Res<WorldInteractionState>,
     save_load_ui_state: Res<SaveLoadUiState>,
 ) {
@@ -293,10 +301,11 @@ pub(super) fn draw_world_tool_hover_highlight(
     let half = CELL_SIZE_M * 0.5;
     let min = center - Vec2::splat(half);
     let max = center + Vec2::splat(half);
+    let colors = &interface_params.0.colors;
     let color = match tool {
-        WorldTool::Delete => TOOL_HOVER_HIGHLIGHT_DELETE_COLOR,
-        WorldTool::Break => TOOL_HOVER_HIGHLIGHT_BREAK_COLOR,
-        _ => TOOL_HOVER_HIGHLIGHT_TERRAIN_COLOR,
+        WorldTool::Delete => colors.hover_highlight_delete.to_color(),
+        WorldTool::Break => colors.hover_highlight_break.to_color(),
+        _ => colors.hover_highlight_terrain.to_color(),
     };
     gizmos.line_2d(Vec2::new(min.x, min.y), Vec2::new(max.x, min.y), color);
     gizmos.line_2d(Vec2::new(max.x, min.y), Vec2::new(max.x, max.y), color);

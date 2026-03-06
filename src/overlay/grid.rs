@@ -4,7 +4,9 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
 use super::*;
+use crate::params::ActiveOverlayParams;
 use crate::physics::gpu_mpm::gpu_resources::world_grid_layout;
+use crate::physics::world::terrain::CELL_SIZE_M;
 
 #[derive(Component)]
 pub(super) struct SdfOverlayNegativeFillCell;
@@ -12,6 +14,7 @@ pub(super) struct SdfOverlayNegativeFillCell;
 pub(super) fn draw_tile_overlay(
     mut gizmos: Gizmos,
     overlay_state: Res<TileOverlayState>,
+    overlay_params: Res<ActiveOverlayParams>,
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_query: Query<(&Camera, &GlobalTransform), With<Camera2d>>,
     terrain_world: Res<TerrainWorld>,
@@ -47,19 +50,20 @@ pub(super) fn draw_tile_overlay(
         }
     }
 
+    let colors = &overlay_params.0.colors;
     for &chunk in &visible_chunks {
-        draw_chunk_outline(&mut gizmos, chunk, GRID_CHUNK_BOUNDARY_COLOR);
+        draw_chunk_outline(&mut gizmos, chunk, colors.grid_chunk_boundary.to_color());
     }
 
     for chunk in generated_chunk_cache.cached_chunk_coords() {
         if visible_chunks.contains(&chunk) {
-            draw_chunk_outline(&mut gizmos, chunk, GRID_CACHED_CHUNK_COLOR);
+            draw_chunk_outline(&mut gizmos, chunk, colors.grid_cached_chunk.to_color());
         }
     }
 
     for chunk in terrain_world.override_chunk_coords() {
         if visible_chunks.contains(&chunk) {
-            draw_chunk_outline(&mut gizmos, chunk, GRID_MODIFIED_CHUNK_COLOR);
+            draw_chunk_outline(&mut gizmos, chunk, colors.grid_modified_chunk.to_color());
         }
     }
 }
@@ -85,10 +89,12 @@ pub(super) fn draw_sdf_overlay(
     mut commands: Commands,
     mut gizmos: Gizmos,
     overlay_state: Res<SdfOverlayState>,
+    overlay_params: Res<ActiveOverlayParams>,
     terrain_world: Res<TerrainWorld>,
     negative_fill_cells: Query<Entity, With<SdfOverlayNegativeFillCell>>,
 ) {
-    let needs_rebuild = overlay_state.is_changed() || terrain_world.is_changed();
+    let needs_rebuild =
+        overlay_state.is_changed() || terrain_world.is_changed() || overlay_params.is_changed();
 
     if !overlay_state.enabled {
         for entity in &negative_fill_cells {
@@ -109,7 +115,11 @@ pub(super) fn draw_sdf_overlay(
         }
     }
 
-    let step = TERRAIN_SDF_OVERLAY_STEP_M.max(1e-3);
+    let sdf_params = &overlay_params.0.sdf;
+    let step = (sdf_params.step_cell_scale * CELL_SIZE_M).max(1e-3);
+    let radius_m = (sdf_params.cell_radius_scale * CELL_SIZE_M).max(1e-4);
+    let range_m = (sdf_params.range_cell_scale * CELL_SIZE_M).max(1e-4);
+    let negative_fill_z = sdf_params.negative_fill_z;
     let x0 = (world_min.x / step).floor() as i32;
     let x1 = (world_max.x / step).ceil() as i32;
     let y0 = (world_min.y / step).floor() as i32;
@@ -123,27 +133,21 @@ pub(super) fn draw_sdf_overlay(
             };
             if sdf <= 0.0 {
                 if needs_rebuild {
-                    let color = sdf_overlay_negative_fill_color(sdf);
+                    let color = sdf_overlay_negative_fill_color(sdf, range_m);
                     if color.to_srgba().alpha > 1e-3 {
                         commands.spawn((
                             Sprite::from_color(color, Vec2::splat(step * 0.98)),
-                            Transform::from_xyz(
-                                center.x,
-                                center.y,
-                                TERRAIN_SDF_OVERLAY_NEGATIVE_FILL_Z,
-                            ),
+                            Transform::from_xyz(center.x, center.y, negative_fill_z),
                             SdfOverlayNegativeFillCell,
                         ));
                     }
                 }
             } else {
-                let color = sdf_overlay_cell_color(sdf);
+                let color = sdf_overlay_cell_color(sdf, range_m);
                 if color.to_srgba().alpha <= 1e-3 {
                     continue;
                 }
-                gizmos
-                    .circle_2d(center, TERRAIN_SDF_OVERLAY_CELL_RADIUS_M, color)
-                    .resolution(4);
+                gizmos.circle_2d(center, radius_m, color).resolution(4);
             }
         }
     }
@@ -152,23 +156,25 @@ pub(super) fn draw_sdf_overlay(
 pub(super) fn draw_physics_area_overlay(
     mut gizmos: Gizmos,
     overlay_state: Res<PhysicsAreaOverlayState>,
+    overlay_params: Res<ActiveOverlayParams>,
     render_diagnostics: Res<TerrainRenderDiagnostics>,
 ) {
     if !overlay_state.enabled {
         return;
     }
+    let colors = &overlay_params.0.colors;
 
     for &chunk in render_diagnostics
         .terrain_updated_chunk_highlight_frames
         .keys()
     {
-        draw_chunk_outline(&mut gizmos, chunk, GRID_TERRAIN_UPDATED_COLOR);
+        draw_chunk_outline(&mut gizmos, chunk, colors.grid_terrain_updated.to_color());
     }
     for &chunk in render_diagnostics
         .particle_updated_chunk_highlight_frames
         .keys()
     {
-        draw_chunk_outline(&mut gizmos, chunk, GRID_PARTICLE_UPDATED_COLOR);
+        draw_chunk_outline(&mut gizmos, chunk, colors.grid_particle_updated.to_color());
     }
 
     draw_gpu_grid_overlay(&mut gizmos, None);
@@ -241,9 +247,7 @@ fn clipped_rect(min: Vec2, max: Vec2, clip_rect: Option<(Vec2, Vec2)>) -> Option
     }
 }
 
-fn sdf_overlay_world_bounds(
-    terrain_world: &TerrainWorld,
-) -> Option<(Vec2, Vec2)> {
+fn sdf_overlay_world_bounds(terrain_world: &TerrainWorld) -> Option<(Vec2, Vec2)> {
     let positions = terrain_world.static_particle_positions();
     if positions.is_empty() {
         return None;
@@ -258,8 +262,8 @@ fn sdf_overlay_world_bounds(
     Some((min - margin, max + margin))
 }
 
-fn sdf_overlay_cell_color(sdf: f32) -> Color {
-    let range = TERRAIN_SDF_OVERLAY_RANGE_M.max(1e-4);
+fn sdf_overlay_cell_color(sdf: f32, range_m: f32) -> Color {
+    let range = range_m.max(1e-4);
     let signed = (sdf / range).clamp(-1.0, 1.0);
     if signed >= 1.0 {
         return Color::srgba(0.0, 0.0, 0.0, 0.0);
@@ -268,8 +272,8 @@ fn sdf_overlay_cell_color(sdf: f32) -> Color {
     Color::srgba(0.10, 0.72, 0.95, 0.06 + 0.24 * near)
 }
 
-fn sdf_overlay_negative_fill_color(sdf: f32) -> Color {
-    let range = TERRAIN_SDF_OVERLAY_RANGE_M.max(1e-4);
+fn sdf_overlay_negative_fill_color(sdf: f32, range_m: f32) -> Color {
+    let range = range_m.max(1e-4);
     let depth = (-sdf / range).clamp(0.0, 1.0);
     Color::srgba(
         0.92,

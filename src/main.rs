@@ -9,26 +9,25 @@ use particles::interface::InterfacePlugin;
 use particles::overlay::{OverlayPlugin, OverlayVisibilityOverrides};
 use particles::params::{ActivePhysicsParams, ParamsPlugin};
 use particles::physics::PhysicsPlugin;
-use particles::physics::gpu_mpm::buffers::GpuParticle;
 use particles::physics::gpu_mpm::GpuMpmPlugin;
+use particles::physics::gpu_mpm::buffers::GpuParticle;
 use particles::physics::gpu_mpm::gpu_resources::{MpmGpuControl, MpmGpuUploadRequest};
-use particles::physics::gpu_mpm::sync::{
-    MpmReadbackSnapshot, MpmStatisticsSnapshot, MpmStatisticsStatus, apply_gpu_readback,
-};
-use particles::physics::material::{DEFAULT_MATERIAL_PARAMS, ParticleMaterial, terrain_boundary_radius_m};
-use particles::physics::save_load;
-use particles::physics::scenario::{
-    ScenarioStatisticsInput, default_scenario_spec_by_name,
-    evaluate_scenario_state_from_statistics,
-};
-use particles::physics::solver::mpm_water::{
+use particles::physics::gpu_mpm::phase::{
     MPM_PHASE_ID_GRANULAR_SAND, MPM_PHASE_ID_GRANULAR_SOIL, MPM_PHASE_ID_WATER,
     mpm_phase_id_for_particle,
 };
-use particles::physics::state::{ReplayLoadScenarioRequest, ReplayState, SimulationState};
-use particles::physics::world::terrain::{
-    TerrainCell, TerrainMaterial, TerrainWorld,
+use particles::physics::gpu_mpm::sync::{
+    MpmReadbackSnapshot, MpmStatisticsSnapshot, MpmStatisticsStatus, apply_gpu_readback,
 };
+use particles::physics::material::{
+    DEFAULT_MATERIAL_PARAMS, ParticleMaterial, terrain_boundary_radius_m,
+};
+use particles::physics::save_load;
+use particles::physics::scenario::{
+    ScenarioStatisticsInput, default_scenario_spec_by_name, evaluate_scenario_state_from_statistics,
+};
+use particles::physics::state::{ReplayLoadScenarioRequest, ReplayState, SimulationState};
+use particles::physics::world::terrain::{TerrainCell, TerrainMaterial, TerrainWorld};
 use particles::render::{TerrainGpuPlugin, TerrainRenderDiagnostics, WaterDotGpuPlugin};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -561,7 +560,6 @@ fn collect_granular_elastic_diagnostics(
     }
 }
 
-
 fn env_bool(key: &str) -> bool {
     std::env::var(key)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -992,6 +990,7 @@ fn run_mpm_autoverify(
         let (_metrics, assertions) = evaluate_scenario_state_from_statistics(
             &spec,
             replay_state.current_step,
+            active_physics_params.0.fixed_dt,
             replay_state.baseline_particle_count,
             replay_state.baseline_solid_cell_count,
             &terrain_world,
@@ -1167,7 +1166,8 @@ fn apply_terrain_autoverify_ops(
             .iter()
             .filter_map(|particle| {
                 let phase_id = mpm_phase_id_for_particle(particle.material)?;
-                let mass = particles::physics::material::particle_properties(particle.material).mass;
+                let mass =
+                    particles::physics::material::particle_properties(particle.material).mass;
                 Some(GpuParticle::from_cpu(
                     particle.position,
                     particle.velocity,

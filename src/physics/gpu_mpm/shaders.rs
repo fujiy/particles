@@ -39,37 +39,27 @@ impl FromWorld for MpmShaders {
             stats_total_particles: asset_server.load("shaders/stats/total_particles.wgsl"),
             stats_phase_counts: asset_server.load("shaders/stats/phase_counts.wgsl"),
             stats_max_speed: asset_server.load("shaders/stats/max_speed.wgsl"),
-            stats_penetration_tracking: asset_server.load(
-                "shaders/stats/penetration_tracking.wgsl",
-            ),
-            stats_water_surface_histogram: asset_server.load(
-                "shaders/stats/water_surface_histogram.wgsl",
-            ),
-            stats_water_surface_finalize: asset_server.load(
-                "shaders/stats/water_surface_finalize.wgsl",
-            ),
-            stats_granular_repose_bounds: asset_server.load(
-                "shaders/stats/granular_repose_bounds.wgsl",
-            ),
-            stats_granular_repose_finalize: asset_server.load(
-                "shaders/stats/granular_repose_finalize.wgsl",
-            ),
-            stats_interaction_clear_cells: asset_server.load(
-                "shaders/stats/interaction_clear_cells.wgsl",
-            ),
-            stats_interaction_mark_secondary: asset_server.load(
-                "shaders/stats/interaction_mark_secondary.wgsl",
-            ),
-            stats_interaction_primary_contact: asset_server.load(
-                "shaders/stats/interaction_primary_contact.wgsl",
-            ),
-            stats_interaction_finalize: asset_server.load(
-                "shaders/stats/interaction_finalize.wgsl",
-            ),
+            stats_penetration_tracking: asset_server
+                .load("shaders/stats/penetration_tracking.wgsl"),
+            stats_water_surface_histogram: asset_server
+                .load("shaders/stats/water_surface_histogram.wgsl"),
+            stats_water_surface_finalize: asset_server
+                .load("shaders/stats/water_surface_finalize.wgsl"),
+            stats_granular_repose_bounds: asset_server
+                .load("shaders/stats/granular_repose_bounds.wgsl"),
+            stats_granular_repose_finalize: asset_server
+                .load("shaders/stats/granular_repose_finalize.wgsl"),
+            stats_interaction_clear_cells: asset_server
+                .load("shaders/stats/interaction_clear_cells.wgsl"),
+            stats_interaction_mark_secondary: asset_server
+                .load("shaders/stats/interaction_mark_secondary.wgsl"),
+            stats_interaction_primary_contact: asset_server
+                .load("shaders/stats/interaction_primary_contact.wgsl"),
+            stats_interaction_finalize: asset_server
+                .load("shaders/stats/interaction_finalize.wgsl"),
             stats_grid_density: asset_server.load("shaders/stats/grid_density.wgsl"),
-            stats_grid_density_finalize: asset_server.load(
-                "shaders/stats/grid_density_finalize.wgsl",
-            ),
+            stats_grid_density_finalize: asset_server
+                .load("shaders/stats/grid_density_finalize.wgsl"),
         }
     }
 }

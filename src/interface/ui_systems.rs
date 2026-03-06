@@ -3,6 +3,8 @@ use bevy::window::PrimaryWindow;
 
 use super::*;
 use crate::camera_controller::MainCamera;
+use crate::params::ActiveInterfaceParams;
+use crate::params::ActivePhysicsParams;
 use crate::physics::gpu_mpm::sync::{MpmStatisticsSnapshot, MpmStatisticsStatus};
 use crate::physics::material::ParticleMaterial;
 use crate::physics::scenario::{ScenarioStatisticsInput, evaluate_scenario_state_from_statistics};
@@ -18,6 +20,7 @@ fn phase_id_for_material(material: ParticleMaterial) -> Option<u32> {
 
 pub(super) fn update_world_tool_button_visuals(
     interaction_state: Res<WorldInteractionState>,
+    interface_params: Res<ActiveInterfaceParams>,
     mut buttons: Query<(
         &Interaction,
         &WorldToolButton,
@@ -25,17 +28,18 @@ pub(super) fn update_world_tool_button_visuals(
         &mut BorderColor,
     )>,
 ) {
+    let colors = &interface_params.0.colors;
     for (interaction, button, mut bg, mut border_color) in &mut buttons {
         let selected = interaction_state.selected_tool == Some(button.tool);
         *bg = match *interaction {
-            Interaction::Pressed => BUTTON_BG_PRESS.into(),
-            Interaction::Hovered => BUTTON_BG_HOVER.into(),
-            Interaction::None => toggle_button_bg(selected),
+            Interaction::Pressed => colors.button_bg_press.to_color().into(),
+            Interaction::Hovered => colors.button_bg_hover.to_color().into(),
+            Interaction::None => toggle_button_bg(selected, colors),
         };
         *border_color = if selected {
-            BorderColor::all(BUTTON_BORDER_ON)
+            BorderColor::all(colors.button_border_on.to_color())
         } else {
-            BorderColor::all(BUTTON_BORDER_OFF)
+            BorderColor::all(colors.button_border_off.to_color())
         };
     }
 }
@@ -51,73 +55,81 @@ pub(super) fn update_save_load_open_button_visuals(
         With<Button>,
     >,
     save_load_ui_state: Res<SaveLoadUiState>,
+    interface_params: Res<ActiveInterfaceParams>,
 ) {
+    let colors = &interface_params.0.colors;
     for (interaction, mut bg, mut border_color, button) in &mut buttons {
         let selected = save_load_ui_state.mode == Some(button.mode);
         *bg = match *interaction {
-            Interaction::Pressed => BUTTON_BG_PRESS.into(),
-            Interaction::Hovered => BUTTON_BG_HOVER.into(),
-            Interaction::None => toggle_button_bg(selected),
+            Interaction::Pressed => colors.button_bg_press.to_color().into(),
+            Interaction::Hovered => colors.button_bg_hover.to_color().into(),
+            Interaction::None => toggle_button_bg(selected, colors),
         };
         *border_color = if selected {
-            BorderColor::all(BUTTON_BORDER_ON)
+            BorderColor::all(colors.button_border_on.to_color())
         } else {
-            BorderColor::all(BUTTON_BORDER_OFF)
+            BorderColor::all(colors.button_border_off.to_color())
         };
     }
 }
 
 pub(super) fn update_save_load_reset_button_visuals(
+    interface_params: Res<ActiveInterfaceParams>,
     mut buttons: Query<
         (&Interaction, &mut BackgroundColor, &mut BorderColor),
         (With<Button>, With<SaveLoadResetButton>),
     >,
 ) {
+    let colors = &interface_params.0.colors;
     for (interaction, mut bg, mut border_color) in &mut buttons {
         *bg = match *interaction {
-            Interaction::Pressed => BUTTON_BG_PRESS.into(),
-            Interaction::Hovered => BUTTON_BG_HOVER.into(),
-            Interaction::None => BUTTON_BG_OFF.into(),
+            Interaction::Pressed => colors.button_bg_press.to_color().into(),
+            Interaction::Hovered => colors.button_bg_hover.to_color().into(),
+            Interaction::None => colors.button_bg_off.to_color().into(),
         };
-        *border_color = BorderColor::all(BUTTON_BORDER_OFF);
+        *border_color = BorderColor::all(colors.button_border_off.to_color());
     }
 }
 
 pub(super) fn update_sim_play_pause_button_visuals(
     sim_state: Res<SimulationState>,
+    interface_params: Res<ActiveInterfaceParams>,
     mut buttons: Query<
         (&Interaction, &mut BackgroundColor, &mut BorderColor),
         (With<Button>, With<SimPlayPauseButton>),
     >,
 ) {
+    let colors = &interface_params.0.colors;
     for (interaction, mut bg, mut border_color) in &mut buttons {
         let selected = sim_state.running;
         *bg = match *interaction {
-            Interaction::Pressed => BUTTON_BG_PRESS.into(),
-            Interaction::Hovered => BUTTON_BG_HOVER.into(),
-            Interaction::None => toggle_button_bg(selected),
+            Interaction::Pressed => colors.button_bg_press.to_color().into(),
+            Interaction::Hovered => colors.button_bg_hover.to_color().into(),
+            Interaction::None => toggle_button_bg(selected, colors),
         };
         *border_color = if selected {
-            BorderColor::all(BUTTON_BORDER_ON)
+            BorderColor::all(colors.button_border_on.to_color())
         } else {
-            BorderColor::all(BUTTON_BORDER_OFF)
+            BorderColor::all(colors.button_border_off.to_color())
         };
     }
 }
 
 pub(super) fn update_sim_step_button_visuals(
+    interface_params: Res<ActiveInterfaceParams>,
     mut buttons: Query<
         (&Interaction, &mut BackgroundColor, &mut BorderColor),
         (With<Button>, With<SimStepButton>),
     >,
 ) {
+    let colors = &interface_params.0.colors;
     for (interaction, mut bg, mut border_color) in &mut buttons {
         *bg = match *interaction {
-            Interaction::Pressed => BUTTON_BG_PRESS.into(),
-            Interaction::Hovered => BUTTON_BG_HOVER.into(),
-            Interaction::None => BUTTON_BG_OFF.into(),
+            Interaction::Pressed => colors.button_bg_press.to_color().into(),
+            Interaction::Hovered => colors.button_bg_hover.to_color().into(),
+            Interaction::None => colors.button_bg_off.to_color().into(),
         };
-        *border_color = BorderColor::all(BUTTON_BORDER_OFF);
+        *border_color = BorderColor::all(colors.button_border_off.to_color());
     }
 }
 
@@ -139,28 +151,31 @@ pub(super) fn update_sim_play_pause_button_label(
 
 pub(super) fn update_save_load_name_input_button_visuals(
     save_load_ui_state: Res<SaveLoadUiState>,
+    interface_params: Res<ActiveInterfaceParams>,
     mut inputs: Query<
         (&Interaction, &mut BackgroundColor, &mut BorderColor),
         With<SaveLoadDialogNameInputButton>,
     >,
 ) {
+    let colors = &interface_params.0.colors;
     for (interaction, mut bg, mut border_color) in &mut inputs {
         let selected = save_load_ui_state.input_focused;
         *bg = match *interaction {
-            Interaction::Pressed => BUTTON_BG_PRESS.into(),
-            Interaction::Hovered => BUTTON_BG_HOVER.into(),
-            Interaction::None => toggle_button_bg(selected),
+            Interaction::Pressed => colors.button_bg_press.to_color().into(),
+            Interaction::Hovered => colors.button_bg_hover.to_color().into(),
+            Interaction::None => toggle_button_bg(selected, colors),
         };
         *border_color = if selected {
-            BorderColor::all(BUTTON_BORDER_ON)
+            BorderColor::all(colors.button_border_on.to_color())
         } else {
-            BorderColor::all(BUTTON_BORDER_OFF)
+            BorderColor::all(colors.button_border_off.to_color())
         };
     }
 }
 
 pub(super) fn update_save_load_slot_button_visuals(
     save_load_ui_state: Res<SaveLoadUiState>,
+    interface_params: Res<ActiveInterfaceParams>,
     mut buttons: Query<
         (
             &Interaction,
@@ -171,19 +186,20 @@ pub(super) fn update_save_load_slot_button_visuals(
         With<Button>,
     >,
 ) {
+    let colors = &interface_params.0.colors;
     for (interaction, button, mut bg, mut border_color) in &mut buttons {
         let selected = save_load_ui_state.selected_slot.as_deref()
             == Some(button.slot_name.as_str())
             && save_load_ui_state.selected_slot_source == Some(button.source);
         *bg = match *interaction {
-            Interaction::Pressed => BUTTON_BG_PRESS.into(),
-            Interaction::Hovered => BUTTON_BG_HOVER.into(),
-            Interaction::None => toggle_button_bg(selected),
+            Interaction::Pressed => colors.button_bg_press.to_color().into(),
+            Interaction::Hovered => colors.button_bg_hover.to_color().into(),
+            Interaction::None => toggle_button_bg(selected, colors),
         };
         *border_color = if selected {
-            BorderColor::all(BUTTON_BORDER_ON)
+            BorderColor::all(colors.button_border_on.to_color())
         } else {
-            BorderColor::all(BUTTON_BORDER_OFF)
+            BorderColor::all(colors.button_border_off.to_color())
         };
     }
 }
@@ -191,6 +207,7 @@ pub(super) fn update_save_load_slot_button_visuals(
 pub(super) fn update_test_assert_panel(
     mut commands: Commands,
     replay_state: Res<ReplayState>,
+    active_physics_params: Res<ActivePhysicsParams>,
     terrain: Res<TerrainWorld>,
     stats_snapshot: Res<MpmStatisticsSnapshot>,
     mut stats_status: ResMut<MpmStatisticsStatus>,
@@ -248,6 +265,7 @@ pub(super) fn update_test_assert_panel(
     let (metrics, assertions) = evaluate_scenario_state_from_statistics(
         &spec,
         replay_state.current_step,
+        active_physics_params.0.fixed_dt,
         replay_state.baseline_particle_count,
         replay_state.baseline_solid_cell_count,
         &terrain,
@@ -303,6 +321,7 @@ pub(super) fn update_test_assert_panel(
 
 pub(super) fn update_save_load_dialog(
     mut commands: Commands,
+    interface_params: Res<ActiveInterfaceParams>,
     mut root_node: Single<&mut Node, With<SaveLoadDialogRoot>>,
     title_text_entity: Single<Entity, With<SaveLoadDialogTitleText>>,
     name_input_text_entity: Single<Entity, With<SaveLoadDialogNameInputText>>,
@@ -313,6 +332,8 @@ pub(super) fn update_save_load_dialog(
     children_query: Query<&Children>,
     save_load_ui_state: ResMut<SaveLoadUiState>,
 ) {
+    let colors = &interface_params.0.colors;
+    let layout = &interface_params.0.layout;
     let mut save_load_ui_state = save_load_ui_state;
     let Some(mode) = save_load_ui_state.mode else {
         root_node.display = Display::None;
@@ -390,15 +411,15 @@ pub(super) fn update_save_load_dialog(
                     Button,
                     Node {
                         width: percent(100.0),
-                        height: px(DIALOG_SLOT_BUTTON_HEIGHT_PX),
+                        height: px(layout.dialog_slot_button_height_px),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::FlexStart,
                         padding: UiRect::horizontal(px(8.0)),
                         border: UiRect::all(px(2.0)),
                         ..default()
                     },
-                    BackgroundColor(BUTTON_BG_OFF),
-                    BorderColor::all(BUTTON_BORDER_OFF),
+                    BackgroundColor(colors.button_bg_off.to_color()),
+                    BorderColor::all(colors.button_border_off.to_color()),
                     SaveLoadSlotButton {
                         slot_name: default_world_label.clone(),
                         source: SaveLoadSlotSource::DefaultWorld,
@@ -425,15 +446,15 @@ pub(super) fn update_save_load_dialog(
                     Button,
                     Node {
                         width: percent(100.0),
-                        height: px(DIALOG_SLOT_BUTTON_HEIGHT_PX),
+                        height: px(layout.dialog_slot_button_height_px),
                         align_items: AlignItems::Center,
                         justify_content: JustifyContent::FlexStart,
                         padding: UiRect::horizontal(px(8.0)),
                         border: UiRect::all(px(2.0)),
                         ..default()
                     },
-                    BackgroundColor(BUTTON_BG_OFF),
-                    BorderColor::all(BUTTON_BORDER_OFF),
+                    BackgroundColor(colors.button_bg_off.to_color()),
+                    BorderColor::all(colors.button_border_off.to_color()),
                     SaveLoadSlotButton {
                         slot_name: slot_name.clone(),
                         source: SaveLoadSlotSource::Save,
@@ -461,15 +482,15 @@ pub(super) fn update_save_load_dialog(
                         Button,
                         Node {
                             width: percent(100.0),
-                            height: px(DIALOG_SLOT_BUTTON_HEIGHT_PX),
+                            height: px(layout.dialog_slot_button_height_px),
                             align_items: AlignItems::Center,
                             justify_content: JustifyContent::FlexStart,
                             padding: UiRect::horizontal(px(8.0)),
                             border: UiRect::all(px(2.0)),
                             ..default()
                         },
-                        BackgroundColor(BUTTON_BG_OFF),
-                        BorderColor::all(BUTTON_BORDER_OFF),
+                        BackgroundColor(colors.button_bg_off.to_color()),
+                        BorderColor::all(colors.button_border_off.to_color()),
                         SaveLoadSlotButton {
                             slot_name: scenario_name.clone(),
                             source: SaveLoadSlotSource::TestCase,
@@ -490,6 +511,7 @@ pub(super) fn update_save_load_dialog(
 pub(super) fn update_world_tool_tooltip(
     windows: Query<&Window, With<PrimaryWindow>>,
     buttons: Query<(&Interaction, &WorldToolButton), With<Button>>,
+    interface_params: Res<ActiveInterfaceParams>,
     mut tooltip: Single<&mut Node, With<WorldToolTooltip>>,
     mut tooltip_text: Single<&mut Text, With<WorldToolTooltipText>>,
 ) {
@@ -511,12 +533,16 @@ pub(super) fn update_world_tool_tooltip(
     };
 
     tooltip.display = Display::Flex;
-    tooltip.left = px(cursor.x + TOOLTIP_CURSOR_OFFSET_X);
-    tooltip.top = px(cursor.y + TOOLTIP_CURSOR_OFFSET_Y);
+    tooltip.left = px(cursor.x + interface_params.0.layout.tooltip_cursor_offset_x_px);
+    tooltip.top = px(cursor.y + interface_params.0.layout.tooltip_cursor_offset_y_px);
     tooltip_text.0 = tool.label().to_string();
 }
 
-pub(super) fn update_fps_hud_stats(time: Res<Time>, mut fps_stats: ResMut<FpsHudStats>) {
+pub(super) fn update_fps_hud_stats(
+    time: Res<Time>,
+    interface_params: Res<ActiveInterfaceParams>,
+    mut fps_stats: ResMut<FpsHudStats>,
+) {
     let dt = time.delta_secs();
     if dt <= f32::EPSILON {
         return;
@@ -528,7 +554,9 @@ pub(super) fn update_fps_hud_stats(time: Res<Time>, mut fps_stats: ResMut<FpsHud
         .push_back(FpsFrameSample { dt, fps });
     fps_stats.window_elapsed += dt;
 
-    while fps_stats.window_elapsed > HUD_FPS_WINDOW_SEC && fps_stats.frame_samples.len() > 1 {
+    while fps_stats.window_elapsed > interface_params.0.behavior.hud_fps_window_sec
+        && fps_stats.frame_samples.len() > 1
+    {
         let Some(sample) = fps_stats.frame_samples.pop_front() else {
             break;
         };
@@ -549,6 +577,7 @@ pub(super) fn update_fps_hud_stats(time: Res<Time>, mut fps_stats: ResMut<FpsHud
 }
 
 pub(super) fn update_simulation_hud(
+    interface_params: Res<ActiveInterfaceParams>,
     fps_stats: Res<FpsHudStats>,
     sim_state: Res<SimulationState>,
     phase_counts: Res<MpmStatisticsSnapshot>,
@@ -559,8 +588,8 @@ pub(super) fn update_simulation_hud(
     )>,
 ) {
     hud_texts.p0().0 = format!(
-        "FPS(1s avg/min): {:.1}/{:.1}",
-        fps_stats.avg_fps, fps_stats.min_fps
+        "FPS({:.1}s avg/min): {:.1}/{:.1}",
+        interface_params.0.behavior.hud_fps_window_sec, fps_stats.avg_fps, fps_stats.min_fps
     );
 
     let sim_status = if sim_state.running {
@@ -592,6 +621,7 @@ pub(super) fn update_simulation_hud(
 pub(super) fn update_scale_bar(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<&Projection, With<MainCamera>>,
+    interface_params: Res<ActiveInterfaceParams>,
     mut bar_line: Single<&mut Node, With<ScaleBarLine>>,
     mut bar_text: Single<&mut Text, With<ScaleBarLabelText>>,
 ) {
@@ -607,9 +637,10 @@ pub(super) fn update_scale_bar(
 
     let viewport_world_w_m = (ortho.area.max.x - ortho.area.min.x).abs().max(1e-6);
     let meters_per_pixel = viewport_world_w_m / window.width().max(1.0);
-    let target_world_m = meters_per_pixel * SCALE_BAR_TARGET_WIDTH_PX;
+    let target_world_m = meters_per_pixel * interface_params.0.layout.scale_bar_target_width_px;
     let snapped_world_m = snap_scale_bar_world_length(target_world_m);
-    let bar_width_px = (snapped_world_m / meters_per_pixel).max(SCALE_BAR_MIN_WIDTH_PX);
+    let bar_width_px =
+        (snapped_world_m / meters_per_pixel).max(interface_params.0.layout.scale_bar_min_width_px);
 
     bar_line.width = px(bar_width_px);
     bar_text.0 = if snapped_world_m >= 1000.0 {

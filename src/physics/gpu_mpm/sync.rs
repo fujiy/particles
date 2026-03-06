@@ -11,20 +11,15 @@ use super::gpu_resources::{
     MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest,
     world_grid_layout,
 };
+use super::phase::mpm_phase_id_for_particle;
 use super::readback::{GpuReadbackResult, GpuStatisticsReadbackResult};
 use crate::params::ActivePhysicsParams;
 use crate::physics::material::{ParticleMaterial, particle_properties};
-use crate::physics::solver::mpm_water::{
-    mpm_phase_id_for_particle,
-};
-use crate::physics::solver::params_types::SolverParams;
 use crate::physics::state::{ReplayState, SimulationState};
 use crate::physics::world::constants::CELL_SIZE_M;
 use crate::physics::world::terrain::{TerrainWorld, cell_to_world_center, world_to_cell};
 
 const TERRAIN_SDF_DISABLED_DISTANCE_M: f32 = 1.0e6;
-/// 境界速度補正のSDF閾値（h比）。地形侵入を抑えるため、粒径比ではなく格子幅基準で扱う。
-const MPM_BOUNDARY_THRESHOLD_SCALE_H: f32 = 0.5;
 
 #[derive(Resource, Debug, Default)]
 pub struct MpmReadbackSnapshot {
@@ -181,11 +176,11 @@ impl MpmStatisticsSnapshot {
             Some(lane_as_i32(water_surface_p95_cell_bits))
         };
 
-        let repose_angle = f32::from_bits(
-            scalars.lanes[buffers::GPU_STATS_LANE_GRANULAR_REPOSE_ANGLE_BITS],
-        );
+        let repose_angle =
+            f32::from_bits(scalars.lanes[buffers::GPU_STATS_LANE_GRANULAR_REPOSE_ANGLE_BITS]);
         let granular_repose_angle_deg = repose_angle.is_finite().then_some(repose_angle);
-        let repose_base_bits = scalars.lanes[buffers::GPU_STATS_LANE_GRANULAR_REPOSE_BASE_SPAN_BITS];
+        let repose_base_bits =
+            scalars.lanes[buffers::GPU_STATS_LANE_GRANULAR_REPOSE_BASE_SPAN_BITS];
         let granular_repose_base_span_cells = if repose_base_bits == 0x8000_0000 {
             None
         } else {
@@ -231,7 +226,9 @@ impl MpmStatisticsSnapshot {
             material_interaction_contact_ratio: f32::from_bits(
                 scalars.lanes[buffers::GPU_STATS_LANE_INTERACTION_CONTACT_RATIO_BITS],
             ),
-            material_interaction_primary_centroid_y_m: primary_centroid.is_finite().then_some(primary_centroid),
+            material_interaction_primary_centroid_y_m: primary_centroid
+                .is_finite()
+                .then_some(primary_centroid),
             material_interaction_secondary_centroid_y_m: secondary_centroid
                 .is_finite()
                 .then_some(secondary_centroid),
@@ -244,7 +241,8 @@ impl MpmStatisticsSnapshot {
             grid_water_phi_mean_nonzero: f32::from_bits(
                 scalars.lanes[buffers::GPU_STATS_LANE_GRID_WATER_PHI_MEAN_NONZERO_BITS],
             ),
-            grid_water_nonzero_nodes: scalars.lanes[buffers::GPU_STATS_LANE_GRID_WATER_NONZERO_NODES],
+            grid_water_nonzero_nodes: scalars.lanes
+                [buffers::GPU_STATS_LANE_GRID_WATER_NONZERO_NODES],
             grid_granular_phi_max: f32::from_bits(
                 scalars.lanes[buffers::GPU_STATS_LANE_GRID_GRANULAR_PHI_MAX_BITS],
             ),
@@ -254,8 +252,8 @@ impl MpmStatisticsSnapshot {
             grid_granular_phi_mean_nonzero: f32::from_bits(
                 scalars.lanes[buffers::GPU_STATS_LANE_GRID_GRANULAR_PHI_MEAN_NONZERO_BITS],
             ),
-            grid_granular_nonzero_nodes: scalars
-                .lanes[buffers::GPU_STATS_LANE_GRID_GRANULAR_NONZERO_NODES],
+            grid_granular_nonzero_nodes: scalars.lanes
+                [buffers::GPU_STATS_LANE_GRID_GRANULAR_NONZERO_NODES],
         }
     }
 }
@@ -271,8 +269,7 @@ pub enum GpuWorldEditCommand {
     },
 }
 
-#[derive(Clone, Debug)]
-#[derive(Message)]
+#[derive(Clone, Debug, Message)]
 pub struct GpuWorldEditRequest {
     pub cells: Vec<IVec2>,
     pub command: GpuWorldEditCommand,
@@ -327,8 +324,11 @@ pub fn apply_world_edit_requests(
                 if *max_count == 0 || upload.particles.is_empty() {
                     continue;
                 }
-                let removed_mpm_indices =
-                    remove_gpu_particles_in_cells(&mut upload.particles, &request.cells, *max_count as usize);
+                let removed_mpm_indices = remove_gpu_particles_in_cells(
+                    &mut upload.particles,
+                    &request.cells,
+                    *max_count as usize,
+                );
                 if removed_mpm_indices.is_empty() {
                     continue;
                 }
@@ -377,7 +377,6 @@ pub fn prepare_particle_upload(
 
     // Default: no particle upload this frame unless explicitly requested below.
     upload.upload_particles = false;
-
 }
 
 /// System: build terrain SDF/normal upload request.
@@ -418,10 +417,9 @@ pub fn prepare_terrain_upload(
     upload.last_uploaded_terrain_version = Some(u64::MAX);
 }
 
-/// System: update MpmGpuParamsRequest from SolverParams, simulation state, and PhysicsParams asset.
+/// System: update MpmGpuParamsRequest from simulation state and PhysicsParams asset.
 pub fn prepare_gpu_params(
     control: Res<MpmGpuControl>,
-    solver_params: Res<SolverParams>,
     active_params: Res<ActivePhysicsParams>,
     upload: Res<MpmGpuUploadRequest>,
     readback_snapshot: Res<MpmReadbackSnapshot>,
@@ -448,7 +446,7 @@ pub fn prepare_gpu_params(
         p.sand.cohesion_pa,
         p.sand.hardening,
     );
-    let boundary_threshold_m = h * MPM_BOUNDARY_THRESHOLD_SCALE_H;
+    let boundary_threshold_m = h * p.runtime.boundary_velocity_sdf_threshold_h;
     let particle_count = if upload.upload_particles {
         upload.particles.len()
     } else {
@@ -456,7 +454,7 @@ pub fn prepare_gpu_params(
     };
 
     params_req.params = GpuMpmParams {
-        dt: solver_params.fixed_dt,
+        dt: p.fixed_dt,
         gx: 0.0,
         gy: -9.81,
         rho0: p.water.rho0,
@@ -495,7 +493,7 @@ pub fn prepare_gpu_params(
         stats_repose_phase_id: stats_status.repose_phase_id,
         stats_interaction_primary_phase_id: stats_status.interaction_primary_phase_id,
         stats_interaction_secondary_phase_id: stats_status.interaction_secondary_phase_id,
-        stats_penetration_epsilon_m: 1.0e-3,
+        stats_penetration_epsilon_m: p.runtime.stats_penetration_epsilon_m,
         stats_position_fp_scale: 100.0,
         _pad: [0; 7],
     };
@@ -506,7 +504,7 @@ pub fn prepare_gpu_run_state(
     control: Res<MpmGpuControl>,
     mut sim_state: ResMut<SimulationState>,
     mut replay_state: ResMut<ReplayState>,
-    solver_params: Res<SolverParams>,
+    active_params: Res<ActivePhysicsParams>,
     time: Res<Time>,
     mut step_clock: ResMut<MpmGpuStepClock>,
     mut run_req: ResMut<MpmGpuRunRequest>,
@@ -545,15 +543,17 @@ pub fn prepare_gpu_run_state(
         return;
     }
 
-    let fixed_dt = solver_params.fixed_dt.max(1.0e-5);
+    let fixed_dt = active_params.0.fixed_dt.max(1.0e-5);
+    let max_substeps_per_frame = active_params.0.runtime.max_substeps_per_frame.max(1);
+    step_clock.max_substeps_per_frame = max_substeps_per_frame;
     // Avoid runaway catch-up (spiral of death). If we can't keep up, simulation slows down.
-    let max_catchup = fixed_dt * step_clock.max_substeps_per_frame as f32;
+    let max_catchup = fixed_dt * max_substeps_per_frame as f32;
     step_clock.accumulator_secs =
         (step_clock.accumulator_secs + time.delta_secs()).min(max_catchup);
 
     let mut substeps = (step_clock.accumulator_secs / fixed_dt).floor() as u32;
-    if substeps > step_clock.max_substeps_per_frame {
-        substeps = step_clock.max_substeps_per_frame;
+    if substeps > max_substeps_per_frame {
+        substeps = max_substeps_per_frame;
     }
     if substeps == 0 {
         run_req.enabled = false;
@@ -754,10 +754,10 @@ fn drucker_prager_params(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::ecs::message::Messages;
-    use crate::physics::material::ParticleMaterial;
-    use crate::physics::gpu_mpm::readback::GpuStatisticsReadbackResult;
     use crate::physics::gpu_mpm::gpu_resources::MpmGpuUploadRequest;
+    use crate::physics::gpu_mpm::readback::GpuStatisticsReadbackResult;
+    use crate::physics::material::ParticleMaterial;
+    use bevy::ecs::message::Messages;
 
     fn setup_edit_app() -> App {
         let mut app = App::new();

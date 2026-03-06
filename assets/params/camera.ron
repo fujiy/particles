@@ -1,0 +1,12 @@
+// カメラ初期位置・操作感度パラメータ
+// 対応 Rust 型: particles::params::camera::CameraParams
+(
+    viewport_height_m: 14.0,
+    pan_speed_mps: 10.0,
+    zoom_sensitivity: 0.06,
+    min_zoom: 0.1,
+    max_zoom: 1000.0,
+    start_cell_x: 0,
+    start_cell_y: 8,
+    start_z: 100.0,
+)

@@ -2,64 +2,26 @@ use std::collections::{HashSet, VecDeque};
 
 use bevy::prelude::*;
 
+use crate::params::interface::InterfaceColorParams;
 use crate::physics::cell_to_world_center;
+use crate::physics::material::ParticleMaterial;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
 use crate::physics::save_load;
 use crate::physics::scenario::{
     count_solid_cells, default_scenario_names, default_scenario_spec_by_name,
 };
 use crate::physics::state::{
-    LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest,
-    ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet,
-    SimulationState,
+    LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest, ReplayState,
+    ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationState,
 };
-use crate::physics::material::ParticleMaterial;
 use crate::physics::world::terrain::{
     CELL_SIZE_M, CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,
 };
 use crate::render::TerrainRenderDiagnostics;
 
-const HUD_BG_COLOR: Color = Color::srgba(0.05, 0.06, 0.09, 0.82);
-const BUTTON_BG_OFF: Color = Color::srgba(0.17, 0.18, 0.22, 0.95);
-const BUTTON_BG_ON: Color = Color::srgba(0.16, 0.30, 0.46, 0.95);
-const BUTTON_BG_HOVER: Color = Color::srgba(0.24, 0.25, 0.30, 0.98);
-const BUTTON_BG_PRESS: Color = Color::srgba(0.38, 0.40, 0.48, 0.98);
-const BUTTON_BORDER_OFF: Color = Color::srgba(0.08, 0.10, 0.14, 1.0);
-const BUTTON_BORDER_ON: Color = Color::srgba(0.80, 0.92, 1.00, 1.0);
-const TOOLBAR_BOTTOM_PX: f32 = 12.0;
-const TOOLBAR_BG_COLOR: Color = Color::srgba(0.05, 0.06, 0.09, 0.88);
 const TOOLBAR_ICON_SIZE_PX: u32 = 32;
 const TOOLBAR_ICON_GRID_SIZE: usize = 8;
 const TOOLBAR_ICON_DOT_PX: u32 = TOOLBAR_ICON_SIZE_PX / TOOLBAR_ICON_GRID_SIZE as u32;
-const TOOLBAR_BUTTON_SIZE_PX: f32 = 44.0;
-const TOOLTIP_BG_COLOR: Color = Color::srgba(0.04, 0.05, 0.08, 0.96);
-const TOOLTIP_CURSOR_OFFSET_X: f32 = 14.0;
-const TOOLTIP_CURSOR_OFFSET_Y: f32 = 20.0;
-const TOOLTIP_GLOBAL_Z_INDEX: i32 = 10_000;
-const SAVE_LOAD_BAR_TOP_PX: f32 = 10.0;
-const SAVE_LOAD_BAR_RIGHT_PX: f32 = 10.0;
-const SAVE_LOAD_BUTTON_WIDTH_PX: f32 = 84.0;
-const SAVE_LOAD_BUTTON_HEIGHT_PX: f32 = 34.0;
-const DIALOG_BG_COLOR: Color = Color::srgba(0.06, 0.07, 0.10, 0.97);
-const DIALOG_WIDTH_PX: f32 = 380.0;
-const DIALOG_NAME_INPUT_HEIGHT_PX: f32 = 34.0;
-const DIALOG_SLOT_LIST_MAX_HEIGHT_PX: f32 = 240.0;
-const DIALOG_SLOT_BUTTON_HEIGHT_PX: f32 = 30.0;
-const TEST_ASSERT_PANEL_TOP_PX: f32 = 260.0;
-const TEST_ASSERT_PANEL_RIGHT_PX: f32 = 10.0;
-const TEST_ASSERT_PANEL_WIDTH_PX: f32 = 360.0;
-const HUD_PANEL_WIDTH_PX: f32 = 360.0;
-const SCALE_BAR_LEFT_PX: f32 = 14.0;
-const SCALE_BAR_BOTTOM_PX: f32 = 18.0;
-const SCALE_BAR_TARGET_WIDTH_PX: f32 = 140.0;
-const SCALE_BAR_HEIGHT_PX: f32 = 4.0;
-const SCALE_BAR_MIN_WIDTH_PX: f32 = 24.0;
-const SCALE_BAR_LABEL_FONT_PX: f32 = 13.0;
-const TOOL_STROKE_STEP_M: f32 = CELL_SIZE_M * 0.5;
-const TOOL_BREAK_BRUSH_RADIUS_M: f32 = CELL_SIZE_M * 0.5;
-const TOOL_HOVER_HIGHLIGHT_TERRAIN_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
-const TOOL_HOVER_HIGHLIGHT_BREAK_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
-const TOOL_HOVER_HIGHLIGHT_DELETE_COLOR: Color = Color::srgba(1.00, 1.00, 1.00, 0.96);
 type MaterialPattern8 = [[bool; TOOLBAR_ICON_GRID_SIZE]; TOOLBAR_ICON_GRID_SIZE];
 
 const MATERIAL_PATTERN_LIQUID: MaterialPattern8 = [
@@ -95,34 +57,6 @@ const MATERIAL_PATTERN_GRANULAR: MaterialPattern8 = [
     [true, true, true, true, true, true, true, true],
 ];
 
-const MATERIAL_PALETTE_WATER: [[u8; 4]; 4] = [
-    [42, 120, 202, 235],
-    [52, 136, 218, 240],
-    [65, 152, 228, 245],
-    [78, 167, 238, 250],
-];
-
-const MATERIAL_PALETTE_STONE: [[u8; 4]; 4] = [
-    [70, 67, 63, 255],
-    [83, 79, 74, 255],
-    [95, 90, 84, 255],
-    [108, 103, 96, 255],
-];
-
-const MATERIAL_PALETTE_SAND: [[u8; 4]; 4] = [
-    [172, 149, 111, 255],
-    [185, 162, 124, 255],
-    [198, 175, 136, 255],
-    [210, 188, 148, 255],
-];
-
-const MATERIAL_PALETTE_SOIL: [[u8; 4]; 4] = [
-    [105, 79, 56, 255],
-    [119, 91, 67, 255],
-    [133, 103, 78, 255],
-    [147, 115, 88, 255],
-];
-
 const WORLD_TOOLBAR_TOOLS: [WorldTool; 9] = [
     WorldTool::WaterLiquid,
     WorldTool::StoneSolid,
@@ -134,7 +68,6 @@ const WORLD_TOOLBAR_TOOLS: [WorldTool; 9] = [
     WorldTool::Break,
     WorldTool::Delete,
 ];
-const HUD_FPS_WINDOW_SEC: f32 = 1.0;
 
 mod icons;
 mod input_handlers;
@@ -433,11 +366,11 @@ use ui_systems::{
 
 use world_edit::{draw_world_tool_hover_highlight, handle_world_interactions};
 
-fn toggle_button_bg(enabled: bool) -> BackgroundColor {
+fn toggle_button_bg(enabled: bool, colors: &InterfaceColorParams) -> BackgroundColor {
     if enabled {
-        BUTTON_BG_ON.into()
+        colors.button_bg_on.to_color().into()
     } else {
-        BUTTON_BG_OFF.into()
+        colors.button_bg_off.to_color().into()
     }
 }
 

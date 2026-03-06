@@ -7,28 +7,8 @@ use bevy::render::render_resource::SpecializedRenderPipelines;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::physics::state::SimUpdateSet;
-use crate::physics::world::terrain::{
-    CELL_SIZE_M, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainWorld,
-};
+use crate::physics::world::terrain::{CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, TerrainWorld};
 use crate::render::{TerrainGeneratedChunkCache, TerrainRenderDiagnostics};
-
-const BUTTON_BG_OFF: Color = Color::srgba(0.17, 0.18, 0.22, 0.95);
-const BUTTON_BG_ON: Color = Color::srgba(0.16, 0.30, 0.46, 0.95);
-const BUTTON_BG_HOVER: Color = Color::srgba(0.24, 0.25, 0.30, 0.98);
-const BUTTON_BG_PRESS: Color = Color::srgba(0.38, 0.40, 0.48, 0.98);
-const GRID_CHUNK_BOUNDARY_COLOR: Color = Color::srgba(0.80, 0.86, 0.93, 0.22);
-const GRID_CACHED_CHUNK_COLOR: Color = Color::srgba(0.32, 0.86, 0.98, 0.62);
-const GRID_MODIFIED_CHUNK_COLOR: Color = Color::srgba(0.99, 0.43, 0.22, 0.95);
-const GRID_TERRAIN_UPDATED_COLOR: Color = Color::srgba(0.13, 0.85, 0.92, 1.00);
-const GRID_PARTICLE_UPDATED_COLOR: Color = Color::srgba(0.76, 0.56, 0.98, 1.00);
-const TILE_BUTTON_BOTTOM_PX: f32 = 88.0;
-const SDF_BUTTON_BOTTOM_PX: f32 = 126.0;
-const PHYSICS_AREA_BUTTON_BOTTOM_PX: f32 = 50.0;
-const PARTICLE_BUTTON_BOTTOM_PX: f32 = 12.0;
-const TERRAIN_SDF_OVERLAY_STEP_M: f32 = CELL_SIZE_M;
-const TERRAIN_SDF_OVERLAY_CELL_RADIUS_M: f32 = CELL_SIZE_M * 0.45;
-const TERRAIN_SDF_OVERLAY_RANGE_M: f32 = CELL_SIZE_M * 6.0;
-const TERRAIN_SDF_OVERLAY_NEGATIVE_FILL_Z: f32 = 0.2;
 
 mod grid;
 mod particle;
@@ -60,6 +40,7 @@ impl Plugin for OverlayPlugin {
             .add_systems(
                 Update,
                 (
+                    apply_overlay_ui_params,
                     update_tile_overlay_button_label,
                     update_sdf_overlay_button_label,
                     update_physics_area_overlay_button_label,
@@ -203,10 +184,11 @@ impl Default for SdfOverlayState {
 struct OverlayInfoText;
 
 use ui::{
-    handle_particle_overlay_button, handle_physics_area_overlay_button, handle_sdf_overlay_button,
-    handle_tile_overlay_button, setup_overlay_ui, update_overlay_info_text,
-    update_particle_overlay_button_label, update_physics_area_overlay_button_label,
-    update_sdf_overlay_button_label, update_tile_overlay_button_label,
+    apply_overlay_ui_params, handle_particle_overlay_button, handle_physics_area_overlay_button,
+    handle_sdf_overlay_button, handle_tile_overlay_button, setup_overlay_ui,
+    update_overlay_info_text, update_particle_overlay_button_label,
+    update_physics_area_overlay_button_label, update_sdf_overlay_button_label,
+    update_tile_overlay_button_label,
 };
 
 use grid::{draw_physics_area_overlay, draw_sdf_overlay, draw_tile_overlay};
