@@ -4,6 +4,7 @@ use super::*;
 use crate::params::ActiveOverlayParams;
 use crate::params::overlay::OverlayColorParams;
 use crate::physics::gpu_mpm::gpu_resources::world_grid_layout;
+use crate::physics::gpu_mpm::sync::MpmChunkResidencyState;
 
 pub(super) fn setup_overlay_ui(mut commands: Commands, overlay_params: Res<ActiveOverlayParams>) {
     let colors = &overlay_params.0.colors;
@@ -195,19 +196,26 @@ pub(super) fn handle_tile_overlay_button(
     >,
     overlay_params: Res<ActiveOverlayParams>,
     mut overlay_state: ResMut<TileOverlayState>,
+    mut physics_overlay_state: ResMut<PhysicsAreaOverlayState>,
 ) {
     let colors = &overlay_params.0.colors;
     for (interaction, mut bg) in &mut interactions {
         match *interaction {
             Interaction::Pressed => {
-                overlay_state.enabled = !overlay_state.enabled;
+                let merged_enabled = overlay_state.enabled || physics_overlay_state.enabled;
+                let next = !merged_enabled;
+                overlay_state.enabled = next;
+                physics_overlay_state.enabled = next;
                 *bg = colors.button_bg_press.to_color().into();
             }
             Interaction::Hovered => {
                 *bg = colors.button_bg_hover.to_color().into();
             }
             Interaction::None => {
-                *bg = toggle_button_bg(overlay_state.enabled, colors);
+                *bg = toggle_button_bg(
+                    overlay_state.enabled || physics_overlay_state.enabled,
+                    colors,
+                );
             }
         }
     }
@@ -220,19 +228,26 @@ pub(super) fn handle_physics_area_overlay_button(
     >,
     overlay_params: Res<ActiveOverlayParams>,
     mut overlay_state: ResMut<PhysicsAreaOverlayState>,
+    mut tile_overlay_state: ResMut<TileOverlayState>,
 ) {
     let colors = &overlay_params.0.colors;
     for (interaction, mut bg) in &mut interactions {
         match *interaction {
             Interaction::Pressed => {
-                overlay_state.enabled = !overlay_state.enabled;
+                let merged_enabled = overlay_state.enabled || tile_overlay_state.enabled;
+                let next = !merged_enabled;
+                overlay_state.enabled = next;
+                tile_overlay_state.enabled = next;
                 *bg = colors.button_bg_press.to_color().into();
             }
             Interaction::Hovered => {
                 *bg = colors.button_bg_hover.to_color().into();
             }
             Interaction::None => {
-                *bg = toggle_button_bg(overlay_state.enabled, colors);
+                *bg = toggle_button_bg(
+                    overlay_state.enabled || tile_overlay_state.enabled,
+                    colors,
+                );
             }
         }
     }
@@ -265,30 +280,68 @@ pub(super) fn handle_sdf_overlay_button(
 
 pub(super) fn update_tile_overlay_button_label(
     overlay_state: Res<TileOverlayState>,
-    terrain_world: Res<TerrainWorld>,
-    generated_chunk_cache: Res<TerrainGeneratedChunkCache>,
+    physics_overlay_state: Res<PhysicsAreaOverlayState>,
+    chunk_residency: Res<MpmChunkResidencyState>,
     mut labels: Query<&mut Text, With<TileOverlayToggleButtonLabel>>,
 ) {
-    if !overlay_state.is_changed()
-        && !terrain_world.is_changed()
-        && !generated_chunk_cache.is_changed()
-    {
+    if !overlay_state.is_changed() && !physics_overlay_state.is_changed() && !chunk_residency.is_changed() {
         return;
     }
 
-    let loaded_chunks = terrain_world.loaded_chunk_coords().len();
-    let cached_chunks = generated_chunk_cache.cached_chunk_coords().len();
-    let modified_chunks = terrain_world.override_chunk_coords().len();
+    let enabled = overlay_state.enabled || physics_overlay_state.enabled;
+    let layout = if chunk_residency.initialized {
+        chunk_residency.grid_layout
+    } else {
+        world_grid_layout()
+    };
 
     for mut label in &mut labels {
-        label.0 = if overlay_state.enabled {
+        label.0 = if enabled {
             format!(
-                "Chunk Overlay: ON (Loaded:{} Cached:{} Modified:{})",
-                loaded_chunks, cached_chunks, modified_chunks,
+                "Chunk Overlay: ON (GPU resident:{} grid:{}x{})",
+                chunk_residency.resident_chunk_count, layout.dims.x, layout.dims.y,
             )
         } else {
             "Chunk Overlay: OFF".to_string()
         };
+    }
+}
+
+pub(super) fn sync_overlay_button_backgrounds(
+    overlay_params: Res<ActiveOverlayParams>,
+    tile_overlay_state: Res<TileOverlayState>,
+    sdf_overlay_state: Res<SdfOverlayState>,
+    physics_overlay_state: Res<PhysicsAreaOverlayState>,
+    particle_overlay_state: Res<ParticleOverlayState>,
+    mut buttons: ParamSet<(
+        Query<&mut BackgroundColor, With<TileOverlayToggleButton>>,
+        Query<&mut BackgroundColor, With<SdfOverlayToggleButton>>,
+        Query<&mut BackgroundColor, With<PhysicsAreaOverlayToggleButton>>,
+        Query<&mut BackgroundColor, With<ParticleOverlayToggleButton>>,
+    )>,
+) {
+    if !overlay_params.is_changed()
+        && !tile_overlay_state.is_changed()
+        && !sdf_overlay_state.is_changed()
+        && !physics_overlay_state.is_changed()
+        && !particle_overlay_state.is_changed()
+    {
+        return;
+    }
+
+    let colors = &overlay_params.0.colors;
+    let merged_chunk_enabled = tile_overlay_state.enabled || physics_overlay_state.enabled;
+    for mut bg in &mut buttons.p0() {
+        *bg = toggle_button_bg(merged_chunk_enabled, colors);
+    }
+    for mut bg in &mut buttons.p2() {
+        *bg = toggle_button_bg(merged_chunk_enabled, colors);
+    }
+    for mut bg in &mut buttons.p1() {
+        *bg = toggle_button_bg(sdf_overlay_state.enabled, colors);
+    }
+    for mut bg in &mut buttons.p3() {
+        *bg = toggle_button_bg(particle_overlay_state.enabled, colors);
     }
 }
 
@@ -309,29 +362,30 @@ pub(super) fn update_sdf_overlay_button_label(
 }
 
 pub(super) fn update_physics_area_overlay_button_label(
+    tile_overlay_state: Res<TileOverlayState>,
     overlay_state: Res<PhysicsAreaOverlayState>,
-    render_diagnostics: Res<TerrainRenderDiagnostics>,
+    chunk_residency: Res<MpmChunkResidencyState>,
     mut labels: Query<&mut Text, With<PhysicsAreaOverlayToggleButtonLabel>>,
 ) {
-    if !overlay_state.is_changed() && !render_diagnostics.is_changed() {
+    if !overlay_state.is_changed() && !tile_overlay_state.is_changed() && !chunk_residency.is_changed() {
         return;
     }
 
-    let gpu_layout = world_grid_layout();
+    let enabled = overlay_state.enabled || tile_overlay_state.enabled;
+    let gpu_layout = if chunk_residency.initialized {
+        chunk_residency.grid_layout
+    } else {
+        world_grid_layout()
+    };
     let gpu_cells = UVec2::new(
         gpu_layout.dims.x.saturating_sub(1),
         gpu_layout.dims.y.saturating_sub(1),
     );
     for mut label in &mut labels {
-        label.0 = if overlay_state.enabled {
+        label.0 = if enabled {
             format!(
-                "Physics Area Overlay: ON (T:{} P:{} GPU:{}x{} nodes {}x{} cells)",
-                render_diagnostics
-                    .terrain_updated_chunk_highlight_frames
-                    .len(),
-                render_diagnostics
-                    .particle_updated_chunk_highlight_frames
-                    .len(),
+                "Physics Area Overlay: ON (Merged, resident:{} GPU:{}x{} nodes {}x{} cells)",
+                chunk_residency.resident_chunk_count,
                 gpu_layout.dims.x,
                 gpu_layout.dims.y,
                 gpu_cells.x,
@@ -364,27 +418,38 @@ pub(super) fn update_overlay_info_text(
     tile_overlay_state: Res<TileOverlayState>,
     sdf_overlay_state: Res<SdfOverlayState>,
     physics_overlay_state: Res<PhysicsAreaOverlayState>,
+    chunk_residency: Res<MpmChunkResidencyState>,
     terrain_world: Res<TerrainWorld>,
     mut labels: Query<&mut Text, With<OverlayInfoText>>,
 ) {
     if !tile_overlay_state.is_changed()
         && !sdf_overlay_state.is_changed()
         && !physics_overlay_state.is_changed()
+        && !chunk_residency.is_changed()
         && !terrain_world.is_changed()
     {
         return;
     }
-    let gpu_layout = world_grid_layout();
+    let overlay_gpu_enabled = tile_overlay_state.enabled || physics_overlay_state.enabled;
+    let gpu_layout = if chunk_residency.initialized {
+        chunk_residency.grid_layout
+    } else {
+        world_grid_layout()
+    };
     let gpu_cells = UVec2::new(
         gpu_layout.dims.x.saturating_sub(1),
         gpu_layout.dims.y.saturating_sub(1),
     );
     for mut label in &mut labels {
         let mut lines = Vec::new();
-        if physics_overlay_state.enabled {
+        if overlay_gpu_enabled {
             lines.push(format!(
-                "GPU Grid: nodes {}x{} cells {}x{} (single uniform grid, no tiles)",
-                gpu_layout.dims.x, gpu_layout.dims.y, gpu_cells.x, gpu_cells.y
+                "GPU Chunk/Physics Overlay: resident {} chunks, nodes {}x{} cells {}x{}",
+                chunk_residency.resident_chunk_count,
+                gpu_layout.dims.x,
+                gpu_layout.dims.y,
+                gpu_cells.x,
+                gpu_cells.y
             ));
         }
         if tile_overlay_state.enabled {

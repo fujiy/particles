@@ -124,6 +124,7 @@
   - [x] SDF/normal 参照を chunk SDF バッファ経路へ切替し、境界補正を成立させる。
   - [x] `water_drop` autoverify で `passed=true` を達成する。
   - [x] 検証artifactに `resident_chunk_count`, `invalid_slot_access_count`, `chunk_sdf_samples` を出力する。
+  - [x] Chunk Overlay / Physics Area Overlay を統合し、`chunk_meta_buf` を使うGPU描画へ移行する。
 - 完了条件:
   - CPUとの chunk 差分同期なしで `water_drop` が最後まで完走し、既存判定を満たす。
   - 実行中に invalid slot 参照が発生しない。
@@ -132,6 +133,7 @@
   - 2026-03-07: GPU側に `chunk_meta_buf` を追加し、静的residencyの one-shot 構築（起動時 / 粒子再upload時）を導入。resident chunk bbox から `grid_origin/grid_dims` を再計算して MPM 実行領域を world-dense 固定から切替。
   - 2026-03-07: 初期地形から chunk SDF/normal を one-shot 生成してGPU uploadする経路を実装。`grid_update` と統計passは同バッファを参照。
   - 2026-03-07: autoverify report へ `resident_chunk_count`, `invalid_slot_access_count`, `chunk_sdf_samples` を追加。`configs/autoverify/water_drop_motion.json` 実行で `passed=true`, `invalid_slot_access_count=0` を確認。
+  - 2026-03-07: Physics Area Overlay を Chunk Overlay に統合し、GPU側 `chunk_meta_buf` + `params_buf` を参照する描画パスへ移行。`water_drop` スクリーンショット検証で `resident:64` のオーバーレイ表示を確認（`artifacts/autoverify/overlay_chunk_physics_water_drop.png`）。
 
 ### [MPM-CHUNK-02] movers抽出 + CPU residency更新 + chunk meta差分反映
 
