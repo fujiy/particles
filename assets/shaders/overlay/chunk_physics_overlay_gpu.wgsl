@@ -68,14 +68,33 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let du = min(in.local_uv.x, 1.0 - in.local_uv.x);
-    let dv = min(in.local_uv.y, 1.0 - in.local_uv.y);
-    let d_edge = min(du, dv);
+    let edge_du = min(in.local_uv.x, 1.0 - in.local_uv.x);
+    let edge_dv = min(in.local_uv.y, 1.0 - in.local_uv.y);
+    let edge_px = min(
+        edge_du / max(fwidth(in.local_uv.x), 1.0e-6),
+        edge_dv / max(fwidth(in.local_uv.y), 1.0e-6),
+    );
+    let edge_alpha = 1.0 - smoothstep(0.5, 1.5, edge_px);
 
-    let thickness = 0.03;
-    let alpha = 1.0 - smoothstep(thickness, thickness + 0.01, d_edge);
-    if alpha <= 1.0e-4 {
+    let divisions = max(f32(params.chunk_node_dim), 1.0);
+    let grid_uv = in.local_uv * divisions;
+    let grid_frac = fract(grid_uv);
+    let grid_du = min(grid_frac.x, 1.0 - grid_frac.x);
+    let grid_dv = min(grid_frac.y, 1.0 - grid_frac.y);
+    let grid_px = min(
+        grid_du / max(fwidth(grid_uv.x), 1.0e-6),
+        grid_dv / max(fwidth(grid_uv.y), 1.0e-6),
+    );
+    let grid_alpha = 1.0 - smoothstep(0.5, 1.5, grid_px);
+
+    let edge_term = in.edge_color.a * edge_alpha;
+    let grid_term = 0.34 * grid_alpha;
+    if edge_term <= 1.0e-4 && grid_term <= 1.0e-4 {
         discard;
     }
-    return vec4<f32>(in.edge_color.rgb, in.edge_color.a * alpha);
+
+    if edge_term >= grid_term {
+        return vec4<f32>(in.edge_color.rgb, edge_term);
+    }
+    return vec4<f32>(0.32, 0.84, 0.96, grid_term);
 }

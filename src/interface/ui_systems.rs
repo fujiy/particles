@@ -3,9 +3,13 @@ use bevy::window::PrimaryWindow;
 
 use super::*;
 use crate::camera_controller::MainCamera;
+use crate::overlay::{PhysicsAreaOverlayState, SdfOverlayState, TileOverlayState};
 use crate::params::ActiveInterfaceParams;
 use crate::params::ActivePhysicsParams;
-use crate::physics::gpu_mpm::sync::{MpmStatisticsSnapshot, MpmStatisticsStatus};
+use crate::physics::gpu_mpm::gpu_resources::world_grid_layout;
+use crate::physics::gpu_mpm::sync::{
+    MpmChunkResidencyState, MpmStatisticsSnapshot, MpmStatisticsStatus,
+};
 use crate::physics::material::ParticleMaterial;
 use crate::physics::scenario::{ScenarioStatisticsInput, evaluate_scenario_state_from_statistics};
 
@@ -581,7 +585,12 @@ pub(super) fn update_simulation_hud(
     fps_stats: Res<FpsHudStats>,
     sim_state: Res<SimulationState>,
     phase_counts: Res<MpmStatisticsSnapshot>,
+    chunk_overlay_state: Res<TileOverlayState>,
+    physics_overlay_state: Res<PhysicsAreaOverlayState>,
+    sdf_overlay_state: Res<SdfOverlayState>,
+    chunk_residency: Res<MpmChunkResidencyState>,
     terrain_render_diagnostics: Res<TerrainRenderDiagnostics>,
+    terrain_world: Res<TerrainWorld>,
     mut hud_texts: ParamSet<(
         Single<&mut Text, With<SimulationHudFpsText>>,
         Single<&mut Text, With<SimulationHudStatsText>>,
@@ -602,8 +611,20 @@ pub(super) fn update_simulation_hud(
     let granular_sand_count = phase_counts.sand_granular as usize;
     let unknown_phase_count = phase_counts.unknown as usize;
     let gpu_total_count = phase_counts.total() as usize;
+    let overlay_enabled = chunk_overlay_state.enabled || physics_overlay_state.enabled;
+    let layout = if chunk_residency.initialized {
+        chunk_residency.grid_layout
+    } else {
+        world_grid_layout()
+    };
+    let grid_cells = UVec2::new(
+        layout.dims.x.saturating_sub(1),
+        layout.dims.y.saturating_sub(1),
+    );
+    let loaded_chunks = terrain_world.loaded_chunk_coords().len();
+    let modified_chunks = terrain_world.override_chunk_coords().len();
     hud_texts.p1().0 = format!(
-        "Sim: {sim_status}\nTerrainGen/frame: {:>7} (d={:>4},{:>4} full={} r=0x{:02X})\nTerrainOvr/frame: runs={:>5} cells={:>6} pending={:>5} done={:>5.1}%\nTerrainOvr/total: runs={:>7} cells={:>8}\nGPU Total: {gpu_total_count}\nWater(L): {water_count}\nGranular(Soil+Stone): {granular_soil_like_count}\nGranular(Sand): {granular_sand_count}\nGPU Unknown: {unknown_phase_count}",
+        "Sim: {sim_status}\nTerrainGen/frame: {:>7} (d={:>4},{:>4} full={} r=0x{:02X})\nTerrainOvr/frame: runs={:>5} cells={:>6} pending={:>5} done={:>5.1}%\nTerrainOvr/total: runs={:>7} cells={:>8}\nGPU Total: {gpu_total_count}\nWater(L): {water_count}\nGranular(Soil+Stone): {granular_soil_like_count}\nGranular(Sand): {granular_sand_count}\nGPU Unknown: {unknown_phase_count}\nChunk/Grid Overlay: {} | resident {} chunks | nodes {}x{} cells {}x{}\nRender Chunks: {} (Modified: {})\nSDF Overlay: {}",
         terrain_render_diagnostics.terrain_generation_eval_count_frame,
         terrain_render_diagnostics.terrain_generation_origin_delta_x_frame,
         terrain_render_diagnostics.terrain_generation_origin_delta_y_frame,
@@ -615,6 +636,15 @@ pub(super) fn update_simulation_hud(
         terrain_render_diagnostics.terrain_override_budget_completion_frame * 100.0,
         terrain_render_diagnostics.terrain_override_runs_total,
         terrain_render_diagnostics.terrain_override_cells_total,
+        if overlay_enabled { "ON" } else { "OFF" },
+        chunk_residency.resident_chunk_count,
+        layout.dims.x,
+        layout.dims.y,
+        grid_cells.x,
+        grid_cells.y,
+        loaded_chunks,
+        modified_chunks,
+        if sdf_overlay_state.enabled { "ON" } else { "OFF" },
     );
 }
 

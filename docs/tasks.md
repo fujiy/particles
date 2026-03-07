@@ -125,6 +125,8 @@
   - [x] `water_drop` autoverify で `passed=true` を達成する。
   - [x] 検証artifactに `resident_chunk_count`, `invalid_slot_access_count`, `chunk_sdf_samples` を出力する。
   - [x] Chunk Overlay / Physics Area Overlay を統合し、`chunk_meta_buf` を使うGPU描画へ移行する。
+  - [x] Overlay UI を1ボタン化し、overlay詳細を左上HUDへ集約。GPU overlay線をズーム非依存1px化して chunk境界+grid を描画する。
+  - [x] SDF Overlay のCPU描画経路（gizmo/sprite）を廃止し、`terrain_sdf_buf` を参照するGPU描画経路へ切替する。
 - 完了条件:
   - CPUとの chunk 差分同期なしで `water_drop` が最後まで完走し、既存判定を満たす。
   - 実行中に invalid slot 参照が発生しない。
@@ -134,6 +136,8 @@
   - 2026-03-07: 初期地形から chunk SDF/normal を one-shot 生成してGPU uploadする経路を実装。`grid_update` と統計passは同バッファを参照。
   - 2026-03-07: autoverify report へ `resident_chunk_count`, `invalid_slot_access_count`, `chunk_sdf_samples` を追加。`configs/autoverify/water_drop_motion.json` 実行で `passed=true`, `invalid_slot_access_count=0` を確認。
   - 2026-03-07: Physics Area Overlay を Chunk Overlay に統合し、GPU側 `chunk_meta_buf` + `params_buf` を参照する描画パスへ移行。`water_drop` スクリーンショット検証で `resident:64` のオーバーレイ表示を確認（`artifacts/autoverify/overlay_chunk_physics_water_drop.png`）。
+  - 2026-03-07: Overlay UI を `Chunk/Grid Overlay` ボタン1つに統合し、詳細表示は左上HUDへ移設。WGSLを `fwidth` ベースへ更新してズームに依存しない1px線へ変更し、chunk境界に加えて内部grid線を描画することを `overlay_chunk_zoom_out.png` / `overlay_chunk_zoom_in.png` で確認。
+  - 2026-03-07: SDF Overlay をGPU pass化（`sdf_overlay_gpu.wgsl`）し、`terrain_sdf_buf` を直接サンプリングする描画へ変更。`artifacts/autoverify/sdf_overlay_gpu_water_drop.png` で描画成立を確認。
 
 ### [MPM-CHUNK-02] movers抽出 + CPU residency更新 + chunk meta差分反映
 

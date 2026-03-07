@@ -7,11 +7,10 @@ use bevy::render::render_resource::SpecializedRenderPipelines;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
 use crate::physics::state::SimUpdateSet;
-use crate::physics::world::terrain::{CHUNK_WORLD_SIZE_M, TerrainWorld};
 
 mod chunk_physics;
-mod grid;
 mod particle;
+mod sdf;
 mod ui;
 
 pub struct OverlayPlugin;
@@ -25,6 +24,7 @@ impl Plugin for OverlayPlugin {
             .init_resource::<OverlayVisibilityOverrides>()
             .add_plugins(ExtractResourcePlugin::<ParticleOverlayState>::default())
             .add_plugins(ExtractResourcePlugin::<TileOverlayState>::default())
+            .add_plugins(ExtractResourcePlugin::<SdfOverlayState>::default())
             .add_plugins(ExtractResourcePlugin::<PhysicsAreaOverlayState>::default())
             .add_systems(Startup, setup_overlay_ui)
             .add_systems(
@@ -33,7 +33,6 @@ impl Plugin for OverlayPlugin {
                     apply_overlay_visibility_overrides,
                     handle_tile_overlay_button,
                     handle_sdf_overlay_button,
-                    handle_physics_area_overlay_button,
                     handle_particle_overlay_button,
                 )
                     .chain()
@@ -46,17 +45,20 @@ impl Plugin for OverlayPlugin {
                     sync_overlay_button_backgrounds,
                     update_tile_overlay_button_label,
                     update_sdf_overlay_button_label,
-                    update_physics_area_overlay_button_label,
                     update_particle_overlay_button_label,
-                    update_overlay_info_text,
                 )
                     .chain()
                     .in_set(SimUpdateSet::Ui),
-            )
-            .add_systems(Update, (draw_sdf_overlay,).in_set(SimUpdateSet::Overlay));
+            );
 
         let render_app = app.sub_app_mut(RenderApp);
         render_app
+            .init_resource::<SpecializedRenderPipelines<SdfOverlayGpuPipeline>>()
+            .add_systems(RenderStartup, init_sdf_overlay_gpu_pipeline)
+            .add_systems(
+                Render,
+                prepare_sdf_overlay_gpu_pipeline.in_set(RenderSystems::Prepare),
+            )
             .init_resource::<SpecializedRenderPipelines<ChunkPhysicsOverlayGpuPipeline>>()
             .add_systems(RenderStartup, init_chunk_physics_overlay_gpu_pipeline)
             .add_systems(
@@ -73,6 +75,7 @@ impl Plugin for OverlayPlugin {
                 Core2d,
                 ChunkPhysicsOverlayGpuLabel,
             )
+            .add_render_graph_node::<ViewNodeRunner<SdfOverlayGpuNode>>(Core2d, SdfOverlayGpuLabel)
             .add_render_graph_node::<ViewNodeRunner<ParticleOverlayGpuNode>>(
                 Core2d,
                 ParticleOverlayGpuLabel,
@@ -81,6 +84,7 @@ impl Plugin for OverlayPlugin {
                 Core2d,
                 (
                     Node2d::MainTransparentPass,
+                    SdfOverlayGpuLabel,
                     ChunkPhysicsOverlayGpuLabel,
                     ParticleOverlayGpuLabel,
                     Node2d::EndMainPass,
@@ -101,8 +105,8 @@ impl Default for ParticleOverlayState {
 }
 
 #[derive(Resource, Debug, Clone, Copy)]
-struct TileOverlayState {
-    enabled: bool,
+pub(crate) struct TileOverlayState {
+    pub enabled: bool,
 }
 
 impl Default for TileOverlayState {
@@ -126,14 +130,17 @@ fn apply_overlay_visibility_overrides(
     mut physics_overlay_state: ResMut<PhysicsAreaOverlayState>,
     mut particle_overlay_state: ResMut<ParticleOverlayState>,
 ) {
-    if let Some(v) = overrides.chunk.take() {
+    let chunk_override = overrides.chunk.take();
+    let physics_override = overrides.physics_area.take();
+    if let Some(v) = chunk_override {
         tile_overlay_state.enabled = v;
+        physics_overlay_state.enabled = v;
+    } else if let Some(v) = physics_override {
+        tile_overlay_state.enabled = v;
+        physics_overlay_state.enabled = v;
     }
     if let Some(v) = overrides.sdf.take() {
         sdf_overlay_state.enabled = v;
-    }
-    if let Some(v) = overrides.physics_area.take() {
-        physics_overlay_state.enabled = v;
     }
     if let Some(v) = overrides.particle.take() {
         particle_overlay_state.enabled = v;
@@ -158,15 +165,9 @@ struct SdfOverlayToggleButton;
 #[derive(Component)]
 struct SdfOverlayToggleButtonLabel;
 
-#[derive(Component)]
-struct PhysicsAreaOverlayToggleButton;
-
-#[derive(Component)]
-struct PhysicsAreaOverlayToggleButtonLabel;
-
 #[derive(Resource, Debug, Clone, Copy)]
-struct PhysicsAreaOverlayState {
-    enabled: bool,
+pub(crate) struct PhysicsAreaOverlayState {
+    pub enabled: bool,
 }
 
 impl Default for PhysicsAreaOverlayState {
@@ -176,8 +177,8 @@ impl Default for PhysicsAreaOverlayState {
 }
 
 #[derive(Resource, Debug)]
-struct SdfOverlayState {
-    enabled: bool,
+pub(crate) struct SdfOverlayState {
+    pub enabled: bool,
 }
 
 impl Default for SdfOverlayState {
@@ -186,18 +187,12 @@ impl Default for SdfOverlayState {
     }
 }
 
-#[derive(Component)]
-struct OverlayInfoText;
-
 use ui::{
-    apply_overlay_ui_params, handle_particle_overlay_button, handle_physics_area_overlay_button,
-    handle_sdf_overlay_button, handle_tile_overlay_button, setup_overlay_ui,
-    sync_overlay_button_backgrounds, update_overlay_info_text, update_particle_overlay_button_label,
-    update_physics_area_overlay_button_label, update_sdf_overlay_button_label,
-    update_tile_overlay_button_label,
+    apply_overlay_ui_params, handle_particle_overlay_button, handle_sdf_overlay_button,
+    handle_tile_overlay_button, setup_overlay_ui,
+    sync_overlay_button_backgrounds, update_particle_overlay_button_label,
+    update_sdf_overlay_button_label, update_tile_overlay_button_label,
 };
-
-use grid::draw_sdf_overlay;
 
 impl ExtractResource for ParticleOverlayState {
     type Source = ParticleOverlayState;
@@ -220,6 +215,15 @@ impl ExtractResource for PhysicsAreaOverlayState {
     }
 }
 
+impl ExtractResource for SdfOverlayState {
+    type Source = SdfOverlayState;
+    fn extract_resource(source: &Self::Source) -> Self {
+        Self {
+            enabled: source.enabled,
+        }
+    }
+}
+
 use chunk_physics::{
     ChunkPhysicsOverlayGpuLabel, ChunkPhysicsOverlayGpuNode, ChunkPhysicsOverlayGpuPipeline,
     init_chunk_physics_overlay_gpu_pipeline, prepare_chunk_physics_overlay_gpu_pipeline,
@@ -228,4 +232,9 @@ use chunk_physics::{
 use particle::{
     ParticleOverlayGpuLabel, ParticleOverlayGpuNode, ParticleOverlayGpuPipeline,
     init_particle_overlay_gpu_pipeline, prepare_particle_overlay_gpu_pipeline,
+};
+
+use sdf::{
+    SdfOverlayGpuLabel, SdfOverlayGpuNode, SdfOverlayGpuPipeline, init_sdf_overlay_gpu_pipeline,
+    prepare_sdf_overlay_gpu_pipeline,
 };
