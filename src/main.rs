@@ -17,8 +17,8 @@ use particles::physics::gpu_mpm::phase::{
     mpm_phase_id_for_particle,
 };
 use particles::physics::gpu_mpm::sync::{
-    MpmChunkResidencyState, MpmReadbackSnapshot, MpmStatisticsSnapshot, MpmStatisticsStatus,
-    apply_gpu_readback,
+    GpuWorldEditCommand, GpuWorldEditRequest, MpmChunkResidencyState, MpmReadbackSnapshot,
+    MpmStatisticsSnapshot, MpmStatisticsStatus, apply_gpu_readback, apply_world_edit_requests,
 };
 use particles::physics::material::{
     DEFAULT_MATERIAL_PARAMS, ParticleMaterial, terrain_boundary_radius_m,
@@ -67,6 +67,11 @@ struct MpmAutoVerifyState {
     end_sample_wait_min: u32,
     end_sample_wait_max: u32,
     start_step: usize,
+    spawn_ops: Vec<MpmAutoVerifySpawnOp>,
+    spawn_ops_applied: u32,
+    spawned_particles_requested: u32,
+    total_particles_before_first_spawn: Option<u32>,
+    tracked_mean_y_before_first_spawn: Option<f32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -89,6 +94,25 @@ struct MpmAutoVerifyConfig {
     min_avg_fps: Option<f32>,
     max_penetration_ratio: Option<f32>,
     min_mean_drop: Option<f32>,
+    #[serde(default)]
+    spawn_ops: Vec<MpmAutoVerifySpawnOpConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct MpmAutoVerifySpawnOpConfig {
+    trigger_step: u32,
+    material: String,
+    count_per_cell: u32,
+    cells: Vec<[i32; 2]>,
+}
+
+#[derive(Clone, Debug)]
+struct MpmAutoVerifySpawnOp {
+    trigger_step: u32,
+    material: ParticleMaterial,
+    count_per_cell: u32,
+    cells: Vec<IVec2>,
+    applied: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -221,6 +245,30 @@ impl MpmAutoVerifyState {
                     .and_then(|s| s.parse::<f32>().ok())
             })
             .unwrap_or(0.05);
+        let mut spawn_ops = Vec::new();
+        for op in &config.spawn_ops {
+            let Some(material) = parse_particle_material_name(&op.material) else {
+                bevy::log::warn!(
+                    "[autoverify] unknown particle material '{}'; skipping spawn op",
+                    op.material
+                );
+                continue;
+            };
+            if op.count_per_cell == 0 || op.cells.is_empty() {
+                continue;
+            }
+            spawn_ops.push(MpmAutoVerifySpawnOp {
+                trigger_step: op.trigger_step,
+                material,
+                count_per_cell: op.count_per_cell,
+                cells: op
+                    .cells
+                    .iter()
+                    .map(|cell| IVec2::new(cell[0], cell[1]))
+                    .collect(),
+                applied: false,
+            });
+        }
         Self {
             enabled,
             scenario_name,
@@ -242,6 +290,11 @@ impl MpmAutoVerifyState {
             end_sample_wait_min: 24,
             end_sample_wait_max: 120,
             start_step: 0,
+            spawn_ops,
+            spawn_ops_applied: 0,
+            spawned_particles_requested: 0,
+            total_particles_before_first_spawn: None,
+            tracked_mean_y_before_first_spawn: None,
         }
     }
 }
@@ -449,6 +502,10 @@ struct MpmAutoVerifyReport {
     runtime_rebuild_waiting_readback_count: u64,
     pending_mover_apply: bool,
     pending_mover_readback: bool,
+    spawn_ops_applied: u32,
+    spawned_particles_requested: u32,
+    total_particles_before_first_spawn: Option<u32>,
+    tracked_mean_y_before_first_spawn: Option<f32>,
     failed_assertions: Vec<String>,
 }
 
@@ -713,6 +770,7 @@ fn run_mpm_autoverify(
     mut gpu_control: ResMut<MpmGpuControl>,
     mut stats_status: ResMut<MpmStatisticsStatus>,
     mut scenario_writer: MessageWriter<ReplayLoadScenarioRequest>,
+    mut world_edit_writer: MessageWriter<GpuWorldEditRequest>,
     mut exit_writer: MessageWriter<bevy::app::AppExit>,
 ) {
     if !state.enabled {
@@ -863,6 +921,10 @@ fn run_mpm_autoverify(
                         .runtime_rebuild_waiting_readback_count,
                     pending_mover_apply: chunk_residency.pending_mover_apply,
                     pending_mover_readback: chunk_residency.pending_mover_readback,
+                    spawn_ops_applied: state.spawn_ops_applied,
+                    spawned_particles_requested: state.spawned_particles_requested,
+                    total_particles_before_first_spawn: state.total_particles_before_first_spawn,
+                    tracked_mean_y_before_first_spawn: state.tracked_mean_y_before_first_spawn,
                     failed_assertions: Vec::new(),
                 };
                 write_report(&state.output_path, &report);
@@ -893,6 +955,48 @@ fn run_mpm_autoverify(
         state.wait_frames = state.wait_frames.saturating_add(1);
         state.elapsed_secs += time.delta_secs();
         let simulated_steps = replay_state.current_step.saturating_sub(state.start_step) as u32;
+        let mut pending_spawns = Vec::new();
+        let mut spawned_particles_requested = 0u32;
+        for spawn_op in state.spawn_ops.iter_mut() {
+            if spawn_op.applied || simulated_steps < spawn_op.trigger_step {
+                continue;
+            }
+            pending_spawns.push((
+                spawn_op.cells.clone(),
+                spawn_op.material,
+                spawn_op.count_per_cell,
+            ));
+            spawned_particles_requested = spawned_particles_requested.saturating_add(
+                spawn_op
+                    .count_per_cell
+                    .saturating_mul(spawn_op.cells.len() as u32),
+            );
+            spawn_op.applied = true;
+        }
+        if !pending_spawns.is_empty() {
+            let applied_spawn_count = pending_spawns.len() as u32;
+            if state.total_particles_before_first_spawn.is_none() {
+                state.total_particles_before_first_spawn = Some(gpu_stats.total());
+                state.tracked_mean_y_before_first_spawn = Some(tracked_mean_y);
+            }
+            for (cells, material, count_per_cell) in pending_spawns {
+                world_edit_writer.write(GpuWorldEditRequest {
+                    cells,
+                    command: GpuWorldEditCommand::AddParticles {
+                        material,
+                        count_per_cell,
+                    },
+                });
+            }
+            state.spawn_ops_applied = state
+                .spawn_ops_applied
+                .saturating_add(applied_spawn_count);
+            state.spawned_particles_requested = state
+                .spawned_particles_requested
+                .saturating_add(spawned_particles_requested);
+            gpu_control.readback_enabled = true;
+            gpu_control.readback_interval_frames = 1;
+        }
         let run_steps_reached = state.run_steps > 0 && simulated_steps >= state.run_steps;
         let run_frames_reached = state.run_steps == 0 && state.wait_frames >= state.run_frames;
         if !run_steps_reached && !run_frames_reached {
@@ -988,6 +1092,10 @@ fn run_mpm_autoverify(
                 .runtime_rebuild_waiting_readback_count,
             pending_mover_apply: chunk_residency.pending_mover_apply,
             pending_mover_readback: chunk_residency.pending_mover_readback,
+            spawn_ops_applied: state.spawn_ops_applied,
+            spawned_particles_requested: state.spawned_particles_requested,
+            total_particles_before_first_spawn: state.total_particles_before_first_spawn,
+            tracked_mean_y_before_first_spawn: state.tracked_mean_y_before_first_spawn,
             failed_assertions: Vec::new(),
         };
         write_report(&state.output_path, &report);
@@ -1047,6 +1155,9 @@ fn run_mpm_autoverify(
         );
         max_speed_mps = gpu_stats.max_speed_mps;
         for row in assertions {
+            if state.spawn_ops_applied > 0 && row.label == "mass_particle_count" {
+                continue;
+            }
             if row.label == "max_speed_mps" {
                 continue;
             }
@@ -1158,6 +1269,10 @@ fn run_mpm_autoverify(
             .runtime_rebuild_waiting_readback_count,
         pending_mover_apply: chunk_residency.pending_mover_apply,
         pending_mover_readback: chunk_residency.pending_mover_readback,
+        spawn_ops_applied: state.spawn_ops_applied,
+        spawned_particles_requested: state.spawned_particles_requested,
+        total_particles_before_first_spawn: state.total_particles_before_first_spawn,
+        tracked_mean_y_before_first_spawn: state.tracked_mean_y_before_first_spawn,
         failed_assertions,
     };
     bevy::log::info!(
@@ -1501,7 +1616,12 @@ fn main() {
         OverlayPlugin,
         CameraControllerPlugin,
     ))
-    .add_systems(Update, run_mpm_autoverify.after(apply_gpu_readback))
+    .add_systems(
+        Update,
+        run_mpm_autoverify
+            .after(apply_gpu_readback)
+            .before(apply_world_edit_requests),
+    )
     .add_systems(Update, run_screenshot_autoverify.after(run_mpm_autoverify))
     .run();
 }

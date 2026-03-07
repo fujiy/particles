@@ -395,7 +395,9 @@ pub fn apply_world_edit_requests(
         if request.cells.is_empty() {
             continue;
         }
-        if upload.particles.is_empty() {
+        if !readback_snapshot.particles.is_empty() {
+            upload.particles = readback_snapshot.particles.clone();
+        } else if upload.particles.is_empty() {
             upload.particles = readback_snapshot.particles.clone();
         }
         match &request.command {
@@ -2195,6 +2197,66 @@ mod tests {
         let upload = app.world().resource::<MpmGpuUploadRequest>();
 
         assert_eq!(upload.particles.len(), 5);
+    }
+
+    #[test]
+    fn world_edit_add_particles_prefers_latest_readback_snapshot() {
+        let mut app = setup_edit_app();
+        let stale_particle = GpuParticle::from_cpu(
+            Vec2::new(0.25, 0.25),
+            Vec2::ZERO,
+            1.0,
+            1.0,
+            Mat2::IDENTITY,
+            Mat2::ZERO,
+            0.0,
+            MPM_PHASE_ID_WATER,
+        );
+        let latest_particle = GpuParticle::from_cpu(
+            cell_to_world_center(IVec2::new(4, 5)),
+            Vec2::ZERO,
+            1.0,
+            1.0,
+            Mat2::IDENTITY,
+            Mat2::ZERO,
+            0.0,
+            MPM_PHASE_ID_WATER,
+        );
+        {
+            let world = app.world_mut();
+            world.resource_mut::<MpmGpuUploadRequest>().particles = vec![stale_particle];
+            world.resource_mut::<MpmReadbackSnapshot>().particles = vec![latest_particle];
+        }
+
+        app.world_mut()
+            .resource_mut::<Messages<GpuWorldEditRequest>>()
+            .write(GpuWorldEditRequest {
+                cells: vec![IVec2::new(7, 5)],
+                command: GpuWorldEditCommand::AddParticles {
+                    material: ParticleMaterial::WaterLiquid,
+                    count_per_cell: 4,
+                },
+            });
+
+        app.update();
+
+        let upload = app.world().resource::<MpmGpuUploadRequest>();
+        let snapshot = app.world().resource::<MpmReadbackSnapshot>();
+
+        assert_eq!(upload.particles.len(), 5);
+        assert_eq!(snapshot.particles.len(), 5);
+        assert!(
+            upload
+                .particles
+                .iter()
+                .any(|particle| world_to_cell(Vec2::from_array(particle.x)) == IVec2::new(4, 5))
+        );
+        assert!(
+            upload
+                .particles
+                .iter()
+                .all(|particle| world_to_cell(Vec2::from_array(particle.x)) != IVec2::new(0, 0))
+        );
     }
 
     #[test]

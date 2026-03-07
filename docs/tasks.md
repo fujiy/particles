@@ -225,6 +225,8 @@
   - 2026-03-07: CPU の slotごとSDF差分生成を廃止し、`terrain_cell_solid` 差分のみを upload して GPU compute (`mpm_terrain_sdf_update.wgsl`) で `terrain_sdf/terrain_normal` を再計算する経路へ移行。
   - 2026-03-07: `TerrainWorld` の dirty chunk から `collect_slots_for_dirty_chunks` で dirty slot(+近傍) を抽出し、必要 slot のみ更新する差分フローを実装。
   - 2026-03-07: `water_drop_motion` / `sand_water_interaction_drop` / `terrain_edit_solid_tool` の autoverify 実行で回帰なしを確認（いずれも実行終了コード 0、MPM系は `passed=true`）。
+  - 2026-03-08: 粒子ツールの `AddParticles` が stale な `upload.particles` を基準に full upload し、GPU readback 後の配置を初期状態へ巻き戻す不具合を確認。編集適用基準を最新 `readback_snapshot` 優先へ修正する。
+  - 2026-03-08: `configs/autoverify/water_drop_spawn_append.json` を追加し、`cargo run -q -- --autoverify-config ...` で `passed=true` を確認。artifact では `spawn_ops_applied=1`, `spawned_particles_requested=32`, `total_particles_before_first_spawn=5712`, `gpu_count_water_liquid=5744`, `runtime_rebuild_count=0` を確認し、追加 spawn 後も巻き戻しなく継続落下することを検証。
 
 ### [MPM-CHUNK-05] 安定化・運用仕上げ（容量、監視、フェイルセーフ）
 

@@ -1,0 +1,25 @@
+{
+  "mpm": {
+    "enabled": true,
+    "scenario_name": "water_drop",
+    "output_path": "artifacts/autoverify/water_drop_spawn_append.json",
+    "sample_material": "water_liquid",
+    "run_frames": 240,
+    "run_steps": 320,
+    "min_avg_fps": 10.0,
+    "max_penetration_ratio": 1.0,
+    "min_mean_drop": 0.5,
+    "spawn_ops": [
+      {
+        "trigger_step": 260,
+        "material": "water_liquid",
+        "count_per_cell": 16,
+        "cells": [
+          [0, 18],
+          [1, 18]
+        ]
+      }
+    ]
+  },
+  "gpu_readback_interval_frames": 1
+}
