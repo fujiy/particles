@@ -28,6 +28,10 @@ pub struct MpmComputePipelines {
 
     pub g2p_layout: BindGroupLayout,
     pub g2p_pipeline: CachedComputePipelineId,
+    pub extract_movers_layout: BindGroupLayout,
+    pub extract_movers_pipeline: CachedComputePipelineId,
+    pub apply_mover_results_layout: BindGroupLayout,
+    pub apply_mover_results_pipeline: CachedComputePipelineId,
 
     pub stats_clear_layout: BindGroupLayout,
     pub stats_clear_pipeline: CachedComputePipelineId,
@@ -175,6 +179,63 @@ impl FromWorld for MpmComputePipelines {
             entry_point: Some("g2p".into()),
             zero_initialize_workgroup_memory: false,
         });
+
+        // extract_movers: 0=params, 1=particles(read), 2=chunk_meta(read), 3=mover_count(rw), 4=movers(rw)
+        let extract_movers_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let extract_movers_layout = render_device.create_bind_group_layout(
+            "mpm_extract_movers_layout",
+            &*extract_movers_entries,
+        );
+        let extract_movers_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_extract_movers".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_extract_movers_layout",
+                    &*extract_movers_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.extract_movers.clone(),
+                shader_defs: vec![],
+                entry_point: Some("extract_movers".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // apply_mover_results: 0=params, 1=particles(rw), 2=result_count(read), 3=results(read)
+        let apply_mover_results_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+            ),
+        );
+        let apply_mover_results_layout = render_device.create_bind_group_layout(
+            "mpm_apply_mover_results_layout",
+            &*apply_mover_results_entries,
+        );
+        let apply_mover_results_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_apply_mover_results".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_apply_mover_results_layout",
+                    &*apply_mover_results_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.apply_mover_results.clone(),
+                shader_defs: vec![],
+                entry_point: Some("apply_mover_results".into()),
+                zero_initialize_workgroup_memory: false,
+            });
 
         // stats_clear: 0=stats_scalars(rw)
         let stats_clear_entries = BindGroupLayoutEntries::sequential(
@@ -507,6 +568,10 @@ impl FromWorld for MpmComputePipelines {
             grid_update_pipeline,
             g2p_layout,
             g2p_pipeline,
+            extract_movers_layout,
+            extract_movers_pipeline,
+            apply_mover_results_layout,
+            apply_mover_results_pipeline,
             stats_clear_layout,
             stats_clear_pipeline,
             stats_total_layout,

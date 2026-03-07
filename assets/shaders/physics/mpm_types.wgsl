@@ -3,7 +3,7 @@
 #define_import_path particles::mpm_types
 
 // Particle storage layout (one array of GpuParticle, 72 bytes each).
-// Matches Rust GpuParticle: x(8)+v(8)+mass(4)+v0(4)+f(16)+c(16)+v_vol(4)+phase_id(4)+pad(8)=72
+// Matches Rust GpuParticle: x(8)+v(8)+mass(4)+v0(4)+f(16)+c(16)+v_vol(4)+phase_id(4)+phi_p(4)+home_slot(4)=72
 struct GpuParticle {
     // position (m)
     x: vec2<f32>,
@@ -29,8 +29,8 @@ struct GpuParticle {
     phase_id: u32,
     // Water fill fraction φ_p [Eq.9, physics.md]. Written by G2P, read by P2G.
     phi_p: f32,
-    // padding to 72 bytes
-    pad_b: u32,
+    // Occupied/home chunk slot id.
+    home_chunk_slot_id: u32,
 }
 
 // Grid node layout.

@@ -15,7 +15,7 @@ use std::mem::size_of;
 use super::buffers::{GPU_STATS_SCALAR_LANES, GpuStatisticsScalars};
 use super::gpu_resources::{MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest};
 use super::pipeline::MpmComputePipelines;
-use super::readback::{GpuReadbackState, GpuStatisticsReadbackState};
+use super::readback::{GpuMoverReadbackState, GpuReadbackState, GpuStatisticsReadbackState};
 use super::sync::MpmStatisticsStatus;
 
 const WORKGROUP_SIZE: u32 = 64;
@@ -28,6 +28,10 @@ static P2G_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
 static GRID_UPDATE_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static G2P_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static EXTRACT_MOVERS_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static APPLY_MOVER_RESULTS_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static STATS_CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -160,6 +164,17 @@ impl Node for MpmComputeNode {
                 );
                 return Ok(());
             };
+            let Some(extract_movers_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.extract_movers_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &EXTRACT_MOVERS_PIPELINE_WARNED,
+                    "extract_movers",
+                    pipelines.extract_movers_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
 
             let clear_bg = device.create_bind_group(
                 "mpm_clear_bg",
@@ -197,8 +212,56 @@ impl Node for MpmComputeNode {
                     buffers.grid_buf.as_entire_binding(),
                 )),
             );
+            let extract_movers_bg = device.create_bind_group(
+                "mpm_extract_movers_bg",
+                &pipelines.extract_movers_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                    buffers.mover_count_buf.as_entire_binding(),
+                    buffers.mover_buf.as_entire_binding(),
+                )),
+            );
+            let mover_result_wgs =
+                (buffers.mover_result_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+            let apply_mover_results_bg = if buffers.mover_result_count > 0 {
+                let Some(pipeline) =
+                    pipeline_cache.get_compute_pipeline(pipelines.apply_mover_results_pipeline)
+                else {
+                    warn_missing_pipeline_once(
+                        &APPLY_MOVER_RESULTS_PIPELINE_WARNED,
+                        "apply_mover_results",
+                        pipelines.apply_mover_results_pipeline,
+                        pipeline_cache,
+                    );
+                    return Ok(());
+                };
+                let bg = device.create_bind_group(
+                    "mpm_apply_mover_results_bg",
+                    &pipelines.apply_mover_results_layout,
+                    &BindGroupEntries::sequential((
+                        buffers.params_buf.as_entire_binding(),
+                        buffers.particle_buf.as_entire_binding(),
+                        buffers.mover_result_count_buf.as_entire_binding(),
+                        buffers.mover_result_buf.as_entire_binding(),
+                    )),
+                );
+                Some((pipeline, bg))
+            } else {
+                None
+            };
 
             let encoder = render_context.command_encoder();
+            if let Some((pipeline, bg)) = apply_mover_results_bg.as_ref() {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("mpm_apply_mover_results"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(mover_result_wgs.max(1), 1, 1);
+            }
             for _ in 0..run_req.substeps {
                 {
                     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -236,6 +299,16 @@ impl Node for MpmComputeNode {
                     pass.set_bind_group(0, &g2p_bg, &[]);
                     pass.dispatch_workgroups(particles_wgs, 1, 1);
                 }
+            }
+            encoder.clear_buffer(&buffers.mover_count_buf, 0, None);
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("mpm_extract_movers"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(extract_movers_pipeline);
+                pass.set_bind_group(0, &extract_movers_bg, &[]);
+                pass.dispatch_workgroups(particles_wgs.max(1), 1, 1);
             }
         }
 
@@ -738,6 +811,10 @@ impl Node for MpmComputeNode {
                     .get_resource::<GpuStatisticsReadbackState>()
                     .map(|state| !state.mapped)
                     .unwrap_or(true);
+                let can_copy_movers = world
+                    .get_resource::<GpuMoverReadbackState>()
+                    .map(|state| !state.mapped)
+                    .unwrap_or(true);
 
                 if has_particles && can_copy_particles {
                     let particle_byte_size =
@@ -757,6 +834,25 @@ impl Node for MpmComputeNode {
                         &buffers.stats_scalar_readback_buf,
                         0,
                         size_of::<GpuStatisticsScalars>() as u64,
+                    );
+                }
+                if has_particles && can_copy_movers {
+                    let mover_record_bytes =
+                        super::gpu_resources::MAX_MOVER_RECORDS as u64
+                            * size_of::<super::buffers::GpuMoverRecord>() as u64;
+                    render_context.command_encoder().copy_buffer_to_buffer(
+                        &buffers.mover_count_buf,
+                        0,
+                        &buffers.mover_readback_buf,
+                        0,
+                        size_of::<u32>() as u64,
+                    );
+                    render_context.command_encoder().copy_buffer_to_buffer(
+                        &buffers.mover_buf,
+                        0,
+                        &buffers.mover_readback_buf,
+                        size_of::<u32>() as u64,
+                        mover_record_bytes,
                     );
                 }
             }

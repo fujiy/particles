@@ -11,14 +11,16 @@ use bytemuck::cast_slice;
 use std::mem::size_of;
 
 use super::buffers::{
-    GpuChunkMeta, GpuGridLayout, GpuGridNode, GpuMpmParams, GpuParticle, GpuStatisticsScalars,
+    GpuChunkMeta, GpuGridLayout, GpuGridNode, GpuMoverResult, GpuMpmParams, GpuParticle,
+    GpuStatisticsScalars,
 };
 use crate::physics::world::constants::{
     CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
 };
 
 const GRID_PADDING_CELLS: i32 = 8;
-const MAX_PARTICLES: u32 = 131_072; // 128k particles max
+pub const MAX_PARTICLES: u32 = 131_072; // 128k particles max
+pub const MAX_MOVER_RECORDS: u32 = MAX_PARTICLES;
 pub const MPM_CHUNK_NODE_DIM: u32 = CHUNK_SIZE_I32 as u32;
 pub const MPM_CHUNK_NODES_PER_SLOT: u32 = MPM_CHUNK_NODE_DIM * MPM_CHUNK_NODE_DIM;
 pub const MAX_RESIDENT_CHUNK_SLOTS: u32 = 256;
@@ -70,6 +72,16 @@ pub struct MpmGpuBuffers {
 
     /// Staging buffer for GPU→CPU readback (particle data, MAP_READ).
     pub readback_buf: Buffer,
+    /// Atomic mover count generated on GPU each step.
+    pub mover_count_buf: Buffer,
+    /// GPU movers append buffer.
+    pub mover_buf: Buffer,
+    /// CPU-uploaded mover result count for GPU apply pass.
+    pub mover_result_count_buf: Buffer,
+    /// CPU-uploaded mover result records.
+    pub mover_result_buf: Buffer,
+    /// Staging buffer for GPU→CPU mover readback (count + records, MAP_READ).
+    pub mover_readback_buf: Buffer,
 
     /// GPU-side statistics scalar lanes (atomic<u32>).
     pub stats_scalar_buf: Buffer,
@@ -80,6 +92,8 @@ pub struct MpmGpuBuffers {
     pub particle_count: u32,
     /// Current active resident chunk count on GPU.
     pub active_chunk_count: u32,
+    /// Current mover-result count to apply on GPU this frame.
+    pub mover_result_count: u32,
     /// Max grid-node capacity allocated for sparse chunk layout.
     pub max_node_capacity: usize,
 
@@ -148,6 +162,37 @@ impl MpmGpuBuffers {
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        let mover_count_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_mover_count"),
+            size: size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mover_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_movers"),
+            size: MAX_MOVER_RECORDS as u64 * size_of::<super::buffers::GpuMoverRecord>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let mover_result_count_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_mover_result_count"),
+            size: size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mover_result_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_mover_results"),
+            size: MAX_MOVER_RECORDS as u64 * size_of::<GpuMoverResult>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mover_readback_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_mover_readback"),
+            size: size_of::<u32>() as u64
+                + MAX_MOVER_RECORDS as u64 * size_of::<super::buffers::GpuMoverRecord>() as u64,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
 
         let stats_scalar_buf = device.create_buffer(&BufferDescriptor {
             label: Some("mpm_stats_scalar"),
@@ -173,10 +218,16 @@ impl MpmGpuBuffers {
             terrain_normal_buf,
             stats_cell_flags_buf,
             readback_buf,
+            mover_count_buf,
+            mover_buf,
+            mover_result_count_buf,
+            mover_result_buf,
+            mover_readback_buf,
             stats_scalar_buf,
             stats_scalar_readback_buf,
             particle_count: 0,
             active_chunk_count: 0,
+            mover_result_count: 0,
             max_node_capacity,
             ready: false,
         }
@@ -222,6 +273,20 @@ impl MpmGpuBuffers {
         }
         queue.write_buffer(&self.chunk_meta_buf, 0, cast_slice(chunks));
     }
+
+    pub fn upload_mover_results(&mut self, queue: &RenderQueue, results: &[GpuMoverResult]) {
+        assert!(results.len() <= MAX_MOVER_RECORDS as usize);
+        self.mover_result_count = results.len() as u32;
+        queue.write_buffer(
+            &self.mover_result_count_buf,
+            0,
+            cast_slice(std::slice::from_ref(&self.mover_result_count)),
+        );
+        if results.is_empty() {
+            return;
+        }
+        queue.write_buffer(&self.mover_result_buf, 0, cast_slice(results));
+    }
 }
 
 /// Bevy main-world resource: tracks what CPU needs to upload each frame.
@@ -231,6 +296,10 @@ pub struct MpmGpuUploadRequest {
     pub upload_particles: bool,
     /// One-frame latched bit extracted into render world.
     pub upload_particles_frame: bool,
+    /// Main-world request bit: request mover-result upload on next extraction.
+    pub upload_mover_results: bool,
+    /// One-frame latched bit extracted into render world.
+    pub upload_mover_results_frame: bool,
     /// If true, upload chunk metadata this frame.
     pub upload_chunks: bool,
     /// If true, upload terrain SDF/normals this frame.
@@ -239,6 +308,8 @@ pub struct MpmGpuUploadRequest {
     pub chunk_meta: Vec<GpuChunkMeta>,
     /// Particle data to upload.
     pub particles: Vec<GpuParticle>,
+    /// CPU→GPU mover results (`particle_id -> new_home_slot_id`).
+    pub mover_results: Vec<GpuMoverResult>,
     /// Terrain SDF to upload (indexed by grid layout).
     pub terrain_sdf: Vec<f32>,
     /// Terrain normals to upload.

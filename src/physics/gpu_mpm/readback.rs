@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 
-use super::buffers::{GpuParticle, GpuStatisticsScalars};
+use super::buffers::{GpuMoverRecord, GpuParticle, GpuStatisticsScalars};
 
 // ---------------------------------------------------------------------------
 // Final parsed result (shared render world → main world via Arc)
@@ -38,6 +38,26 @@ impl GpuReadbackResult {
 #[derive(Resource, Clone, Default)]
 pub struct GpuStatisticsReadbackResult {
     pub inner: Arc<Mutex<Option<GpuStatisticsScalars>>>,
+}
+
+#[derive(Resource, Clone, Default)]
+pub struct GpuMoverReadbackResult {
+    pub inner: Arc<Mutex<Option<Vec<GpuMoverRecord>>>>,
+}
+
+impl GpuMoverReadbackResult {
+    pub fn take(&self) -> Option<Vec<GpuMoverRecord>> {
+        if let Ok(mut g) = self.inner.lock() {
+            g.take()
+        } else {
+            None
+        }
+    }
+    pub fn store(&self, movers: Vec<GpuMoverRecord>) {
+        if let Ok(mut g) = self.inner.lock() {
+            *g = Some(movers);
+        }
+    }
 }
 
 impl GpuStatisticsReadbackResult {
@@ -92,6 +112,23 @@ pub struct GpuStatisticsReadbackState {
 }
 
 impl Default for GpuStatisticsReadbackState {
+    fn default() -> Self {
+        Self {
+            mapped: false,
+            mapped_ready: Arc::new(AtomicBool::new(false)),
+            frame_counter: 0,
+        }
+    }
+}
+
+#[derive(Resource)]
+pub struct GpuMoverReadbackState {
+    pub mapped: bool,
+    pub mapped_ready: Arc<AtomicBool>,
+    pub frame_counter: u64,
+}
+
+impl Default for GpuMoverReadbackState {
     fn default() -> Self {
         Self {
             mapped: false,

@@ -24,13 +24,14 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 use std::mem::size_of;
 
 use self::gpu_resources::{
-    MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock,
-    MpmGpuUploadRequest,
+    MAX_MOVER_RECORDS, MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest,
+    MpmGpuStepClock, MpmGpuUploadRequest,
 };
 use self::node::MpmComputeNode;
 use self::pipeline::MpmComputePipelines;
 use self::readback::{
-    GpuReadbackResult, GpuReadbackState, GpuStatisticsReadbackResult, GpuStatisticsReadbackState,
+    GpuMoverReadbackResult, GpuMoverReadbackState, GpuReadbackResult, GpuReadbackState,
+    GpuStatisticsReadbackResult, GpuStatisticsReadbackState,
 };
 use self::shaders::MpmShaders;
 use crate::physics::state::SimUpdateSet;
@@ -52,10 +53,13 @@ impl ExtractResource for MpmGpuUploadRequest {
         Self {
             upload_particles: source.upload_particles_frame,
             upload_particles_frame: false,
+            upload_mover_results: source.upload_mover_results_frame,
+            upload_mover_results_frame: false,
             upload_chunks: source.upload_chunks,
             upload_terrain: source.upload_terrain,
             chunk_meta: source.chunk_meta.clone(),
             particles: source.particles.clone(),
+            mover_results: source.mover_results.clone(),
             terrain_sdf: source.terrain_sdf.clone(),
             terrain_normal: source.terrain_normal.clone(),
             last_uploaded_terrain_version: source.last_uploaded_terrain_version,
@@ -68,10 +72,13 @@ impl Clone for MpmGpuUploadRequest {
         Self {
             upload_particles: self.upload_particles,
             upload_particles_frame: self.upload_particles_frame,
+            upload_mover_results: self.upload_mover_results,
+            upload_mover_results_frame: self.upload_mover_results_frame,
             upload_chunks: self.upload_chunks,
             upload_terrain: self.upload_terrain,
             chunk_meta: self.chunk_meta.clone(),
             particles: self.particles.clone(),
+            mover_results: self.mover_results.clone(),
             terrain_sdf: self.terrain_sdf.clone(),
             terrain_normal: self.terrain_normal.clone(),
             last_uploaded_terrain_version: self.last_uploaded_terrain_version,
@@ -157,6 +164,12 @@ fn prepare_gpu_uploads(
         buffers.upload_chunks(&queue, &upload.chunk_meta);
     } else {
         buffers.active_chunk_count = params_req.params.resident_chunk_count;
+    }
+
+    if upload.upload_mover_results {
+        buffers.upload_mover_results(&queue, &upload.mover_results);
+    } else {
+        buffers.upload_mover_results(&queue, &[]);
     }
 
     if upload.upload_terrain && !upload.terrain_sdf.is_empty() && !upload.terrain_normal.is_empty()
@@ -293,6 +306,74 @@ fn readback_statistics(
     state.mapped = true;
 }
 
+fn readback_movers(
+    control: Res<MpmGpuControl>,
+    buffers: Res<MpmGpuBuffers>,
+    mut state: ResMut<GpuMoverReadbackState>,
+    readback_result: Res<GpuMoverReadbackResult>,
+) {
+    if control.init_only || !control.readback_enabled {
+        return;
+    }
+    if !buffers.ready || buffers.particle_count == 0 {
+        return;
+    }
+
+    if state.mapped {
+        let ready = state
+            .mapped_ready
+            .load(std::sync::atomic::Ordering::Acquire);
+        if ready {
+            let byte_size = size_of::<u32>() as u64
+                + MAX_MOVER_RECORDS as u64 * size_of::<buffers::GpuMoverRecord>() as u64;
+            let slice = buffers.mover_readback_buf.slice(..byte_size);
+            let data = slice.get_mapped_range();
+            if data.len() >= size_of::<u32>() {
+                let count = *bytemuck::from_bytes::<u32>(&data[..size_of::<u32>()]);
+                let max_count = MAX_MOVER_RECORDS.min(buffers.particle_count);
+                let mover_count = count.min(max_count);
+                let records_offset = size_of::<u32>();
+                let records_bytes = mover_count as usize * size_of::<buffers::GpuMoverRecord>();
+                if data.len() >= records_offset + records_bytes {
+                    let mut records = Vec::with_capacity(mover_count as usize);
+                    for chunk in data[records_offset..records_offset + records_bytes]
+                        .chunks_exact(size_of::<buffers::GpuMoverRecord>())
+                    {
+                        records.push(bytemuck::pod_read_unaligned::<buffers::GpuMoverRecord>(
+                            chunk,
+                        ));
+                    }
+                    readback_result.store(records);
+                }
+            }
+            drop(data);
+            buffers.mover_readback_buf.unmap();
+            state
+                .mapped_ready
+                .store(false, std::sync::atomic::Ordering::Release);
+            state.mapped = false;
+        }
+        return;
+    }
+
+    state.frame_counter = state.frame_counter.wrapping_add(1);
+    let interval = control.readback_interval_frames.max(1) as u64;
+    if state.frame_counter % interval != 0 {
+        return;
+    }
+
+    let byte_size = size_of::<u32>() as u64
+        + MAX_MOVER_RECORDS as u64 * size_of::<buffers::GpuMoverRecord>() as u64;
+    let slice = buffers.mover_readback_buf.slice(..byte_size);
+    let flag = state.mapped_ready.clone();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        if result.is_ok() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+    });
+    state.mapped = true;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -305,6 +386,8 @@ impl Plugin for GpuMpmPlugin {
         let readback_for_render = readback.clone();
         let statistics_readback = GpuStatisticsReadbackResult::default();
         let statistics_readback_for_render = statistics_readback.clone();
+        let mover_readback = GpuMoverReadbackResult::default();
+        let mover_readback_for_render = mover_readback.clone();
 
         app.init_resource::<MpmGpuUploadRequest>()
             .init_resource::<MpmGpuParamsRequest>()
@@ -318,6 +401,7 @@ impl Plugin for GpuMpmPlugin {
             .init_resource::<sync::MpmStatisticsSnapshot>()
             .insert_resource(readback)
             .insert_resource(statistics_readback)
+            .insert_resource(mover_readback)
             .add_systems(
                 Update,
                 (
@@ -332,7 +416,11 @@ impl Plugin for GpuMpmPlugin {
             )
             .add_systems(
                 Update,
-                (sync::apply_gpu_readback, sync::apply_statistics_readback)
+                (
+                    sync::apply_gpu_readback,
+                    sync::apply_statistics_readback,
+                    sync::apply_mover_readback,
+                )
                     .chain()
                     .in_set(SimUpdateSet::Rendering),
             )
@@ -347,12 +435,15 @@ impl Plugin for GpuMpmPlugin {
         render_app
             .insert_resource(readback_for_render)
             .insert_resource(statistics_readback_for_render)
+            .insert_resource(mover_readback_for_render)
             .init_resource::<GpuReadbackState>()
             .init_resource::<GpuStatisticsReadbackState>()
+            .init_resource::<GpuMoverReadbackState>()
             .add_systems(Render, prepare_gpu_uploads.in_set(RenderSystems::Prepare))
             .add_systems(
                 Render,
-                (readback_particles, readback_statistics).in_set(RenderSystems::Cleanup),
+                (readback_particles, readback_statistics, readback_movers)
+                    .in_set(RenderSystems::Cleanup),
             );
 
         let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();

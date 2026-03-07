@@ -39,7 +39,7 @@ const _: () = assert!(std::mem::size_of::<GpuChunkMeta>() == 48);
 
 // ---------------------------------------------------------------------------
 // GPU-side particle layout (matches mpm_types.wgsl::GpuParticle, 72 bytes)
-// Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) v_vol(4) phase_id(4) _pad(8) = 72
+// Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) v_vol(4) phase_id(4) phi_p(4) home_slot(4) = 72
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -59,7 +59,8 @@ pub struct GpuParticle {
     pub phase_id: u32,
     /// Water fill fraction φ_p interpolated from grid (water only). Written by G2P, read by P2G.
     pub phi_p: f32,
-    pub _pad_b: u32,
+    /// Current occupied/home chunk slot id for this particle.
+    pub home_chunk_slot_id: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<GpuParticle>() == 72);
@@ -86,10 +87,36 @@ impl GpuParticle {
             v_vol,
             phase_id: phase_id as u32,
             phi_p: 1.0,
-            _pad_b: 0,
+            home_chunk_slot_id: INVALID_CHUNK_SLOT_ID,
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// GPU-side movers (MPM-CHUNK-02 staging)
+// ---------------------------------------------------------------------------
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct GpuMoverRecord {
+    pub particle_id: u32,
+    pub old_home_slot_id: u32,
+    pub new_chunk_coord_x: i32,
+    pub new_chunk_coord_y: i32,
+}
+
+const _: () = assert!(std::mem::size_of::<GpuMoverRecord>() == 16);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct GpuMoverResult {
+    pub particle_id: u32,
+    pub new_home_slot_id: u32,
+    pub _pad_a: u32,
+    pub _pad_b: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<GpuMoverResult>() == 16);
 
 // ---------------------------------------------------------------------------
 // GPU-side grid node (matches mpm_types.wgsl::GpuGridNode, 32 bytes)

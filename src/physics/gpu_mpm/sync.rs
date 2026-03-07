@@ -7,15 +7,15 @@ use bevy::prelude::*;
 use std::collections::HashSet;
 
 use super::buffers::{
-    self, GpuChunkMeta, GpuGridLayout, GpuMpmParams, GpuParticle, GpuStatisticsScalars,
-    INVALID_CHUNK_SLOT_ID,
+    self, GpuChunkMeta, GpuGridLayout, GpuMoverResult, GpuMpmParams, GpuParticle,
+    GpuStatisticsScalars, INVALID_CHUNK_SLOT_ID,
 };
 use super::gpu_resources::{
     MAX_RESIDENT_CHUNK_SLOTS, MPM_CHUNK_NODE_DIM, MpmGpuControl, MpmGpuParamsRequest,
     MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest, world_grid_layout,
 };
 use super::phase::mpm_phase_id_for_particle;
-use super::readback::{GpuReadbackResult, GpuStatisticsReadbackResult};
+use super::readback::{GpuMoverReadbackResult, GpuReadbackResult, GpuStatisticsReadbackResult};
 use crate::params::ActivePhysicsParams;
 use crate::physics::material::{ParticleMaterial, particle_properties};
 use crate::physics::state::{ReplayState, SimulationState};
@@ -388,15 +388,21 @@ pub fn prepare_particle_upload(
     if control.init_only {
         upload.upload_particles = false;
         upload.upload_particles_frame = false;
+        upload.upload_mover_results = false;
+        upload.upload_mover_results_frame = false;
         upload.upload_chunks = false;
         sim_state.gpu_mpm_active = false;
         upload.particles.clear();
+        upload.mover_results.clear();
         return;
     }
     let upload_requested = upload.upload_particles;
     upload.upload_particles_frame = upload_requested;
     // Consume main-world request flag; explicit requests set this again when needed.
     upload.upload_particles = false;
+    let mover_upload_requested = upload.upload_mover_results;
+    upload.upload_mover_results_frame = mover_upload_requested;
+    upload.upload_mover_results = false;
 
     // Keep GPU run-state stable regardless of one-shot upload flag consumption.
     // `upload.particles` is the authoritative CPU-side snapshot for the current set.
@@ -457,6 +463,17 @@ pub fn prepare_terrain_upload(
         residency.chunk_sdf_samples = 0;
         return;
     };
+
+    if !upload.particles.is_empty() {
+        let unresolved =
+            assign_home_slot_ids(&mut upload.particles, build.chunk_origin, build.chunk_dims);
+        if unresolved > 0 {
+            bevy::log::warn!(
+                "[gpu_mpm] unresolved home slots during static residency rebuild: {}",
+                unresolved
+            );
+        }
+    }
 
     upload.chunk_meta = build.chunk_meta;
     upload.upload_chunks = true;
@@ -716,6 +733,43 @@ pub fn apply_statistics_readback(
     *stats_snapshot = MpmStatisticsSnapshot::from_gpu_scalars(scalars);
 }
 
+pub fn apply_mover_readback(
+    control: Res<MpmGpuControl>,
+    mover_readback: Res<GpuMoverReadbackResult>,
+    residency: Res<MpmChunkResidencyState>,
+    mut upload: ResMut<MpmGpuUploadRequest>,
+) {
+    if control.init_only || !control.readback_enabled {
+        return;
+    }
+    let Some(movers) = mover_readback.take() else {
+        return;
+    };
+    if !residency.initialized {
+        return;
+    }
+
+    upload.mover_results.clear();
+    for mover in movers {
+        let new_chunk = IVec2::new(mover.new_chunk_coord_x, mover.new_chunk_coord_y);
+        let Some(new_slot) =
+            slot_id_from_chunk_coord(new_chunk, residency.chunk_origin, residency.chunk_dims)
+        else {
+            continue;
+        };
+        if new_slot == mover.old_home_slot_id {
+            continue;
+        }
+        upload.mover_results.push(GpuMoverResult {
+            particle_id: mover.particle_id,
+            new_home_slot_id: new_slot,
+            _pad_a: 0,
+            _pad_b: 0,
+        });
+    }
+    upload.upload_mover_results = !upload.mover_results.is_empty();
+}
+
 fn append_particles_in_cell(
     upload_particles: &mut Vec<GpuParticle>,
     cell: IVec2,
@@ -831,6 +885,20 @@ fn slot_id_from_chunk_coord(chunk: IVec2, origin: IVec2, dims: UVec2) -> Option<
         return None;
     }
     Some(ly_u * dims.x + lx_u)
+}
+
+fn assign_home_slot_ids(particles: &mut [GpuParticle], origin: IVec2, dims: UVec2) -> u32 {
+    let mut unresolved = 0u32;
+    for particle in particles.iter_mut() {
+        let chunk = chunk_coord_from_world_pos(Vec2::from_array(particle.x));
+        if let Some(slot_id) = slot_id_from_chunk_coord(chunk, origin, dims) {
+            particle.home_chunk_slot_id = slot_id;
+        } else {
+            unresolved = unresolved.saturating_add(1);
+            particle.home_chunk_slot_id = INVALID_CHUNK_SLOT_ID;
+        }
+    }
+    unresolved
 }
 
 fn build_static_chunk_upload(
