@@ -1442,7 +1442,7 @@ fn run_screenshot_autoverify(
 fn main() {
     let autoverify_config_path = parse_autoverify_config_path();
     let autoverify_config = load_autoverify_config(autoverify_config_path.as_deref());
-    let mpm_autoverify = autoverify_config
+    let _mpm_autoverify = autoverify_config
         .mpm
         .enabled
         .unwrap_or_else(|| env_bool("PARTICLES_AUTOVERIFY_MPM"));
@@ -1454,7 +1454,7 @@ fn main() {
                 .and_then(|v| v.parse::<u32>().ok())
                 .filter(|&v| v > 0)
         })
-        .unwrap_or(if mpm_autoverify { 1 } else { 60 });
+        .unwrap_or(1);
 
     let default_plugins = DefaultPlugins
         .set(ImagePlugin::default_nearest())

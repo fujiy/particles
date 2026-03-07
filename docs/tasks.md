@@ -140,21 +140,28 @@
   - 2026-03-07: SDF Overlay をGPU pass化（`sdf_overlay_gpu.wgsl`）し、`terrain_sdf_buf` を直接サンプリングする描画へ変更。`artifacts/autoverify/sdf_overlay_gpu_water_drop.png` で描画成立を確認。
   - 2026-03-07: `mpm_types.wgsl` の `node_index/node_in_bounds` を `chunk_origin/chunk_dims/chunk_node_dim` ベースへ変更し、P2G/G2P/GridUpdate を chunk slot addressing 参照へ切替。CPU側 `terrain_sdf/normal` upload も slot-major 並びに変更。`water_drop_motion` 再検証で `passed=true`, `invalid_slot_access_count=0` を確認。
 
-### [MPM-CHUNK-02] movers抽出 + CPU residency更新 + chunk meta差分反映
+### [MPM-CHUNK-02] occupancy/residency event同期 + exceptional mover fallback
 
 - Status: `In Progress`
 - 背景:
   - `MPM-CHUNK-01` は静的residencyであり、chunk跨ぎ移動が増えるケースでは成立しない。
 - スコープ:
-  - GPU movers抽出、CPU側 `chunk_coord -> slot_id` 更新、GPU差分反映を incremental に導入する。
+  - 通常の隣接chunk移動は GPU 内で `home_chunk_slot_id` を更新し、CPU/GPU 同期は occupancy/residency change event に縮退する。
+  - 粒子ごとの mover readback は exceptional mover（8近傍外移動）向け fallback として維持する。
 - Subtasks:
-  - [x] movers append/readback/result反映バッファを実装する。
-  - [x] `occupied_particle_count` / `halo_ref_count` による slot割当・解放を実装する。
-  - [x] `neighbor_slot_id` の差分再計算と GPU diff upload を実装する。
-  - [x] chunk境界跨ぎシナリオで回帰検証する。
+  - [x] GPU chunk meta に `particle_count_curr/next`（または occupied bit 同等情報）を追加し、ステップ内 occupancy 遷移を抽出可能にする。
+  - [ ] GPU 側で `newly occupied` / `newly empty` / `frontier expansion request` / `exceptional mover` の event 抽出パスを実装する。
+  - [x] Chunk/Grid Overlay の occupied/halo/free 可視化を GPU `chunk_meta` 更新結果のみで成立させ、overlay 表示状態に依存した CPU 同期経路を排除する。
+  - [x] CPU 側で event 駆動の `occupied_particle_count` / `resident_ref_count` 更新、slot allocate/free、`neighbor_slot_id` 差分更新を実装する。
+  - [x] slot table / `neighbor_slot_id` の GPU 反映を非同期キュー化し、通常ステップを同期停止させない。
+  - [x] CPU->GPU 反映を `chunk meta diff` 中心に切替し、通常フレームで mover result upload を不要化する。
+  - [x] exceptional mover 発生時のみ既存 mover 解決ルートを起動する分岐を実装する。
+  - [ ] `water_drop_motion` / `sand_water_interaction_drop` / 境界跨ぎ高頻度ケースで、`runtime_rebuild_count=0` かつ性能改善を確認する。
 - 完了条件:
-  - 粒子の chunk移動時に `home_chunk_slot_id` と chunk table が整合し続ける。
+  - 通常ケースでは粒子 mover 全件 readback なしで `home_chunk_slot_id` と chunk table が整合し続ける。
+  - exceptional mover のみ fallback で正しく収束する。
 - 進捗:
+  - 2026-03-07: 新方針へ再定義。同期単位を mover 全件から occupancy/residency change event に変更し、mover全件同期は exceptional fallback 専用に縮退する方針を確定。
   - 2026-03-07: mover 抽出/読出/結果反映パス（`mpm_extract_movers` / `mpm_apply_mover_results`）を追加し、GPU→CPU readback と CPU→GPU 反映バッファを導入。
   - 2026-03-07: CPU 側に `occupied_particle_count` / `halo_ref_count` を持つ slot 台帳を追加。mover 差分から occupied 0↔1 遷移を更新し、resident slot を incremental に維持。
   - 2026-03-07: `neighbor_slot_id` を resident 変化 slot + Moore近傍で再計算し、`chunk_meta` 差分 upload（多件時は全量 upload fallback）を実装。
@@ -162,6 +169,13 @@
   - 2026-03-07: mover 同期を strict lockstep 化。`readback適用 -> upload準備` の順序セットを明示し、`pending_mover_readback/pending_mover_apply` が解消するまで次 substep を停止。`mpm_apply_mover_results` の ACK を main world へ返し、ACK 受領で mover_result バッファを明示クリアする経路へ変更。
   - 2026-03-07: mover readback を「GPU copy が発生したフレームのみ map」するよう修正し、同一 mover バッファの再読を防止。`update_halo_ref_count` の境界処理も見直し、chunk layout 境界での不要 rebuild を除去。
   - 2026-03-07: autoverify report へ `runtime_rebuild_*` / `pending_mover_*` 指標を追加。再検証（`water_drop_motion`, `sand_water_interaction_drop`）で `runtime_rebuild_count=0` を確認。
+  - 2026-03-07: `mpm_extract_movers` を更新し、隣接 chunk 移動は GPU 内で `home_chunk_slot_id` を即時更新。`mover` readback は frontier/8近傍外など unresolved 粒子のみを返す exceptional fallback 経路へ縮退。
+  - 2026-03-07: `ChunkMetaBuffer` に `particle_count_curr/next` と `occupied_bit_curr/next` を追加。`apply_gpu_readback` で readback snapshot から occupancy 変化を再構築し、`chunk_meta diff` を非同期反映する経路へ変更（GPU step の同期停止を撤去）。
+  - 2026-03-07: `prepare_gpu_run_state` の strict lockstep を撤去して substep 実行を再許可。`water_drop_motion` / `sand_water_interaction_drop` の autoverify はいずれも `passed=true`。現状は両シナリオで `runtime_rebuild_count=1`（`new_chunk_oob=1`）が残るため、閾値0達成は未完。
+  - 2026-03-07: runtime rebuild 発火時の `requested/start/pending` ログを追加し、`water_drop` シナリオを上下左右の壁で閉領域化。`water_drop_motion` で `passed=true` / `runtime_rebuild_count=0` を再確認。
+  - 2026-03-07: overlay 色設定を `assets/params/overlay.ron` に移管（occupied/halo/free の edge/grid 色）。`chunk_physics_overlay_gpu.wgsl` は uniform 参照へ変更し、色のハードコードを廃止。
+  - 2026-03-07: `apply_gpu_readback` で生成した `chunk_meta_diffs` が prepare 先頭クリアで失われる不整合を修正（`pending_snapshot_refresh` で prepare 側適用へ移動）。
+  - 2026-03-07: `mpm_chunk_meta_update.wgsl`（clear/accumulate/finalize）を追加し、GPU 側で per-step に `particle_count`/`occupied`/`resident(halo)` を更新。Chunk/Grid Overlay の occupied/halo/free 更新を CPU readback 非依存化。
 
 ### [MPM-CHUNK-03] active tile再構築と sparse実行最適化
 
@@ -199,7 +213,7 @@
 
 - Status: `Planned`
 - 背景:
-  - 本番運用では slot容量上限、急激なmover増加、診断不足が主要リスクになる。
+  - 本番運用では slot容量上限、frontier変化スパイク、exceptional mover急増、診断不足が主要リスクになる。
 - スコープ:
   - chunk構造の運用安全性を担保し、異常時の挙動を定義する。
 - Subtasks:
@@ -249,6 +263,6 @@
 - 静的residency段階で粒子が resident 範囲外へ出た場合の仕様（クランプ/消去/一時停止）を定義する必要がある。
 - chunk SDF の離散化仕様（node中心かcell中心か、normal再構成法、境界しきい値）を `design.md` へ固定する必要がある。
 - Render 側地形キャッシュ（Near/override）と MPM用 chunk SDF の更新順序を明文化し、同一フレーム整合を保証する必要がある。
-- mover率が高いケースの fallback 切替閾値（`mover_count` ベース）を事前に決める必要がある。
+- fallback 切替閾値を `mover_count` 単体ではなく、`frontier change` と `exceptional mover` 指標ベースで再定義する必要がある。
 - `chunks.md` 目標では `CHUNK_NODE_SIZE=32`（`NODE_SPACING_M=0.125`）を前提としているが、現実装の solver 格子は `h=0.25` のため `MPM-CHUNK-01` では `chunk_node_dim=16` を採用している。`MPM-CHUNK-02` 着手前に解像度移行方針（`h` 引き下げ時の安定条件と閾値再設定）を決める必要がある。
 - `MPM-CHUNK-02` 現段は `chunk_origin/chunk_dims` に基づく固定 slot pool 上で resident on/off と diff upload を実装しており、free list を使った任意 slot 再配置（完全疎 slot addressing）は未導入。P2G/Grid/G2P を `home_chunk_slot_id + neighbor_slot_id` 参照へ完全移行する追加WUが必要。

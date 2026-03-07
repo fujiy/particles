@@ -6,12 +6,25 @@ struct GpuChunkMeta {
     chunk_coord_y: i32,
     neighbor_slot_id: array<u32, 8>,
     active_tile_mask: u32,
-    _pad: u32,
+    particle_count_curr: u32,
+    particle_count_next: u32,
+    occupied_bit_curr: u32,
+    occupied_bit_next: u32,
+}
+
+struct ChunkOverlayColors {
+    occupied_edge: vec4<f32>,
+    occupied_grid: vec4<f32>,
+    halo_edge: vec4<f32>,
+    halo_grid: vec4<f32>,
+    free_edge: vec4<f32>,
+    free_grid: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<uniform> params: MpmParams;
 @group(0) @binding(2) var<storage, read> chunk_meta: array<GpuChunkMeta>;
+@group(0) @binding(3) var<uniform> colors: ChunkOverlayColors;
 
 struct VertexOut {
     @builtin(position)
@@ -20,9 +33,9 @@ struct VertexOut {
     local_uv: vec2<f32>,
     @location(1)
     edge_color: vec4<f32>,
+    @location(2)
+    grid_color: vec4<f32>,
 };
-
-const INVALID_SLOT: u32 = 0xffffffffu;
 
 fn quad_corner(vertex_index: u32) -> vec2<f32> {
     if vertex_index == 0u { return vec2<f32>(0.0, 0.0); }
@@ -48,21 +61,24 @@ fn vs_main(
     );
     let world_xy = chunk_min + uv * chunk_world_size;
 
-    var invalid_neighbor_count = 0u;
-    for (var i = 0u; i < 8u; i++) {
-        if chunk_entry.neighbor_slot_id[i] == INVALID_SLOT {
-            invalid_neighbor_count += 1u;
-        }
+    let is_occupied = chunk_entry.occupied_bit_curr != 0u;
+    let is_halo_only = !is_occupied && (chunk_entry.occupied_bit_next != 0u);
+    var edge_color = colors.free_edge;
+    var grid_color = colors.free_grid;
+    if is_halo_only {
+        edge_color = colors.halo_edge;
+        grid_color = colors.halo_grid;
     }
-    var edge_color = vec4<f32>(0.98, 0.55, 0.20, 0.92);
-    if invalid_neighbor_count == 0u {
-        edge_color = vec4<f32>(0.20, 0.88, 0.66, 0.88);
+    if is_occupied {
+        edge_color = colors.occupied_edge;
+        grid_color = colors.occupied_grid;
     }
 
     var out: VertexOut;
     out.clip_position = view.clip_from_world * vec4<f32>(world_xy.x, world_xy.y, 0.0, 1.0);
     out.local_uv = uv;
     out.edge_color = edge_color;
+    out.grid_color = grid_color;
     return out;
 }
 
@@ -88,7 +104,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let grid_alpha = 1.0 - smoothstep(0.5, 1.5, grid_px);
 
     let edge_term = in.edge_color.a * edge_alpha;
-    let grid_term = 0.34 * grid_alpha;
+    let grid_term = in.grid_color.a * grid_alpha;
     if edge_term <= 1.0e-4 && grid_term <= 1.0e-4 {
         discard;
     }
@@ -96,5 +112,5 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if edge_term >= grid_term {
         return vec4<f32>(in.edge_color.rgb, edge_term);
     }
-    return vec4<f32>(0.32, 0.84, 0.96, grid_term);
+    return vec4<f32>(in.grid_color.rgb, grid_term);
 }

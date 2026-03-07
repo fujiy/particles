@@ -209,6 +209,7 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
     let wall_thickness = 2;
     let left_wall_max = world_min_cell + wall_thickness - 1;
     let right_wall_min = world_max_cell - wall_thickness + 1;
+    let top_wall_min = world_max_cell - wall_thickness + 1;
 
     vec![
         ScenarioSpec {
@@ -234,6 +235,13 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
                 TerrainFillSpec {
                     rect: CellRect::new(
                         IVec2::new(right_wall_min, world_min_cell),
+                        IVec2::new(world_max_cell, world_max_cell),
+                    ),
+                    material: TerrainMaterial::Stone,
+                },
+                TerrainFillSpec {
+                    rect: CellRect::new(
+                        IVec2::new(world_min_cell, top_wall_min),
                         IVec2::new(world_max_cell, world_max_cell),
                     ),
                     material: TerrainMaterial::Stone,

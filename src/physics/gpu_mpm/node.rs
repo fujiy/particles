@@ -35,6 +35,12 @@ static EXTRACT_MOVERS_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static APPLY_MOVER_RESULTS_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static CHUNK_META_CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static CHUNK_META_ACCUM_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static CHUNK_META_FINALIZE_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static STATS_CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static STATS_TOTAL_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
@@ -108,6 +114,8 @@ impl Node for MpmComputeNode {
 
         let particle_count = buffers.particle_count;
         let particles_wgs = (particle_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+        let chunk_count = params_req.params.resident_chunk_count;
+        let chunk_wgs = (chunk_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
         let node_count = params_req
             .params
             .grid_width
@@ -220,6 +228,39 @@ impl Node for MpmComputeNode {
                 );
                 return Ok(());
             };
+            let Some(chunk_meta_clear_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.chunk_meta_clear_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &CHUNK_META_CLEAR_PIPELINE_WARNED,
+                    "chunk_meta_clear",
+                    pipelines.chunk_meta_clear_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let Some(chunk_meta_accumulate_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.chunk_meta_accumulate_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &CHUNK_META_ACCUM_PIPELINE_WARNED,
+                    "chunk_meta_accumulate",
+                    pipelines.chunk_meta_accumulate_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let Some(chunk_meta_finalize_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.chunk_meta_finalize_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &CHUNK_META_FINALIZE_PIPELINE_WARNED,
+                    "chunk_meta_finalize",
+                    pipelines.chunk_meta_finalize_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
 
             let clear_bg = device.create_bind_group(
                 "mpm_clear_bg",
@@ -266,6 +307,33 @@ impl Node for MpmComputeNode {
                     buffers.chunk_meta_buf.as_entire_binding(),
                     buffers.mover_count_buf.as_entire_binding(),
                     buffers.mover_buf.as_entire_binding(),
+                )),
+            );
+            let chunk_meta_clear_bg = device.create_bind_group(
+                "mpm_chunk_meta_clear_bg",
+                &pipelines.chunk_meta_clear_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                )),
+            );
+            let chunk_meta_accumulate_bg = device.create_bind_group(
+                "mpm_chunk_meta_accumulate_bg",
+                &pipelines.chunk_meta_accumulate_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                )),
+            );
+            let chunk_meta_finalize_bg = device.create_bind_group(
+                "mpm_chunk_meta_finalize_bg",
+                &pipelines.chunk_meta_finalize_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
                 )),
             );
 
@@ -317,6 +385,35 @@ impl Node for MpmComputeNode {
                 pass.set_pipeline(extract_movers_pipeline);
                 pass.set_bind_group(0, &extract_movers_bg, &[]);
                 pass.dispatch_workgroups(particles_wgs.max(1), 1, 1);
+            }
+            if chunk_count > 0 {
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mpm_chunk_meta_clear"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(chunk_meta_clear_pipeline);
+                    pass.set_bind_group(0, &chunk_meta_clear_bg, &[]);
+                    pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
+                }
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mpm_chunk_meta_accumulate"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(chunk_meta_accumulate_pipeline);
+                    pass.set_bind_group(0, &chunk_meta_accumulate_bg, &[]);
+                    pass.dispatch_workgroups(particles_wgs.max(1), 1, 1);
+                }
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mpm_chunk_meta_finalize"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(chunk_meta_finalize_pipeline);
+                    pass.set_bind_group(0, &chunk_meta_finalize_bg, &[]);
+                    pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
+                }
             }
         }
 

@@ -20,7 +20,13 @@ pub struct GpuChunkMeta {
     /// (-1,-1), (0,-1), (1,-1), (-1,0), (1,0), (-1,1), (0,1), (1,1)
     pub neighbor_slot_id: [u32; 8],
     pub active_tile_mask: u32,
-    pub _pad: u32,
+    /// Snapshot of occupied particle count for the latest processed frame.
+    pub particle_count_curr: u32,
+    /// Scratch/current-frame occupancy count (kept for event-oriented debugging).
+    pub particle_count_next: u32,
+    /// Occupancy bit mirror for curr/next (0/1).
+    pub occupied_bit_curr: u32,
+    pub occupied_bit_next: u32,
 }
 
 impl Default for GpuChunkMeta {
@@ -30,12 +36,15 @@ impl Default for GpuChunkMeta {
             chunk_coord_y: 0,
             neighbor_slot_id: [INVALID_CHUNK_SLOT_ID; 8],
             active_tile_mask: 0,
-            _pad: 0,
+            particle_count_curr: 0,
+            particle_count_next: 0,
+            occupied_bit_curr: 0,
+            occupied_bit_next: 0,
         }
     }
 }
 
-const _: () = assert!(std::mem::size_of::<GpuChunkMeta>() == 48);
+const _: () = assert!(std::mem::size_of::<GpuChunkMeta>() == 60);
 
 // ---------------------------------------------------------------------------
 // GPU-side particle layout (matches mpm_types.wgsl::GpuParticle, 72 bytes)

@@ -13,6 +13,11 @@
 - `docs/tasks.md` should be organized by implementation unit (Work Unit), not a flat short checklist.
   - Each Work Unit should include: background, scope, subtasks, and completion criteria.
 
+## Runtime Parameterization Policy
+- Runtime-tunable values (colors, UI constants, thresholds, debug visualization knobs) should be defined in `assets/params/*.ron` and loaded via typed params assets.
+- Avoid hardcoded tunable literals in Rust/WGSL. Keep hardcoding only for true compile-time constants or protocol/layout constants.
+- When a tunable is temporarily hardcoded for bring-up, add a follow-up task in `docs/tasks.md` to move it into params.
+
 ## Session Types
 - `Design session`
   - Purpose: design discussion, specification updates, task creation.

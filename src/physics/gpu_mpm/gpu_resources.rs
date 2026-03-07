@@ -386,7 +386,7 @@ impl Default for MpmGpuControl {
         Self {
             init_only: false,
             readback_enabled: true,
-            readback_interval_frames: 60,
+            readback_interval_frames: 1,
         }
     }
 }

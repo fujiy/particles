@@ -10,15 +10,85 @@ use bevy::render::render_resource::{
     SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat, VertexState,
     binding_types::{storage_buffer_read_only_sized, uniform_buffer, uniform_buffer_sized},
 };
-use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::view::{Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
+use bytemuck::{Pod, Zeroable};
 use std::mem::size_of;
 
 use super::{PhysicsAreaOverlayState, TileOverlayState};
+use crate::params::ActiveOverlayParams;
 use crate::physics::gpu_mpm::buffers::{GpuChunkMeta, GpuMpmParams};
 use crate::physics::gpu_mpm::gpu_resources::MpmGpuBuffers;
 
 const CHUNK_PHYSICS_OVERLAY_SHADER_PATH: &str = "shaders/overlay/chunk_physics_overlay_gpu.wgsl";
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct GpuChunkOverlayColors {
+    occupied_edge: [f32; 4],
+    occupied_grid: [f32; 4],
+    halo_edge: [f32; 4],
+    halo_grid: [f32; 4],
+    free_edge: [f32; 4],
+    free_grid: [f32; 4],
+}
+
+impl Default for GpuChunkOverlayColors {
+    fn default() -> Self {
+        Self {
+            occupied_edge: [0.98, 0.50, 0.12, 0.94],
+            occupied_grid: [0.98, 0.50, 0.12, 0.34],
+            halo_edge: [0.18, 0.78, 0.96, 0.86],
+            halo_grid: [0.18, 0.78, 0.96, 0.30],
+            free_edge: [0.70, 0.70, 0.74, 0.72],
+            free_grid: [0.58, 0.58, 0.62, 0.26],
+        }
+    }
+}
+
+impl GpuChunkOverlayColors {
+    fn from_active_overlay(params: &ActiveOverlayParams) -> Self {
+        let colors = &params.0.colors;
+        Self {
+            occupied_edge: [
+                colors.chunk_overlay_occupied_edge.r,
+                colors.chunk_overlay_occupied_edge.g,
+                colors.chunk_overlay_occupied_edge.b,
+                colors.chunk_overlay_occupied_edge.a,
+            ],
+            occupied_grid: [
+                colors.chunk_overlay_occupied_grid.r,
+                colors.chunk_overlay_occupied_grid.g,
+                colors.chunk_overlay_occupied_grid.b,
+                colors.chunk_overlay_occupied_grid.a,
+            ],
+            halo_edge: [
+                colors.chunk_overlay_halo_edge.r,
+                colors.chunk_overlay_halo_edge.g,
+                colors.chunk_overlay_halo_edge.b,
+                colors.chunk_overlay_halo_edge.a,
+            ],
+            halo_grid: [
+                colors.chunk_overlay_halo_grid.r,
+                colors.chunk_overlay_halo_grid.g,
+                colors.chunk_overlay_halo_grid.b,
+                colors.chunk_overlay_halo_grid.a,
+            ],
+            free_edge: [
+                colors.chunk_overlay_free_edge.r,
+                colors.chunk_overlay_free_edge.g,
+                colors.chunk_overlay_free_edge.b,
+                colors.chunk_overlay_free_edge.a,
+            ],
+            free_grid: [
+                colors.chunk_overlay_free_grid.r,
+                colors.chunk_overlay_free_grid.g,
+                colors.chunk_overlay_free_grid.b,
+                colors.chunk_overlay_free_grid.a,
+            ],
+        }
+    }
+}
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub(super) struct ChunkPhysicsOverlayGpuLabel;
@@ -32,6 +102,7 @@ pub(super) struct ChunkPhysicsOverlayGpuPipeline {
     pub shader: Handle<Shader>,
     pub fallback_params_buf: Buffer,
     pub fallback_chunk_meta_buf: Buffer,
+    pub fallback_overlay_colors_buf: Buffer,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -107,6 +178,10 @@ pub(super) fn init_chunk_physics_overlay_gpu_pipeline(
                     core::num::NonZeroU64::new(size_of::<GpuMpmParams>() as u64),
                 ),
                 storage_buffer_read_only_sized(false, None),
+                uniform_buffer_sized(
+                    false,
+                    core::num::NonZeroU64::new(size_of::<GpuChunkOverlayColors>() as u64),
+                ),
             ),
         ),
     );
@@ -123,22 +198,41 @@ pub(super) fn init_chunk_physics_overlay_gpu_pipeline(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let fallback_overlay_colors_buf = render_device.create_buffer(&BufferDescriptor {
+        label: Some("chunk_physics_overlay_fallback_colors"),
+        size: size_of::<GpuChunkOverlayColors>() as u64,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
     commands.insert_resource(ChunkPhysicsOverlayGpuPipeline {
         bind_group_layout,
         shader: asset_server.load(CHUNK_PHYSICS_OVERLAY_SHADER_PATH),
         fallback_params_buf,
         fallback_chunk_meta_buf,
+        fallback_overlay_colors_buf,
     });
 }
 
 pub(super) fn prepare_chunk_physics_overlay_gpu_pipeline(
     mut commands: Commands,
     pipeline: Res<ChunkPhysicsOverlayGpuPipeline>,
+    queue: Res<RenderQueue>,
+    overlay_params: Option<Res<ActiveOverlayParams>>,
     mut pipelines: ResMut<SpecializedRenderPipelines<ChunkPhysicsOverlayGpuPipeline>>,
     pipeline_cache: Res<PipelineCache>,
     views: Query<(Entity, &ViewTarget, Option<&Msaa>)>,
 ) {
+    let overlay_colors = overlay_params
+        .as_deref()
+        .map(GpuChunkOverlayColors::from_active_overlay)
+        .unwrap_or_default();
+    queue.write_buffer(
+        &pipeline.fallback_overlay_colors_buf,
+        0,
+        bytemuck::bytes_of(&overlay_colors),
+    );
+
     for (entity, view_target, msaa) in &views {
         let id = pipelines.specialize(
             &pipeline_cache,
@@ -185,6 +279,7 @@ impl ViewNode for ChunkPhysicsOverlayGpuNode {
             return Ok(());
         };
         let overlay_pipeline = world.resource::<ChunkPhysicsOverlayGpuPipeline>();
+        let overlay_colors_binding = overlay_pipeline.fallback_overlay_colors_buf.as_entire_binding();
 
         let (params_binding, chunk_meta_binding, chunk_count) =
             if let Some(buffers) = world.get_resource::<MpmGpuBuffers>() {
@@ -211,7 +306,12 @@ impl ViewNode for ChunkPhysicsOverlayGpuNode {
         let bind_group = render_context.render_device().create_bind_group(
             "chunk_physics_overlay_gpu_bind_group",
             &pipeline_cache.get_bind_group_layout(&overlay_pipeline.bind_group_layout),
-            &BindGroupEntries::sequential((view_binding, params_binding, chunk_meta_binding)),
+            &BindGroupEntries::sequential((
+                view_binding,
+                params_binding,
+                chunk_meta_binding,
+                overlay_colors_binding,
+            )),
         );
 
         let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {

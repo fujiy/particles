@@ -32,6 +32,12 @@ pub struct MpmComputePipelines {
     pub extract_movers_pipeline: CachedComputePipelineId,
     pub apply_mover_results_layout: BindGroupLayout,
     pub apply_mover_results_pipeline: CachedComputePipelineId,
+    pub chunk_meta_clear_layout: BindGroupLayout,
+    pub chunk_meta_clear_pipeline: CachedComputePipelineId,
+    pub chunk_meta_accumulate_layout: BindGroupLayout,
+    pub chunk_meta_accumulate_pipeline: CachedComputePipelineId,
+    pub chunk_meta_finalize_layout: BindGroupLayout,
+    pub chunk_meta_finalize_pipeline: CachedComputePipelineId,
 
     pub stats_clear_layout: BindGroupLayout,
     pub stats_clear_pipeline: CachedComputePipelineId,
@@ -180,12 +186,12 @@ impl FromWorld for MpmComputePipelines {
             zero_initialize_workgroup_memory: false,
         });
 
-        // extract_movers: 0=params, 1=particles(read), 2=chunk_meta(read), 3=mover_count(rw), 4=movers(rw)
+        // extract_movers: 0=params, 1=particles(rw), 2=chunk_meta(read), 3=mover_count(rw), 4=movers(rw)
         let extract_movers_entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 binding_types::uniform_buffer_sized(false, None),
-                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
@@ -232,6 +238,85 @@ impl FromWorld for MpmComputePipelines {
                 shader: shaders.apply_mover_results.clone(),
                 shader_defs: vec![],
                 entry_point: Some("apply_mover_results".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // chunk_meta_{clear,accumulate,finalize}: 0=params, 1=particles(read), 2=chunk_meta(rw)
+        let chunk_meta_clear_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let chunk_meta_clear_layout = render_device
+            .create_bind_group_layout("mpm_chunk_meta_clear_layout", &*chunk_meta_clear_entries);
+        let chunk_meta_clear_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_chunk_meta_clear".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_chunk_meta_clear_layout",
+                    &*chunk_meta_clear_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.chunk_meta_update.clone(),
+                shader_defs: vec![],
+                entry_point: Some("clear_chunk_counts".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // chunk_meta_accumulate: 0=params, 1=particles(read), 2=chunk_meta(rw)
+        let chunk_meta_accumulate_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let chunk_meta_accumulate_layout = render_device.create_bind_group_layout(
+            "mpm_chunk_meta_accumulate_layout",
+            &*chunk_meta_accumulate_entries,
+        );
+        let chunk_meta_accumulate_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_chunk_meta_accumulate".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_chunk_meta_accumulate_layout",
+                    &*chunk_meta_accumulate_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.chunk_meta_update.clone(),
+                shader_defs: vec![],
+                entry_point: Some("accumulate_chunk_counts".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // chunk_meta_finalize: 0=params, 1=particles(read), 2=chunk_meta(rw)
+        let chunk_meta_finalize_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let chunk_meta_finalize_layout = render_device.create_bind_group_layout(
+            "mpm_chunk_meta_finalize_layout",
+            &*chunk_meta_finalize_entries,
+        );
+        let chunk_meta_finalize_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_chunk_meta_finalize".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_chunk_meta_finalize_layout",
+                    &*chunk_meta_finalize_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.chunk_meta_update.clone(),
+                shader_defs: vec![],
+                entry_point: Some("finalize_chunk_flags".into()),
                 zero_initialize_workgroup_memory: false,
             });
 
@@ -570,6 +655,12 @@ impl FromWorld for MpmComputePipelines {
             extract_movers_pipeline,
             apply_mover_results_layout,
             apply_mover_results_pipeline,
+            chunk_meta_clear_layout,
+            chunk_meta_clear_pipeline,
+            chunk_meta_accumulate_layout,
+            chunk_meta_accumulate_pipeline,
+            chunk_meta_finalize_layout,
+            chunk_meta_finalize_pipeline,
             stats_clear_layout,
             stats_clear_pipeline,
             stats_total_layout,

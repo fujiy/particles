@@ -6,6 +6,7 @@ use bevy::render::render_graph::ViewNodeRunner;
 use bevy::render::render_resource::SpecializedRenderPipelines;
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
+use crate::params::ActiveOverlayParams;
 use crate::physics::state::SimUpdateSet;
 
 mod chunk_physics;
@@ -26,6 +27,7 @@ impl Plugin for OverlayPlugin {
             .add_plugins(ExtractResourcePlugin::<TileOverlayState>::default())
             .add_plugins(ExtractResourcePlugin::<SdfOverlayState>::default())
             .add_plugins(ExtractResourcePlugin::<PhysicsAreaOverlayState>::default())
+            .add_plugins(ExtractResourcePlugin::<ActiveOverlayParams>::default())
             .add_systems(Startup, setup_overlay_ui)
             .add_systems(
                 Update,

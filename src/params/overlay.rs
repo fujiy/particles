@@ -64,6 +64,12 @@ pub struct OverlayColorParams {
     pub button_bg_on: OverlayColor,
     pub button_bg_hover: OverlayColor,
     pub button_bg_press: OverlayColor,
+    pub chunk_overlay_occupied_edge: OverlayColor,
+    pub chunk_overlay_occupied_grid: OverlayColor,
+    pub chunk_overlay_halo_edge: OverlayColor,
+    pub chunk_overlay_halo_grid: OverlayColor,
+    pub chunk_overlay_free_edge: OverlayColor,
+    pub chunk_overlay_free_grid: OverlayColor,
     pub grid_chunk_boundary: OverlayColor,
     pub grid_cached_chunk: OverlayColor,
     pub grid_modified_chunk: OverlayColor,
@@ -124,6 +130,42 @@ impl Default for OverlayParams {
                     g: 0.40,
                     b: 0.48,
                     a: 0.98,
+                },
+                chunk_overlay_occupied_edge: OverlayColor {
+                    r: 0.98,
+                    g: 0.50,
+                    b: 0.12,
+                    a: 0.94,
+                },
+                chunk_overlay_occupied_grid: OverlayColor {
+                    r: 0.98,
+                    g: 0.50,
+                    b: 0.12,
+                    a: 0.34,
+                },
+                chunk_overlay_halo_edge: OverlayColor {
+                    r: 0.18,
+                    g: 0.78,
+                    b: 0.96,
+                    a: 0.86,
+                },
+                chunk_overlay_halo_grid: OverlayColor {
+                    r: 0.18,
+                    g: 0.78,
+                    b: 0.96,
+                    a: 0.30,
+                },
+                chunk_overlay_free_edge: OverlayColor {
+                    r: 0.70,
+                    g: 0.70,
+                    b: 0.74,
+                    a: 0.72,
+                },
+                chunk_overlay_free_grid: OverlayColor {
+                    r: 0.58,
+                    g: 0.58,
+                    b: 0.62,
+                    a: 0.26,
                 },
                 grid_chunk_boundary: OverlayColor {
                     r: 0.80,
@@ -233,6 +275,30 @@ impl OverlayParams {
             ("colors.button_bg_on", self.colors.button_bg_on),
             ("colors.button_bg_hover", self.colors.button_bg_hover),
             ("colors.button_bg_press", self.colors.button_bg_press),
+            (
+                "colors.chunk_overlay_occupied_edge",
+                self.colors.chunk_overlay_occupied_edge,
+            ),
+            (
+                "colors.chunk_overlay_occupied_grid",
+                self.colors.chunk_overlay_occupied_grid,
+            ),
+            (
+                "colors.chunk_overlay_halo_edge",
+                self.colors.chunk_overlay_halo_edge,
+            ),
+            (
+                "colors.chunk_overlay_halo_grid",
+                self.colors.chunk_overlay_halo_grid,
+            ),
+            (
+                "colors.chunk_overlay_free_edge",
+                self.colors.chunk_overlay_free_edge,
+            ),
+            (
+                "colors.chunk_overlay_free_grid",
+                self.colors.chunk_overlay_free_grid,
+            ),
             (
                 "colors.grid_chunk_boundary",
                 self.colors.grid_chunk_boundary,

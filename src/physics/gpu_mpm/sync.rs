@@ -25,7 +25,7 @@ use crate::physics::world::constants::{CELL_SIZE_M, CHUNK_SIZE_I32};
 use crate::physics::world::terrain::{TerrainWorld, cell_to_world_center, world_to_cell};
 
 const TERRAIN_SDF_DISABLED_DISTANCE_M: f32 = 1.0e6;
-const CHUNK_HALO_RADIUS: i32 = 2;
+const CHUNK_HALO_RADIUS: i32 = 1;
 const MOORE_OFFSETS: [IVec2; 8] = [
     IVec2::new(-1, -1),
     IVec2::new(0, -1),
@@ -78,6 +78,7 @@ pub struct MpmChunkResidencyState {
     pub pending_mover_readback: bool,
     pub observed_mover_apply_ack: u64,
     pub mover_readback_flush_budget: u32,
+    pending_snapshot_refresh: bool,
     rebuild_requested: bool,
     slot_state: Vec<ChunkSlotState>,
     chunk_meta_cache: Vec<GpuChunkMeta>,
@@ -105,6 +106,7 @@ impl Default for MpmChunkResidencyState {
             pending_mover_readback: false,
             observed_mover_apply_ack: 0,
             mover_readback_flush_budget: 0,
+            pending_snapshot_refresh: false,
             rebuild_requested: false,
             slot_state: Vec::new(),
             chunk_meta_cache: Vec::new(),
@@ -509,6 +511,7 @@ pub fn prepare_terrain_upload(
         residency.pending_mover_readback = false;
         residency.observed_mover_apply_ack = 0;
         residency.mover_readback_flush_budget = 0;
+        residency.pending_snapshot_refresh = false;
         residency.rebuild_requested = false;
         residency.slot_state.clear();
         residency.chunk_meta_cache.clear();
@@ -523,8 +526,26 @@ pub fn prepare_terrain_upload(
     // Rebuild only on initial bring-up or explicit particle upload (scenario/reset/edit).
     let should_rebuild =
         !residency.initialized || upload.upload_particles_frame || residency.rebuild_requested;
+    if !should_rebuild && residency.initialized && residency.pending_snapshot_refresh {
+        refresh_residency_from_snapshot_particles(
+            &mut residency,
+            &mut upload,
+            readback_snapshot.particles.as_slice(),
+        );
+        residency.pending_snapshot_refresh = false;
+    }
     if !should_rebuild {
         return;
+    }
+    if residency.rebuild_requested {
+        bevy::log::warn!(
+            "[gpu_mpm] runtime rebuild start: particles_upload={} particles_readback={} reason_new_chunk_oob={} reason_invalid_old_slot={} wait_frames={}",
+            upload.particles.len(),
+            readback_snapshot.particles.len(),
+            residency.runtime_rebuild_reason_new_chunk_oob,
+            residency.runtime_rebuild_reason_invalid_old_slot,
+            residency.runtime_rebuild_waiting_readback_count
+        );
     }
 
     let particle_source = if upload.upload_particles_frame && !upload.particles.is_empty() {
@@ -538,6 +559,11 @@ pub fn prepare_terrain_upload(
         residency.runtime_rebuild_waiting_readback_count = residency
             .runtime_rebuild_waiting_readback_count
             .saturating_add(1);
+        if residency.runtime_rebuild_waiting_readback_count == 1 {
+            bevy::log::warn!(
+                "[gpu_mpm] runtime rebuild pending: waiting for GPU particle readback"
+            );
+        }
         return;
     }
     let Some(build) = build_static_chunk_upload(&terrain, particle_source) else {
@@ -559,6 +585,7 @@ pub fn prepare_terrain_upload(
         residency.pending_mover_readback = false;
         residency.observed_mover_apply_ack = 0;
         residency.mover_readback_flush_budget = 0;
+        residency.pending_snapshot_refresh = false;
         residency.rebuild_requested = false;
         residency.slot_state.clear();
         residency.chunk_meta_cache.clear();
@@ -631,6 +658,7 @@ pub fn prepare_terrain_upload(
     residency.chunk_sdf_samples = build.grid_layout.node_count() as u32;
     residency.invalid_slot_access_count = 0;
     residency.mover_readback_flush_budget = 2;
+    residency.pending_snapshot_refresh = false;
     residency.rebuild_requested = false;
 }
 
@@ -730,7 +758,6 @@ pub fn prepare_gpu_params(
 /// System: update GPU compute run state from SimulationState.
 pub fn prepare_gpu_run_state(
     control: Res<MpmGpuControl>,
-    mut residency: ResMut<MpmChunkResidencyState>,
     mut sim_state: ResMut<SimulationState>,
     mut replay_state: ResMut<ReplayState>,
     active_params: Res<ActivePhysicsParams>,
@@ -754,24 +781,10 @@ pub fn prepare_gpu_run_state(
         return;
     }
 
-    // Strict mover lockstep: no new substep/extract until previous step readback and
-    // pending home-slot updates are fully consumed.
-    if control.readback_enabled && (residency.pending_mover_apply || residency.pending_mover_readback)
-    {
-        run_req.enabled = false;
-        run_req.substeps = 0;
-        step_clock.accumulator_secs = 0.0;
-        sim_state.step_once = false;
-        return;
-    }
-
     // Single-step command always executes exactly one substep.
     if sim_state.step_once {
         run_req.enabled = true;
         run_req.substeps = 1;
-        if control.readback_enabled {
-            residency.pending_mover_readback = true;
-        }
         step_clock.accumulator_secs = 0.0;
         if replay_state.enabled {
             replay_state.current_step = replay_state.current_step.saturating_add(1);
@@ -804,17 +817,10 @@ pub fn prepare_gpu_run_state(
         return;
     }
 
-    if control.readback_enabled {
-        // movers readback is currently single-buffered per frame; keep one-step lockstep.
-        substeps = 1;
-    }
     step_clock.accumulator_secs =
         (step_clock.accumulator_secs - fixed_dt * substeps as f32).max(0.0);
     run_req.enabled = true;
     run_req.substeps = substeps;
-    if control.readback_enabled {
-        residency.pending_mover_readback = true;
-    }
     if replay_state.enabled {
         replay_state.current_step = replay_state.current_step.saturating_add(substeps as usize);
     }
@@ -854,6 +860,10 @@ pub fn apply_gpu_readback(
         residency.invalid_slot_access_count = residency
             .invalid_slot_access_count
             .saturating_add(invalid_particles);
+
+        // Defer refresh to prepare_terrain_upload so diff uploads are emitted
+        // after per-frame upload flags are reset.
+        residency.pending_snapshot_refresh = true;
     }
 
     let frame = GPU_READBACK_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -930,44 +940,23 @@ pub fn apply_mover_readback(
     let Some(movers) = mover_readback.take() else {
         return;
     };
-    residency.pending_mover_readback = false;
-    if residency.mover_readback_flush_budget > 0 {
-        residency.mover_readback_flush_budget -= 1;
-        return;
-    }
-    if residency.pending_mover_apply {
-        return;
-    }
     if !residency.initialized {
-        return;
-    }
-    if residency.slot_state.is_empty() || residency.chunk_meta_cache.is_empty() {
-        residency.runtime_rebuild_count = residency.runtime_rebuild_count.saturating_add(1);
-        residency.runtime_rebuild_reason_empty_state = residency
-            .runtime_rebuild_reason_empty_state
-            .saturating_add(1);
-        residency.rebuild_requested = true;
         return;
     }
 
     upload.mover_results.clear();
-    upload.chunk_meta_diffs.clear();
-    upload.upload_chunk_diffs = false;
 
     let mut rebuild_required = false;
-    let mut reason_invalid_old_slot = 0u32;
+    let mut reason_invalid_old_slot = 0u64;
     let mut reason_new_chunk_oob = 0u32;
-    let mut reason_old_slot_empty = 0u32;
-    let mut reason_halo_update_fail = 0u32;
-    let mut became_occupied = Vec::<u32>::new();
-    let mut became_empty = Vec::<u32>::new();
 
+    let mover_count = movers.len();
+
+    // Mover readback is now exceptional-path only:
+    // unresolved (frontier / long-jump / invalid-home) particles are CPU-resolved here.
     for mover in movers {
-        let old_slot = mover.old_home_slot_id;
-        if old_slot == INVALID_CHUNK_SLOT_ID || old_slot as usize >= residency.slot_state.len() {
-            rebuild_required = true;
+        if mover.old_home_slot_id == INVALID_CHUNK_SLOT_ID {
             reason_invalid_old_slot = reason_invalid_old_slot.saturating_add(1);
-            continue;
         }
         let new_chunk = IVec2::new(mover.new_chunk_coord_x, mover.new_chunk_coord_y);
         let Some(new_slot) =
@@ -977,30 +966,6 @@ pub fn apply_mover_readback(
             reason_new_chunk_oob = reason_new_chunk_oob.saturating_add(1);
             continue;
         };
-        if new_slot == old_slot {
-            continue;
-        }
-
-        let old_idx = old_slot as usize;
-        let new_idx = new_slot as usize;
-        if residency.slot_state[old_idx].occupied_particle_count == 0 {
-            rebuild_required = true;
-            reason_old_slot_empty = reason_old_slot_empty.saturating_add(1);
-            continue;
-        }
-
-        residency.slot_state[old_idx].occupied_particle_count -= 1;
-        if residency.slot_state[old_idx].occupied_particle_count == 0 {
-            became_empty.push(old_slot);
-        }
-
-        let was_unoccupied = residency.slot_state[new_idx].occupied_particle_count == 0;
-        residency.slot_state[new_idx].occupied_particle_count = residency.slot_state[new_idx]
-            .occupied_particle_count
-            .saturating_add(1);
-        if was_unoccupied {
-            became_occupied.push(new_slot);
-        }
 
         upload.mover_results.push(GpuMoverResult {
             particle_id: mover.particle_id,
@@ -1010,79 +975,107 @@ pub fn apply_mover_readback(
         });
     }
 
-    let chunk_origin = residency.chunk_origin;
-    let chunk_dims = residency.chunk_dims;
-    for slot_id in became_occupied {
-        if !update_halo_ref_count(
-            &mut residency.slot_state,
-            slot_id,
-            chunk_origin,
-            chunk_dims,
-            1,
-        ) {
-            rebuild_required = true;
-            reason_halo_update_fail = reason_halo_update_fail.saturating_add(1);
-        }
-    }
-    for slot_id in became_empty {
-        if !update_halo_ref_count(
-            &mut residency.slot_state,
-            slot_id,
-            chunk_origin,
-            chunk_dims,
-            -1,
-        ) {
-            rebuild_required = true;
-            reason_halo_update_fail = reason_halo_update_fail.saturating_add(1);
-        }
-    }
-
     if rebuild_required {
         residency.runtime_rebuild_count = residency.runtime_rebuild_count.saturating_add(1);
         residency.runtime_rebuild_reason_invalid_old_slot = residency
             .runtime_rebuild_reason_invalid_old_slot
-            .saturating_add(reason_invalid_old_slot as u64);
+            .saturating_add(reason_invalid_old_slot);
         residency.runtime_rebuild_reason_new_chunk_oob = residency
             .runtime_rebuild_reason_new_chunk_oob
             .saturating_add(reason_new_chunk_oob as u64);
-        residency.runtime_rebuild_reason_old_slot_empty = residency
-            .runtime_rebuild_reason_old_slot_empty
-            .saturating_add(reason_old_slot_empty as u64);
-        residency.runtime_rebuild_reason_halo_update_fail = residency
-            .runtime_rebuild_reason_halo_update_fail
-            .saturating_add(reason_halo_update_fail as u64);
         upload.mover_results.clear();
         upload.upload_mover_results = false;
-        upload.chunk_meta_diffs.clear();
-        upload.upload_chunk_diffs = false;
+        bevy::log::warn!(
+            "[gpu_mpm] runtime rebuild requested: reason_new_chunk_oob={} reason_invalid_old_slot={} movers={}",
+            reason_new_chunk_oob,
+            reason_invalid_old_slot,
+            mover_count
+        );
         residency.rebuild_requested = true;
         return;
     }
 
+    // Exceptional resolution is best-effort and non-blocking.
+    upload.upload_mover_results = !upload.mover_results.is_empty();
+}
+
+fn refresh_residency_from_snapshot_particles(
+    residency: &mut MpmChunkResidencyState,
+    upload: &mut MpmGpuUploadRequest,
+    particles: &[GpuParticle],
+) {
+    if residency.slot_state.is_empty() || residency.chunk_meta_cache.is_empty() {
+        return;
+    }
+    let slot_count = residency.slot_state.len();
+    let mut occupied_counts = vec![0u32; slot_count];
+    let mut dirty = vec![false; slot_count];
+
+    for particle in particles {
+        let chunk = chunk_coord_from_world_pos(Vec2::from_array(particle.x));
+        let Some(slot_id) =
+            slot_id_from_chunk_coord(chunk, residency.chunk_origin, residency.chunk_dims)
+        else {
+            continue;
+        };
+        occupied_counts[slot_id as usize] = occupied_counts[slot_id as usize].saturating_add(1);
+    }
+
+    for (slot_id, slot) in residency.slot_state.iter_mut().enumerate() {
+        if slot.occupied_particle_count != occupied_counts[slot_id] {
+            dirty[slot_id] = true;
+        }
+        slot.occupied_particle_count = occupied_counts[slot_id];
+        slot.halo_ref_count = 0;
+    }
+
+    for slot_id in 0..slot_count as u32 {
+        if occupied_counts[slot_id as usize] > 0 {
+            let _ = update_halo_ref_count(
+                &mut residency.slot_state,
+                slot_id,
+                residency.chunk_origin,
+                residency.chunk_dims,
+                1,
+            );
+        }
+    }
+
     let changed_resident_slots = recompute_resident_flags(&mut residency.slot_state);
+    if !changed_resident_slots.is_empty() {
+        let neighbor_dirty = collect_neighbor_dirty_slots(
+            &changed_resident_slots,
+            residency.chunk_origin,
+            residency.chunk_dims,
+        );
+        for slot_id in neighbor_dirty {
+            if (slot_id as usize) < dirty.len() {
+                dirty[slot_id as usize] = true;
+            }
+        }
+    }
+
     residency.active_resident_chunk_count = residency
         .slot_state
         .iter()
         .filter(|slot| slot.resident)
         .count() as u32;
-    if !changed_resident_slots.is_empty() {
-        let dirty_slots = collect_neighbor_dirty_slots(
-            &changed_resident_slots,
+
+    upload.chunk_meta_diffs.clear();
+    upload.upload_chunk_diffs = false;
+    for (slot_id, is_dirty) in dirty.into_iter().enumerate() {
+        if !is_dirty {
+            continue;
+        }
+        let meta = build_chunk_meta_for_slot(
+            slot_id as u32,
             residency.chunk_origin,
             residency.chunk_dims,
+            &residency.slot_state,
         );
-        for slot_id in dirty_slots {
-            let meta = build_chunk_meta_for_slot(
-                slot_id,
-                residency.chunk_origin,
-                residency.chunk_dims,
-                &residency.slot_state,
-            );
-            let idx = slot_id as usize;
-            if residency.chunk_meta_cache[idx] != meta {
-                residency.chunk_meta_cache[idx] = meta;
-                upload.chunk_meta_diffs.push((slot_id, meta));
-            }
+        if residency.chunk_meta_cache[slot_id] != meta {
+            residency.chunk_meta_cache[slot_id] = meta;
+            upload.chunk_meta_diffs.push((slot_id as u32, meta));
         }
     }
 
@@ -1097,8 +1090,6 @@ pub fn apply_mover_readback(
     } else {
         upload.upload_chunk_diffs = !upload.chunk_meta_diffs.is_empty();
     }
-
-    upload.upload_mover_results = !upload.mover_results.is_empty();
 }
 
 fn append_particles_in_cell(
@@ -1321,9 +1312,22 @@ fn build_chunk_meta_for_slot(
     let Some(chunk) = slot_coord_from_slot_id(slot_id, origin, dims) else {
         return meta;
     };
+    let occupied_count = slot_state
+        .get(slot_id as usize)
+        .map(|slot| slot.occupied_particle_count)
+        .unwrap_or(0);
     meta.chunk_coord_x = chunk.x;
     meta.chunk_coord_y = chunk.y;
     meta.active_tile_mask = 0;
+    meta.particle_count_curr = occupied_count;
+    meta.particle_count_next = occupied_count;
+    meta.occupied_bit_curr = u32::from(occupied_count > 0);
+    meta.occupied_bit_next = u32::from(
+        slot_state
+            .get(slot_id as usize)
+            .map(|slot| slot.resident)
+            .unwrap_or(false),
+    );
 
     if !slot_state
         .get(slot_id as usize)

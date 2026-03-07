@@ -58,7 +58,7 @@ pub struct ActivePhysicsParams(pub PhysicsParams);
 pub struct ActiveRenderParams(pub RenderParams);
 #[derive(Resource, Clone, ExtractResource)]
 pub struct ActivePaletteParams(pub PaletteParams);
-#[derive(Resource, Clone)]
+#[derive(Resource, Clone, ExtractResource)]
 pub struct ActiveOverlayParams(pub OverlayParams);
 impl Default for ActiveCameraParams {
     fn default() -> Self {

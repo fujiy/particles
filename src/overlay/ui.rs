@@ -279,6 +279,7 @@ pub(super) fn update_particle_overlay_button_label(
         };
     }
 }
+
 fn toggle_button_bg(enabled: bool, colors: &OverlayColorParams) -> BackgroundColor {
     if enabled {
         colors.button_bg_on.to_color().into()
