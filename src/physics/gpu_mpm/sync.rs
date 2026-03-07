@@ -27,6 +27,7 @@ use crate::physics::world::constants::{CELL_SIZE_M, CHUNK_SIZE_I32};
 use crate::physics::world::terrain::{
     TerrainCell, TerrainWorld, cell_to_world_center, world_to_cell,
 };
+use crate::render::TerrainGeneratedChunkCache;
 
 const CHUNK_HALO_RADIUS: i32 = 1;
 const MOORE_OFFSETS: [IVec2; 8] = [
@@ -478,7 +479,11 @@ pub fn prepare_particle_upload(
 
     // Keep GPU run-state stable regardless of one-shot upload flag consumption.
     // `upload.particles` is the authoritative CPU-side snapshot for the current set.
-    let has_particles = !upload.particles.is_empty() || !readback_snapshot.particles.is_empty();
+    let has_particles = if upload.upload_particles_frame {
+        !upload.particles.is_empty()
+    } else {
+        !upload.particles.is_empty() || !readback_snapshot.particles.is_empty()
+    };
     // Pure GPU mode: no CPU fallback; active when MPM is enabled and particles exist.
     sim_state.gpu_mpm_active = sim_state.mpm_enabled && has_particles;
 }
@@ -489,7 +494,8 @@ pub fn prepare_particle_upload(
 pub fn prepare_terrain_upload(
     control: Res<MpmGpuControl>,
     sim_state: Res<SimulationState>,
-    terrain: Res<TerrainWorld>,
+    mut terrain: ResMut<TerrainWorld>,
+    mut generated_chunk_cache: Option<ResMut<TerrainGeneratedChunkCache>>,
     readback_snapshot: Res<MpmReadbackSnapshot>,
     mut residency: ResMut<MpmChunkResidencyState>,
     mut upload: ResMut<MpmGpuUploadRequest>,
@@ -684,7 +690,20 @@ pub fn prepare_terrain_upload(
     upload.terrain_normal.clear();
     upload.upload_terrain = false;
     let full_slots = collect_allocated_slots(&residency);
-    enqueue_terrain_slot_updates(&residency, &terrain, &full_slots, &mut upload);
+    let full_slots_ready = ensure_chunks_available_for_slots(
+        &mut terrain,
+        generated_chunk_cache.as_mut().map(|cache| &mut **cache),
+        &residency,
+        &full_slots,
+    );
+    if full_slots_ready.len() < full_slots.len() {
+        bevy::log::debug!(
+            "[gpu_mpm] terrain slot updates pending generated chunks: ready={} requested={}",
+            full_slots_ready.len(),
+            full_slots.len()
+        );
+    }
+    enqueue_terrain_slot_updates(&residency, &terrain, &full_slots_ready, &mut upload);
     upload.last_uploaded_terrain_version = Some(terrain.terrain_version());
     residency.active_resident_chunk_count = residency
         .slot_state
@@ -737,7 +756,7 @@ pub fn prepare_gpu_params(
         p.sand.hardening,
     );
     let boundary_threshold_m = h * p.runtime.boundary_velocity_sdf_threshold_h;
-    let particle_count = if !upload.particles.is_empty() {
+    let particle_count = if upload.upload_particles_frame || !upload.particles.is_empty() {
         upload.particles.len()
     } else {
         readback_snapshot.particles.len()
@@ -873,6 +892,8 @@ static GPU_READBACK_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 pub fn apply_gpu_readback(
     control: Res<MpmGpuControl>,
     readback_result: Res<GpuReadbackResult>,
+    sim_state: Res<SimulationState>,
+    upload: Res<MpmGpuUploadRequest>,
     mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
     mut residency: ResMut<MpmChunkResidencyState>,
 ) {
@@ -882,6 +903,9 @@ pub fn apply_gpu_readback(
     let Some(particles) = readback_result.take() else {
         return;
     };
+    if !sim_state.gpu_mpm_active && upload.particles.is_empty() {
+        return;
+    }
     readback_snapshot.particles = particles.clone();
 
     if residency.initialized {
@@ -962,7 +986,8 @@ pub fn consume_mover_apply_ack(
 pub fn apply_chunk_event_readback(
     control: Res<MpmGpuControl>,
     chunk_event_readback: Res<GpuChunkEventReadbackResult>,
-    terrain: Res<TerrainWorld>,
+    mut terrain: ResMut<TerrainWorld>,
+    mut generated_chunk_cache: Option<ResMut<TerrainGeneratedChunkCache>>,
     mut residency: ResMut<MpmChunkResidencyState>,
     mut upload: ResMut<MpmGpuUploadRequest>,
 ) {
@@ -987,7 +1012,6 @@ pub fn apply_chunk_event_readback(
     let mut snapshot_seen = vec![false; slot_count];
     let mut occupancy_changed = false;
     let mut frontier_requests = 0u32;
-    let slot_span_before = residency.resident_chunk_count;
     let mut newly_allocated_slots: Vec<u32> = Vec::new();
 
     for event in events {
@@ -1031,13 +1055,11 @@ pub fn apply_chunk_event_readback(
         }
     }
 
-    let mut pool_changed = false;
     let mut missing_halo_slots = 0u32;
     if occupancy_changed || frontier_requests > 0 {
         match ensure_halo_slots_for_occupied(&mut residency, &mut dirty) {
             Ok(allocated) => {
                 if !allocated.is_empty() {
-                    pool_changed = true;
                     newly_allocated_slots.extend(allocated);
                 }
             }
@@ -1067,6 +1089,17 @@ pub fn apply_chunk_event_readback(
     }
 
     let changed_resident_slots = recompute_resident_flags(&mut residency.slot_state);
+    let newly_resident_slots: Vec<u32> = changed_resident_slots
+        .iter()
+        .copied()
+        .filter(|&slot_id| {
+            residency
+                .slot_state
+                .get(slot_id as usize)
+                .map(|slot| slot.resident)
+                .unwrap_or(false)
+        })
+        .collect();
     if !changed_resident_slots.is_empty() {
         let neighbor_dirty = collect_neighbor_dirty_slots(
             &changed_resident_slots,
@@ -1079,8 +1112,6 @@ pub fn apply_chunk_event_readback(
             }
         }
     }
-    pool_changed |= residency.resident_chunk_count != slot_span_before;
-
     residency.active_resident_chunk_count = residency
         .slot_state
         .iter()
@@ -1129,9 +1160,26 @@ pub fn apply_chunk_event_readback(
         );
     }
 
-    if pool_changed && !newly_allocated_slots.is_empty() {
-        let update_slots = collect_slots_with_neighbors(&residency, &newly_allocated_slots);
-        enqueue_terrain_slot_updates(&residency, &terrain, &update_slots, &mut upload);
+    let mut terrain_refresh_seed_slots = newly_allocated_slots;
+    terrain_refresh_seed_slots.extend_from_slice(&newly_resident_slots);
+    terrain_refresh_seed_slots.sort_unstable();
+    terrain_refresh_seed_slots.dedup();
+    if !terrain_refresh_seed_slots.is_empty() {
+        let update_slots = collect_slots_with_neighbors(&residency, &terrain_refresh_seed_slots);
+        let ready_slots = ensure_chunks_available_for_slots(
+            &mut terrain,
+            generated_chunk_cache.as_mut().map(|cache| &mut **cache),
+            &residency,
+            &update_slots,
+        );
+        if ready_slots.len() < update_slots.len() {
+            bevy::log::debug!(
+                "[gpu_mpm] halo terrain updates pending generated chunks: ready={} requested={}",
+                ready_slots.len(),
+                update_slots.len()
+            );
+        }
+        enqueue_terrain_slot_updates(&residency, &terrain, &ready_slots, &mut upload);
         residency.chunk_sdf_samples = residency
             .resident_chunk_count
             .saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
@@ -1141,7 +1189,8 @@ pub fn apply_chunk_event_readback(
 pub fn apply_mover_readback(
     control: Res<MpmGpuControl>,
     mover_readback: Res<GpuMoverReadbackResult>,
-    terrain: Res<TerrainWorld>,
+    mut terrain: ResMut<TerrainWorld>,
+    mut generated_chunk_cache: Option<ResMut<TerrainGeneratedChunkCache>>,
     mut residency: ResMut<MpmChunkResidencyState>,
     mut upload: ResMut<MpmGpuUploadRequest>,
 ) {
@@ -1230,7 +1279,18 @@ pub fn apply_mover_readback(
             &slot_allocated,
             &chunk_to_slot,
         );
-        let _ = recompute_resident_flags(&mut residency.slot_state);
+        let changed_resident_slots = recompute_resident_flags(&mut residency.slot_state);
+        let newly_resident_slots: Vec<u32> = changed_resident_slots
+            .iter()
+            .copied()
+            .filter(|&slot_id| {
+                residency
+                    .slot_state
+                    .get(slot_id as usize)
+                    .map(|slot| slot.resident)
+                    .unwrap_or(false)
+            })
+            .collect();
         for (slot_id, is_dirty) in dirty.into_iter().enumerate() {
             if !is_dirty {
                 continue;
@@ -1257,9 +1317,27 @@ pub fn apply_mover_readback(
                 upload.chunk_meta_diffs.clear();
             }
         }
-        if !newly_allocated_slots.is_empty() {
-            let update_slots = collect_slots_with_neighbors(&residency, &newly_allocated_slots);
-            enqueue_terrain_slot_updates(&residency, &terrain, &update_slots, &mut upload);
+        let mut terrain_refresh_seed_slots = newly_allocated_slots;
+        terrain_refresh_seed_slots.extend_from_slice(&newly_resident_slots);
+        terrain_refresh_seed_slots.sort_unstable();
+        terrain_refresh_seed_slots.dedup();
+        if !terrain_refresh_seed_slots.is_empty() {
+            let update_slots =
+                collect_slots_with_neighbors(&residency, &terrain_refresh_seed_slots);
+            let ready_slots = ensure_chunks_available_for_slots(
+                &mut terrain,
+                generated_chunk_cache.as_mut().map(|cache| &mut **cache),
+                &residency,
+                &update_slots,
+            );
+            if ready_slots.len() < update_slots.len() {
+                bevy::log::debug!(
+                    "[gpu_mpm] exceptional terrain updates pending generated chunks: ready={} requested={}",
+                    ready_slots.len(),
+                    update_slots.len()
+                );
+            }
+            enqueue_terrain_slot_updates(&residency, &terrain, &ready_slots, &mut upload);
             residency.chunk_sdf_samples = residency
                 .resident_chunk_count
                 .saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
@@ -1797,6 +1875,46 @@ fn collect_slots_for_dirty_chunks(
     collect_slots_with_neighbors(residency, &seed_slots)
 }
 
+fn ensure_chunks_available_for_slots(
+    terrain: &mut TerrainWorld,
+    mut generated_chunk_cache: Option<&mut TerrainGeneratedChunkCache>,
+    residency: &MpmChunkResidencyState,
+    slot_ids: &[u32],
+) -> Vec<u32> {
+    if slot_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut ready_slots = Vec::with_capacity(slot_ids.len());
+    let mut requested_chunks = HashSet::<IVec2>::default();
+    for &slot_id in slot_ids {
+        let idx = slot_id as usize;
+        if !residency.slot_allocated.get(idx).copied().unwrap_or(false) {
+            continue;
+        }
+        let chunk = residency.slot_to_chunk[idx];
+        let mut chunk_ready = terrain.chunk(chunk).is_some();
+        if !chunk_ready {
+            if !terrain.generation_enabled() {
+                terrain.ensure_chunk_loaded(chunk);
+                chunk_ready = true;
+            } else if let Some(cache) = generated_chunk_cache.as_mut() {
+                if let Some(material_ids) = cache.material_ids_for_chunk(chunk) {
+                    terrain.load_generated_chunk_from_material_ids(chunk, material_ids);
+                    chunk_ready = true;
+                } else if requested_chunks.insert(chunk) {
+                    cache.enqueue_prefetch_square(chunk, CHUNK_HALO_RADIUS);
+                }
+            }
+        }
+        if chunk_ready {
+            ready_slots.push(slot_id);
+        }
+    }
+    ready_slots.sort_unstable();
+    ready_slots.dedup();
+    ready_slots
+}
+
 fn build_terrain_cells_for_slots(
     residency: &MpmChunkResidencyState,
     terrain: &TerrainWorld,
@@ -1819,7 +1937,7 @@ fn build_terrain_cells_for_slots(
             for local_x in 0..chunk_node_dim_u {
                 let global_cell = chunk_cell_origin + IVec2::new(local_x as i32, local_y as i32);
                 let solid = matches!(
-                    terrain.get_loaded_cell_or_empty(global_cell),
+                    terrain.get_cell_or_generated(global_cell),
                     TerrainCell::Solid { .. }
                 );
                 terrain_cell_solid.push(u32::from(solid));
@@ -2003,9 +2121,12 @@ fn drucker_prager_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::physics::gpu_mpm::buffers::GpuParticle;
     use crate::physics::gpu_mpm::gpu_resources::MpmGpuUploadRequest;
-    use crate::physics::gpu_mpm::readback::GpuStatisticsReadbackResult;
+    use crate::physics::gpu_mpm::phase::MPM_PHASE_ID_WATER;
+    use crate::physics::gpu_mpm::readback::{GpuReadbackResult, GpuStatisticsReadbackResult};
     use crate::physics::material::ParticleMaterial;
+    use crate::physics::state::SimulationState;
     use bevy::ecs::message::Messages;
 
     fn setup_edit_app() -> App {
@@ -2121,5 +2242,67 @@ mod tests {
         assert_eq!(snapshot.unknown, 44);
         assert_eq!(snapshot.total(), 99);
         assert!((snapshot.max_speed_mps - 1.5).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn prepare_particle_upload_prefers_explicit_clear_over_stale_snapshot() {
+        let mut app = App::new();
+        app.insert_resource(MpmGpuControl::default())
+            .insert_resource(MpmReadbackSnapshot {
+                particles: vec![GpuParticle::from_cpu(
+                    Vec2::new(1.0, 2.0),
+                    Vec2::ZERO,
+                    1.0,
+                    1.0,
+                    Mat2::IDENTITY,
+                    Mat2::ZERO,
+                    0.0,
+                    MPM_PHASE_ID_WATER,
+                )],
+            })
+            .insert_resource(MpmGpuUploadRequest {
+                upload_particles: true,
+                ..Default::default()
+            })
+            .insert_resource(SimulationState::default())
+            .add_systems(Update, prepare_particle_upload);
+
+        app.update();
+
+        let sim_state = app.world().resource::<SimulationState>();
+        let upload = app.world().resource::<MpmGpuUploadRequest>();
+        assert!(!sim_state.gpu_mpm_active);
+        assert!(upload.upload_particles_frame);
+        assert!(!upload.upload_particles);
+    }
+
+    #[test]
+    fn apply_gpu_readback_ignores_stale_when_gpu_path_inactive() {
+        let mut app = App::new();
+        app.insert_resource(MpmGpuControl::default())
+            .insert_resource(GpuReadbackResult::default())
+            .insert_resource(SimulationState::default())
+            .insert_resource(MpmGpuUploadRequest::default())
+            .insert_resource(MpmReadbackSnapshot::default())
+            .insert_resource(MpmChunkResidencyState::default())
+            .add_systems(Update, apply_gpu_readback);
+
+        app.world()
+            .resource::<GpuReadbackResult>()
+            .store(vec![GpuParticle::from_cpu(
+                Vec2::new(3.0, 4.0),
+                Vec2::ZERO,
+                1.0,
+                1.0,
+                Mat2::IDENTITY,
+                Mat2::ZERO,
+                0.0,
+                MPM_PHASE_ID_WATER,
+            )]);
+
+        app.update();
+
+        let snapshot = app.world().resource::<MpmReadbackSnapshot>();
+        assert!(snapshot.particles.is_empty());
     }
 }

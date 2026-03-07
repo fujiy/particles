@@ -132,6 +132,19 @@ pub(super) fn handle_world_interactions(
                 }
             });
             interaction_state.last_water_spawn_cell = last_cell;
+            if terrain_world.generation_enabled() && !spawn_cells.is_empty() {
+                let mut requested_chunks = HashSet::new();
+                for &cell in &spawn_cells {
+                    let chunk_coord = IVec2::new(
+                        cell.x.div_euclid(CHUNK_SIZE_I32),
+                        cell.y.div_euclid(CHUNK_SIZE_I32),
+                    );
+                    if requested_chunks.insert(chunk_coord) {
+                        generated_chunk_cache
+                            .enqueue_prefetch_square(chunk_coord, TOOL_PREFETCH_RADIUS_CHUNKS);
+                    }
+                }
+            }
             if !spawn_cells.is_empty() {
                 gpu_world_edit_requests.write(GpuWorldEditRequest {
                     cells: spawn_cells,
@@ -421,7 +434,11 @@ fn append_4_connected_segment(from: IVec2, to: IVec2, mut emit: impl FnMut(IVec2
 }
 
 fn tool_uses_generated_chunk_data(tool: WorldTool) -> bool {
-    tool.terrain_material().is_some() || matches!(tool, WorldTool::Delete | WorldTool::Break)
+    tool.terrain_material().is_some()
+        || matches!(
+            tool,
+            WorldTool::Delete | WorldTool::Break | WorldTool::WaterLiquid
+        )
 }
 
 fn ensure_chunk_ready_for_edit(

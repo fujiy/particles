@@ -165,7 +165,7 @@ fn prepare_gpu_uploads(
 
     if upload.upload_particles {
         buffers.upload_particles(&queue, &upload.particles);
-        buffers.ready = true;
+        buffers.ready = buffers.particle_count > 0;
     } else if buffers.particle_count > 0 {
         buffers.particle_count = params_req.params.particle_count;
         buffers.ready = buffers.particle_count > 0;
@@ -529,6 +529,7 @@ impl Plugin for GpuMpmPlugin {
                     sync::prepare_particle_upload,
                     sync::prepare_terrain_upload,
                     sync::apply_chunk_event_readback,
+                    sync::apply_mover_readback,
                     sync::prepare_gpu_params,
                     sync::prepare_gpu_run_state,
                 )
@@ -541,7 +542,6 @@ impl Plugin for GpuMpmPlugin {
                     sync::apply_gpu_readback,
                     sync::apply_statistics_readback,
                     sync::consume_mover_apply_ack,
-                    sync::apply_mover_readback,
                 )
                     .chain()
                     .in_set(sync::MpmSyncSet::ApplyReadback),

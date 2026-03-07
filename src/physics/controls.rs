@@ -126,7 +126,7 @@ pub(crate) fn handle_replay_requests(
     mut terrain_world: ResMut<TerrainWorld>,
     mut gpu_upload: ResMut<MpmGpuUploadRequest>,
     mut gpu_control: ResMut<MpmGpuControl>,
-    readback_snapshot: Res<MpmReadbackSnapshot>,
+    mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
     active_params: Res<ActivePhysicsParams>,
 ) {
     for request in load_reader.read() {
@@ -141,6 +141,9 @@ pub(crate) fn handle_replay_requests(
                 let rho0 = active_params.0.water.rho0.max(1.0e-6);
                 gpu_upload.particles = gpu_particles_from_snapshot(&snapshot_particles, rho0);
                 gpu_upload.upload_particles = true;
+                gpu_upload.mover_results.clear();
+                gpu_upload.upload_mover_results = true;
+                readback_snapshot.particles = gpu_upload.particles.clone();
                 gpu_control.readback_enabled = true;
                 gpu_control.readback_interval_frames = 1;
                 replay_state.enabled = true;
@@ -212,6 +215,7 @@ pub(crate) fn apply_sim_reset(
     mut terrain_world: ResMut<TerrainWorld>,
     mut gpu_upload: ResMut<MpmGpuUploadRequest>,
     mut gpu_control: ResMut<MpmGpuControl>,
+    mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
     material_params: Res<MaterialParams>,
     active_params: Res<ActivePhysicsParams>,
 ) {
@@ -236,6 +240,9 @@ pub(crate) fn apply_sim_reset(
                 let rho0 = active_params.0.water.rho0.max(1.0e-6);
                 gpu_upload.particles = gpu_particles_from_snapshot(&snapshot_particles, rho0);
                 gpu_upload.upload_particles = true;
+                gpu_upload.mover_results.clear();
+                gpu_upload.upload_mover_results = true;
+                readback_snapshot.particles = gpu_upload.particles.clone();
                 gpu_control.readback_enabled = true;
                 gpu_control.readback_interval_frames = 1;
                 replay_state.scenario_total_steps = spec.step_count;
@@ -262,6 +269,9 @@ pub(crate) fn apply_sim_reset(
     terrain_world.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(*material_params));
     gpu_upload.particles.clear();
     gpu_upload.upload_particles = true;
+    gpu_upload.mover_results.clear();
+    gpu_upload.upload_mover_results = true;
+    readback_snapshot.particles.clear();
     gpu_control.readback_enabled = true;
     gpu_control.readback_interval_frames = 1;
     sim_state.running = false;
@@ -284,7 +294,7 @@ pub(crate) fn apply_save_load_requests(
     mut terrain_world: ResMut<TerrainWorld>,
     mut gpu_upload: ResMut<MpmGpuUploadRequest>,
     mut gpu_control: ResMut<MpmGpuControl>,
-    readback_snapshot: Res<MpmReadbackSnapshot>,
+    mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
     active_params: Res<ActivePhysicsParams>,
 ) {
     for request in save_reader.read() {
@@ -315,6 +325,9 @@ pub(crate) fn apply_save_load_requests(
                 let rho0 = active_params.0.water.rho0.max(1.0e-6);
                 gpu_upload.particles = gpu_particles_from_snapshot(&snapshot_particles, rho0);
                 gpu_upload.upload_particles = true;
+                gpu_upload.mover_results.clear();
+                gpu_upload.upload_mover_results = true;
+                readback_snapshot.particles = gpu_upload.particles.clone();
                 gpu_control.readback_enabled = true;
                 gpu_control.readback_interval_frames = 1;
 
