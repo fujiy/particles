@@ -491,6 +491,8 @@ struct MpmAutoVerifyReport {
     gpu_count_unknown: u32,
     gpu_max_speed_mps: f32,
     resident_chunk_count: u32,
+    active_tile_count: u32,
+    inactive_skip_rate: f32,
     invalid_slot_access_count: u64,
     chunk_sdf_samples: u32,
     runtime_rebuild_count: u64,
@@ -904,6 +906,8 @@ fn run_mpm_autoverify(
                     gpu_count_unknown: gpu_stats.unknown,
                     gpu_max_speed_mps: gpu_stats.max_speed_mps,
                     resident_chunk_count: chunk_residency.resident_chunk_count,
+                    active_tile_count: chunk_residency.active_tile_count,
+                    inactive_skip_rate: chunk_residency.inactive_skip_rate,
                     invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
                     chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
                     runtime_rebuild_count: chunk_residency.runtime_rebuild_count,
@@ -988,9 +992,7 @@ fn run_mpm_autoverify(
                     },
                 });
             }
-            state.spawn_ops_applied = state
-                .spawn_ops_applied
-                .saturating_add(applied_spawn_count);
+            state.spawn_ops_applied = state.spawn_ops_applied.saturating_add(applied_spawn_count);
             state.spawned_particles_requested = state
                 .spawned_particles_requested
                 .saturating_add(spawned_particles_requested);
@@ -1076,6 +1078,8 @@ fn run_mpm_autoverify(
             gpu_count_unknown: gpu_stats.unknown,
             gpu_max_speed_mps: gpu_stats.max_speed_mps,
             resident_chunk_count: chunk_residency.resident_chunk_count,
+            active_tile_count: chunk_residency.active_tile_count,
+            inactive_skip_rate: chunk_residency.inactive_skip_rate,
             invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
             chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
             runtime_rebuild_count: chunk_residency.runtime_rebuild_count,
@@ -1254,6 +1258,8 @@ fn run_mpm_autoverify(
         gpu_count_unknown: gpu_stats.unknown,
         gpu_max_speed_mps: gpu_stats.max_speed_mps,
         resident_chunk_count: chunk_residency.resident_chunk_count,
+        active_tile_count: chunk_residency.active_tile_count,
+        inactive_skip_rate: chunk_residency.inactive_skip_rate,
         invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
         chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
         runtime_rebuild_count: chunk_residency.runtime_rebuild_count,

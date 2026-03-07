@@ -12,8 +12,9 @@ use super::buffers::{
     GpuMoverResult, GpuMpmParams, GpuParticle, GpuStatisticsScalars, INVALID_CHUNK_SLOT_ID,
 };
 use super::gpu_resources::{
-    MAX_RESIDENT_CHUNK_SLOTS, MPM_CHUNK_NODE_DIM, MPM_CHUNK_NODES_PER_SLOT, MpmGpuControl,
-    MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest, world_grid_layout,
+    MAX_RESIDENT_CHUNK_SLOTS, MPM_ACTIVE_TILES_PER_SLOT, MPM_CHUNK_NODE_DIM,
+    MPM_CHUNK_NODES_PER_SLOT, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest,
+    MpmGpuStepClock, MpmGpuUploadRequest, world_grid_layout,
 };
 use super::phase::mpm_phase_id_for_particle;
 use super::readback::{
@@ -30,6 +31,7 @@ use crate::physics::world::terrain::{
 use crate::render::TerrainGeneratedChunkCache;
 
 const CHUNK_HALO_RADIUS: i32 = 1;
+const ACTIVE_TILE_NODE_DIM_I32: i32 = 8;
 const MOORE_OFFSETS: [IVec2; 8] = [
     IVec2::new(-1, -1),
     IVec2::new(0, -1),
@@ -70,6 +72,9 @@ pub struct MpmChunkResidencyState {
     /// CPU-tracked number of currently resident slots.
     pub active_resident_chunk_count: u32,
     pub chunk_sdf_samples: u32,
+    pub active_tile_count: u32,
+    pub active_tile_capacity: u32,
+    pub inactive_skip_rate: f32,
     pub invalid_slot_access_count: u64,
     pub runtime_rebuild_count: u64,
     pub runtime_rebuild_reason_empty_state: u64,
@@ -101,6 +106,9 @@ impl Default for MpmChunkResidencyState {
             resident_chunk_count: 0,
             active_resident_chunk_count: 0,
             chunk_sdf_samples: 0,
+            active_tile_count: 0,
+            active_tile_capacity: 0,
+            inactive_skip_rate: 0.0,
             invalid_slot_access_count: 0,
             runtime_rebuild_count: 0,
             runtime_rebuild_reason_empty_state: 0,
@@ -523,6 +531,9 @@ pub fn prepare_terrain_upload(
         residency.resident_chunk_count = 0;
         residency.active_resident_chunk_count = 0;
         residency.chunk_sdf_samples = 0;
+        residency.active_tile_count = 0;
+        residency.active_tile_capacity = 0;
+        residency.inactive_skip_rate = 0.0;
         residency.invalid_slot_access_count = 0;
         residency.runtime_rebuild_count = 0;
         residency.runtime_rebuild_reason_empty_state = 0;
@@ -607,6 +618,9 @@ pub fn prepare_terrain_upload(
         residency.resident_chunk_count = 0;
         residency.active_resident_chunk_count = 0;
         residency.chunk_sdf_samples = 0;
+        residency.active_tile_count = 0;
+        residency.active_tile_capacity = 0;
+        residency.inactive_skip_rate = 0.0;
         residency.runtime_rebuild_count = 0;
         residency.runtime_rebuild_reason_empty_state = 0;
         residency.runtime_rebuild_reason_invalid_old_slot = 0;
@@ -685,6 +699,7 @@ pub fn prepare_terrain_upload(
     }
 
     initialize_chunk_slot_state(&mut residency, upload.particles.as_slice());
+    update_active_tile_stats(&mut residency, upload.particles.as_slice());
     let slot_span = residency.resident_chunk_count as usize;
     upload.chunk_meta = residency.chunk_meta_cache[..slot_span].to_vec();
     upload.upload_chunks = true;
@@ -715,6 +730,13 @@ pub fn prepare_terrain_upload(
             residency.slot_allocated.get(*idx).copied().unwrap_or(false) && slot.resident
         })
         .count() as u32;
+    residency.active_tile_capacity = residency
+        .resident_chunk_count
+        .saturating_mul(MPM_ACTIVE_TILES_PER_SLOT);
+    if residency.active_tile_capacity == 0 {
+        residency.active_tile_count = 0;
+        residency.inactive_skip_rate = 0.0;
+    }
     residency.chunk_sdf_samples = residency
         .resident_chunk_count
         .saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
@@ -921,6 +943,7 @@ pub fn apply_gpu_readback(
         residency.invalid_slot_access_count = residency
             .invalid_slot_access_count
             .saturating_add(invalid_particles);
+        update_active_tile_stats(&mut residency, &particles);
     }
 
     let frame = GPU_READBACK_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1344,6 +1367,13 @@ pub fn apply_mover_readback(
                 .resident_chunk_count
                 .saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
         }
+        residency.active_tile_capacity = residency
+            .resident_chunk_count
+            .saturating_mul(MPM_ACTIVE_TILES_PER_SLOT);
+        if residency.active_tile_capacity == 0 {
+            residency.active_tile_count = 0;
+            residency.inactive_skip_rate = 0.0;
+        }
     }
 }
 
@@ -1468,6 +1498,126 @@ fn assign_home_slot_ids(particles: &mut [GpuParticle], chunk_to_slot: &HashMap<I
 
 fn slot_coord_from_slot_id(slot_id: u32, slot_to_chunk: &[IVec2]) -> Option<IVec2> {
     slot_to_chunk.get(slot_id as usize).copied()
+}
+
+fn active_tile_mask_for_particles(
+    particles: &[GpuParticle],
+    residency: &MpmChunkResidencyState,
+) -> Vec<u32> {
+    let mut masks = vec![0u32; residency.slot_to_chunk.len()];
+    let cdim_i = MPM_CHUNK_NODE_DIM as i32;
+    let tiles_per_axis = ((MPM_CHUNK_NODE_DIM + ACTIVE_TILE_NODE_DIM_I32 as u32 - 1)
+        / ACTIVE_TILE_NODE_DIM_I32 as u32) as i32;
+    if cdim_i <= 0 || tiles_per_axis <= 0 {
+        return masks;
+    }
+
+    for particle in particles {
+        let home_slot = particle.home_chunk_slot_id as usize;
+        if particle.home_chunk_slot_id == INVALID_CHUNK_SLOT_ID
+            || home_slot >= residency.slot_to_chunk.len()
+            || !residency
+                .slot_allocated
+                .get(home_slot)
+                .copied()
+                .unwrap_or(false)
+            || !residency
+                .slot_state
+                .get(home_slot)
+                .map(|slot| slot.resident)
+                .unwrap_or(false)
+        {
+            continue;
+        }
+
+        let home_chunk = residency.slot_to_chunk[home_slot];
+        let home_node_origin = home_chunk * cdim_i;
+        let grid_pos = Vec2::from_array(particle.x) / CELL_SIZE_M.max(1.0e-6);
+        let base = IVec2::new(
+            (grid_pos.x - 0.5).floor() as i32,
+            (grid_pos.y - 0.5).floor() as i32,
+        );
+
+        for oy in 0..3 {
+            for ox in 0..3 {
+                let node = base + IVec2::new(ox, oy);
+                let local = node - home_node_origin;
+                let mut delta_chunk = IVec2::ZERO;
+                if local.x < 0 {
+                    delta_chunk.x = -1;
+                } else if local.x >= cdim_i {
+                    delta_chunk.x = 1;
+                }
+                if local.y < 0 {
+                    delta_chunk.y = -1;
+                } else if local.y >= cdim_i {
+                    delta_chunk.y = 1;
+                }
+                if delta_chunk.x.abs() > 1 || delta_chunk.y.abs() > 1 {
+                    continue;
+                }
+
+                let slot_id = if delta_chunk == IVec2::ZERO {
+                    home_slot as u32
+                } else {
+                    let neighbor_chunk = home_chunk + delta_chunk;
+                    let Some(slot_id) =
+                        slot_id_from_chunk_coord(neighbor_chunk, &residency.chunk_to_slot)
+                    else {
+                        continue;
+                    };
+                    if !residency
+                        .slot_allocated
+                        .get(slot_id as usize)
+                        .copied()
+                        .unwrap_or(false)
+                        || !residency
+                            .slot_state
+                            .get(slot_id as usize)
+                            .map(|slot| slot.resident)
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                    slot_id
+                };
+
+                let local_x = local.x - delta_chunk.x * cdim_i;
+                let local_y = local.y - delta_chunk.y * cdim_i;
+                if local_x < 0 || local_y < 0 || local_x >= cdim_i || local_y >= cdim_i {
+                    continue;
+                }
+
+                let tile_x = local_x / ACTIVE_TILE_NODE_DIM_I32;
+                let tile_y = local_y / ACTIVE_TILE_NODE_DIM_I32;
+                let bit_idx = tile_y * tiles_per_axis + tile_x;
+                if !(0..32).contains(&bit_idx) {
+                    continue;
+                }
+                masks[slot_id as usize] |= 1u32 << bit_idx;
+            }
+        }
+    }
+
+    masks
+}
+
+fn update_active_tile_stats(residency: &mut MpmChunkResidencyState, particles: &[GpuParticle]) {
+    let masks = active_tile_mask_for_particles(particles, residency);
+    let slot_span = residency.resident_chunk_count as usize;
+    residency.active_tile_capacity = residency
+        .resident_chunk_count
+        .saturating_mul(MPM_ACTIVE_TILES_PER_SLOT);
+    residency.active_tile_count = masks
+        .iter()
+        .take(slot_span)
+        .map(|mask| mask.count_ones())
+        .sum();
+    residency.inactive_skip_rate = if residency.active_tile_capacity == 0 {
+        0.0
+    } else {
+        1.0 - residency.active_tile_count as f32 / residency.active_tile_capacity as f32
+    };
 }
 
 fn rebuild_halo_ref_counts(
@@ -2366,5 +2516,50 @@ mod tests {
 
         let snapshot = app.world().resource::<MpmReadbackSnapshot>();
         assert!(snapshot.particles.is_empty());
+    }
+
+    #[test]
+    fn active_tile_mask_marks_neighbor_chunk_tiles() {
+        let mut residency = MpmChunkResidencyState {
+            initialized: true,
+            resident_chunk_count: 2,
+            chunk_to_slot: HashMap::from([(IVec2::ZERO, 0), (IVec2::new(1, 0), 1)]),
+            slot_to_chunk: vec![IVec2::ZERO, IVec2::new(1, 0)],
+            slot_allocated: vec![true, true],
+            slot_state: vec![
+                ChunkSlotState {
+                    resident: true,
+                    ..Default::default()
+                },
+                ChunkSlotState {
+                    resident: true,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let particle = GpuParticle {
+            x: [3.9, 1.0],
+            home_chunk_slot_id: 0,
+            ..GpuParticle::from_cpu(
+                Vec2::new(3.9, 1.0),
+                Vec2::ZERO,
+                1.0,
+                1.0,
+                Mat2::IDENTITY,
+                Mat2::ZERO,
+                0.0,
+                MPM_PHASE_ID_WATER,
+            )
+        };
+
+        let masks = active_tile_mask_for_particles(&[particle], &residency);
+        assert_eq!(masks[0], 1 << 1);
+        assert_eq!(masks[1], 1 << 0);
+
+        update_active_tile_stats(&mut residency, &[particle]);
+        assert_eq!(residency.active_tile_count, 2);
+        assert_eq!(residency.active_tile_capacity, 8);
+        assert!((residency.inactive_skip_rate - 0.75).abs() < 1.0e-6);
     }
 }

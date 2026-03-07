@@ -26,6 +26,14 @@ static GPU_READBACK_FRAME_COUNTER: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 static CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static ACTIVE_TILE_CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static ACTIVE_TILE_MARK_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static ACTIVE_TILE_COMPACT_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static ACTIVE_TILE_DISPATCH_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static P2G_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static GRID_UPDATE_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
@@ -227,6 +235,50 @@ impl Node for MpmComputeNode {
         }
 
         if should_step {
+            let Some(active_tile_clear_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.active_tile_clear_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &ACTIVE_TILE_CLEAR_PIPELINE_WARNED,
+                    "active_tile_clear",
+                    pipelines.active_tile_clear_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let Some(active_tile_mark_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.active_tile_mark_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &ACTIVE_TILE_MARK_PIPELINE_WARNED,
+                    "active_tile_mark",
+                    pipelines.active_tile_mark_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let Some(active_tile_compact_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.active_tile_compact_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &ACTIVE_TILE_COMPACT_PIPELINE_WARNED,
+                    "active_tile_compact",
+                    pipelines.active_tile_compact_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let Some(active_tile_dispatch_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.active_tile_dispatch_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &ACTIVE_TILE_DISPATCH_PIPELINE_WARNED,
+                    "active_tile_dispatch",
+                    pipelines.active_tile_dispatch_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
             let Some(clear_pipeline) =
                 pipeline_cache.get_compute_pipeline(pipelines.clear_pipeline)
             else {
@@ -325,12 +377,48 @@ impl Node for MpmComputeNode {
                 return Ok(());
             };
 
+            let active_tile_clear_bg = device.create_bind_group(
+                "mpm_active_tile_clear_bg",
+                &pipelines.active_tile_clear_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                )),
+            );
+            let active_tile_mark_bg = device.create_bind_group(
+                "mpm_active_tile_mark_bg",
+                &pipelines.active_tile_mark_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                )),
+            );
+            let active_tile_compact_bg = device.create_bind_group(
+                "mpm_active_tile_compact_bg",
+                &pipelines.active_tile_compact_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                    buffers.active_tile_count_buf.as_entire_binding(),
+                    buffers.active_tile_list_buf.as_entire_binding(),
+                )),
+            );
+            let active_tile_dispatch_bg = device.create_bind_group(
+                "mpm_active_tile_dispatch_bg",
+                &pipelines.active_tile_dispatch_layout,
+                &BindGroupEntries::sequential((
+                    buffers.active_tile_count_buf.as_entire_binding(),
+                    buffers.active_tile_dispatch_buf.as_entire_binding(),
+                )),
+            );
             let clear_bg = device.create_bind_group(
                 "mpm_clear_bg",
                 &pipelines.clear_layout,
                 &BindGroupEntries::sequential((
                     buffers.params_buf.as_entire_binding(),
                     buffers.grid_buf.as_entire_binding(),
+                    buffers.active_tile_list_buf.as_entire_binding(),
                 )),
             );
             let p2g_bg = device.create_bind_group(
@@ -352,6 +440,7 @@ impl Node for MpmComputeNode {
                     buffers.terrain_sdf_buf.as_entire_binding(),
                     buffers.terrain_normal_buf.as_entire_binding(),
                     buffers.chunk_meta_buf.as_entire_binding(),
+                    buffers.active_tile_list_buf.as_entire_binding(),
                 )),
             );
             let g2p_bg = device.create_bind_group(
@@ -415,6 +504,44 @@ impl Node for MpmComputeNode {
 
             let encoder = render_context.command_encoder();
             for _ in 0..run_req.substeps {
+                encoder.clear_buffer(&buffers.active_tile_count_buf, 0, None);
+                encoder.clear_buffer(&buffers.active_tile_dispatch_buf, 0, None);
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mpm_active_tile_clear"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(active_tile_clear_pipeline);
+                    pass.set_bind_group(0, &active_tile_clear_bg, &[]);
+                    pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
+                }
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mpm_active_tile_mark"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(active_tile_mark_pipeline);
+                    pass.set_bind_group(0, &active_tile_mark_bg, &[]);
+                    pass.dispatch_workgroups(particles_wgs.max(1), 1, 1);
+                }
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mpm_active_tile_compact"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(active_tile_compact_pipeline);
+                    pass.set_bind_group(0, &active_tile_compact_bg, &[]);
+                    pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
+                }
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mpm_active_tile_dispatch"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(active_tile_dispatch_pipeline);
+                    pass.set_bind_group(0, &active_tile_dispatch_bg, &[]);
+                    pass.dispatch_workgroups(1, 1, 1);
+                }
                 {
                     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                         label: Some("mpm_clear"),
@@ -422,7 +549,7 @@ impl Node for MpmComputeNode {
                     });
                     pass.set_pipeline(clear_pipeline);
                     pass.set_bind_group(0, &clear_bg, &[]);
-                    pass.dispatch_workgroups(nodes_wgs, 1, 1);
+                    pass.dispatch_workgroups_indirect(&buffers.active_tile_dispatch_buf, 0);
                 }
                 {
                     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -440,7 +567,7 @@ impl Node for MpmComputeNode {
                     });
                     pass.set_pipeline(grid_update_pipeline);
                     pass.set_bind_group(0, &grid_update_bg, &[]);
-                    pass.dispatch_workgroups(nodes_wgs, 1, 1);
+                    pass.dispatch_workgroups_indirect(&buffers.active_tile_dispatch_buf, 0);
                 }
                 {
                     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {

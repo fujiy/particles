@@ -10,6 +10,7 @@ pub const CHUNK_EVENT_KIND_NEWLY_OCCUPIED: u32 = 1;
 pub const CHUNK_EVENT_KIND_NEWLY_EMPTY: u32 = 2;
 pub const CHUNK_EVENT_KIND_FRONTIER_REQUEST: u32 = 3;
 pub const CHUNK_EVENT_KIND_SLOT_SNAPSHOT: u32 = 4;
+pub const ACTIVE_TILE_NODE_DIM: u32 = 8;
 
 // ---------------------------------------------------------------------------
 // GPU-side chunk metadata (static residency for MPM-CHUNK-01)
@@ -49,6 +50,15 @@ impl Default for GpuChunkMeta {
 }
 
 const _: () = assert!(std::mem::size_of::<GpuChunkMeta>() == 60);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct GpuActiveTileRecord {
+    pub slot_id: u32,
+    pub tile_id: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<GpuActiveTileRecord>() == 8);
 
 // ---------------------------------------------------------------------------
 // GPU-side particle layout (matches mpm_types.wgsl::GpuParticle, 72 bytes)

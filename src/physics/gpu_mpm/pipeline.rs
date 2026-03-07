@@ -17,6 +17,15 @@ use super::shaders::MpmShaders;
 
 #[derive(Resource)]
 pub struct MpmComputePipelines {
+    pub active_tile_clear_layout: BindGroupLayout,
+    pub active_tile_clear_pipeline: CachedComputePipelineId,
+    pub active_tile_mark_layout: BindGroupLayout,
+    pub active_tile_mark_pipeline: CachedComputePipelineId,
+    pub active_tile_compact_layout: BindGroupLayout,
+    pub active_tile_compact_pipeline: CachedComputePipelineId,
+    pub active_tile_dispatch_layout: BindGroupLayout,
+    pub active_tile_dispatch_pipeline: CachedComputePipelineId,
+
     pub clear_layout: BindGroupLayout,
     pub clear_pipeline: CachedComputePipelineId,
 
@@ -95,12 +104,116 @@ impl FromWorld for MpmComputePipelines {
         let pipeline_cache = world.resource::<PipelineCache>();
         let shaders = world.resource::<MpmShaders>();
 
-        // clear: 0=params(uniform), 1=grid(storage rw)
+        // active_tile_clear: 0=params(uniform), 1=chunk_meta(storage rw)
+        let active_tile_clear_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let active_tile_clear_layout = render_device
+            .create_bind_group_layout("mpm_active_tile_clear_layout", &*active_tile_clear_entries);
+        let active_tile_clear_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_active_tile_clear".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_active_tile_clear_layout",
+                    &*active_tile_clear_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.active_tiles.clone(),
+                shader_defs: vec![],
+                entry_point: Some("clear_active_tiles".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // active_tile_mark: 0=params, 1=particles(read), 2=chunk_meta(rw)
+        let active_tile_mark_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let active_tile_mark_layout = render_device
+            .create_bind_group_layout("mpm_active_tile_mark_layout", &*active_tile_mark_entries);
+        let active_tile_mark_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_active_tile_mark".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_active_tile_mark_layout",
+                    &*active_tile_mark_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.active_tiles.clone(),
+                shader_defs: vec![],
+                entry_point: Some("mark_active_tiles".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // active_tile_compact: 0=params, 1=chunk_meta(read), 2=tile_count(rw), 3=tile_list(rw)
+        let active_tile_compact_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let active_tile_compact_layout = render_device.create_bind_group_layout(
+            "mpm_active_tile_compact_layout",
+            &*active_tile_compact_entries,
+        );
+        let active_tile_compact_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_active_tile_compact".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_active_tile_compact_layout",
+                    &*active_tile_compact_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.active_tiles.clone(),
+                shader_defs: vec![],
+                entry_point: Some("compact_active_tiles".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // active_tile_dispatch: 0=tile_count(read), 1=dispatch_args(rw)
+        let active_tile_dispatch_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let active_tile_dispatch_layout = render_device.create_bind_group_layout(
+            "mpm_active_tile_dispatch_layout",
+            &*active_tile_dispatch_entries,
+        );
+        let active_tile_dispatch_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_active_tile_dispatch".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_active_tile_dispatch_layout",
+                    &*active_tile_dispatch_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.active_tiles.clone(),
+                shader_defs: vec![],
+                entry_point: Some("finalize_active_tile_dispatch".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // clear: 0=params(uniform), 1=grid(storage rw), 2=active_tile_list(read)
         let clear_entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 binding_types::uniform_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
             ),
         );
         let clear_layout =
@@ -142,12 +255,15 @@ impl FromWorld for MpmComputePipelines {
             zero_initialize_workgroup_memory: false,
         });
 
-        // grid_update: 0=params, 1=grid(rw), 2=terrain_sdf(read), 3=terrain_normal(read), 4=chunk_meta(read)
+        // grid_update:
+        // 0=params, 1=grid(rw), 2=terrain_sdf(read), 3=terrain_normal(read),
+        // 4=chunk_meta(read), 5=active_tile_list(read)
         let gu_entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 binding_types::uniform_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
@@ -711,6 +827,14 @@ impl FromWorld for MpmComputePipelines {
             });
 
         Self {
+            active_tile_clear_layout,
+            active_tile_clear_pipeline,
+            active_tile_mark_layout,
+            active_tile_mark_pipeline,
+            active_tile_compact_layout,
+            active_tile_compact_pipeline,
+            active_tile_dispatch_layout,
+            active_tile_dispatch_pipeline,
             clear_layout,
             clear_pipeline,
             p2g_layout,

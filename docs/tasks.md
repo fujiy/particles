@@ -192,19 +192,25 @@
 
 ### [MPM-CHUNK-03] active tile再構築と sparse実行最適化
 
-- Status: `Planned`
+- Status: `In Progress`
 - 背景:
   - chunk構造導入後の性能は active tile 最適化の有無に強く依存する。
 - スコープ:
   - resident chunk 内で active tile mask を毎step再構築し、clear/grid update を sparse 化する。
 - Subtasks:
-  - [ ] chunkごとの `active_tile_mask` 初期化・mark（neighbor含む）を実装する。
-  - [ ] clear/grid update を active tile 限定 dispatch へ切替する。
-  - [ ] `active_tile_count` / `inactive_skip_rate` を計測する。
-  - [ ] `water_drop` と mixedシナリオで性能回帰を計測する。
+  - [x] chunkごとの `active_tile_mask` 初期化・mark（neighbor含む）を実装する。
+  - [x] clear/grid update を active tile 限定 dispatch へ切替する。
+  - [x] `active_tile_count` / `inactive_skip_rate` を計測する。
+  - [x] `water_drop` と mixedシナリオで性能回帰を計測する。
 - 完了条件:
   - active tile 非対象領域の計算を確実にスキップできる。
   - 品質を維持したままGPU pass時間が改善する。
+- Progress:
+  - 2026-03-08: `mpm_active_tiles.wgsl` を追加し、GPU で `active_tile_mask` の clear/mark/compact を毎substep再構築する経路を実装。`clear` / `grid_update` は active tile list + indirect dispatch へ切替し、dense node dispatch を撤去。
+  - 2026-03-08: chunk overlay shader を `active_tile_mask` 参照へ更新し、active tile fill/edge 色を `assets/params/overlay.ron` へ追加。`overlay_chunk_active_tiles_water_drop.png` で chunk overlay 上に active tile が重畳表示されることを確認。
+  - 2026-03-08: CPU readback snapshot から `active_tile_count` / `inactive_skip_rate` を再計算して HUD と autoverify report に追加。`water_drop_motion.json` では `active_tile_count=17`, `inactive_skip_rate=0.8786`, `runtime_rebuild_count=0`、`sand_water_interaction_drop.json` では `active_tile_count=18`, `inactive_skip_rate=0.9521`, `runtime_rebuild_count=0` を確認。
+  - 2026-03-08: 追加依頼として chunk/grid overlay の可読性を調整。下地ピクセル輝度に応じて overlay 色の輝度を反転する post-process 経路へ変更し、active tile は塗りつぶしをやめて tile 内の MPM node grid 表示のみに変更。描画対象がないフレームでも source を先に copy することで黒画面化しないよう修正した。
+  - 2026-03-08: 直接の GPU timestamp 計測基盤は未導入のため、現状の性能確認は sparse 化率と scenario 実行完走を主指標としている。pass時間の直接比較が揃うまで WU は `In Progress` のままとする。
 
 ### [MPM-CHUNK-04] 地形改変・ロードに伴う chunk SDF 更新
 

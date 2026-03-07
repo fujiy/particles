@@ -62,6 +62,7 @@ impl Plugin for OverlayPlugin {
                 prepare_sdf_overlay_gpu_pipeline.in_set(RenderSystems::Prepare),
             )
             .init_resource::<SpecializedRenderPipelines<ChunkPhysicsOverlayGpuPipeline>>()
+            .init_resource::<SpecializedRenderPipelines<ChunkPhysicsOverlayCopyPipeline>>()
             .add_systems(RenderStartup, init_chunk_physics_overlay_gpu_pipeline)
             .add_systems(
                 Render,
@@ -227,8 +228,9 @@ impl ExtractResource for SdfOverlayState {
 }
 
 use chunk_physics::{
-    ChunkPhysicsOverlayGpuLabel, ChunkPhysicsOverlayGpuNode, ChunkPhysicsOverlayGpuPipeline,
-    init_chunk_physics_overlay_gpu_pipeline, prepare_chunk_physics_overlay_gpu_pipeline,
+    ChunkPhysicsOverlayCopyPipeline, ChunkPhysicsOverlayGpuLabel, ChunkPhysicsOverlayGpuNode,
+    ChunkPhysicsOverlayGpuPipeline, init_chunk_physics_overlay_gpu_pipeline,
+    prepare_chunk_physics_overlay_gpu_pipeline,
 };
 
 use particle::{

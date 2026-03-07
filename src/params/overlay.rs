@@ -92,6 +92,8 @@ pub struct OverlayColorParams {
     pub chunk_overlay_halo_grid: OverlayColor,
     pub chunk_overlay_free_edge: OverlayColor,
     pub chunk_overlay_free_grid: OverlayColor,
+    pub chunk_overlay_active_tile_fill: OverlayColor,
+    pub chunk_overlay_active_tile_edge: OverlayColor,
     pub grid_chunk_boundary: OverlayColor,
     pub grid_cached_chunk: OverlayColor,
     pub grid_modified_chunk: OverlayColor,
@@ -188,6 +190,18 @@ impl Default for OverlayParams {
                     g: 0.58,
                     b: 0.62,
                     a: 0.26,
+                },
+                chunk_overlay_active_tile_fill: OverlayColor {
+                    r: 0.22,
+                    g: 0.87,
+                    b: 0.66,
+                    a: 0.18,
+                },
+                chunk_overlay_active_tile_edge: OverlayColor {
+                    r: 0.22,
+                    g: 0.87,
+                    b: 0.66,
+                    a: 0.72,
                 },
                 grid_chunk_boundary: OverlayColor {
                     r: 0.80,

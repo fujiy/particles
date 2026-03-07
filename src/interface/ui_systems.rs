@@ -624,7 +624,7 @@ pub(super) fn update_simulation_hud(
     let loaded_chunks = terrain_world.loaded_chunk_coords().len();
     let modified_chunks = terrain_world.override_chunk_coords().len();
     hud_texts.p1().0 = format!(
-        "Sim: {sim_status}\nTerrainGen/frame: {:>7} (d={:>4},{:>4} full={} r=0x{:02X})\nTerrainOvr/frame: runs={:>5} cells={:>6} pending={:>5} done={:>5.1}%\nTerrainOvr/total: runs={:>7} cells={:>8}\nGPU Total: {gpu_total_count}\nWater(L): {water_count}\nGranular(Soil+Stone): {granular_soil_like_count}\nGranular(Sand): {granular_sand_count}\nGPU Unknown: {unknown_phase_count}\nChunk/Grid Overlay: {} | resident {} chunks | nodes {}x{} cells {}x{}\nRender Chunks: {} (Modified: {})\nSDF Overlay: {}",
+        "Sim: {sim_status}\nTerrainGen/frame: {:>7} (d={:>4},{:>4} full={} r=0x{:02X})\nTerrainOvr/frame: runs={:>5} cells={:>6} pending={:>5} done={:>5.1}%\nTerrainOvr/total: runs={:>7} cells={:>8}\nGPU Total: {gpu_total_count}\nWater(L): {water_count}\nGranular(Soil+Stone): {granular_soil_like_count}\nGranular(Sand): {granular_sand_count}\nGPU Unknown: {unknown_phase_count}\nChunk/Grid Overlay: {} | resident {} chunks | active tiles {}/{} skip {:>5.1}% | nodes {}x{} cells {}x{}\nRender Chunks: {} (Modified: {})\nSDF Overlay: {}",
         terrain_render_diagnostics.terrain_generation_eval_count_frame,
         terrain_render_diagnostics.terrain_generation_origin_delta_x_frame,
         terrain_render_diagnostics.terrain_generation_origin_delta_y_frame,
@@ -638,6 +638,9 @@ pub(super) fn update_simulation_hud(
         terrain_render_diagnostics.terrain_override_cells_total,
         if overlay_enabled { "ON" } else { "OFF" },
         chunk_residency.resident_chunk_count,
+        chunk_residency.active_tile_count,
+        chunk_residency.active_tile_capacity,
+        chunk_residency.inactive_skip_rate * 100.0,
         layout.dims.x,
         layout.dims.y,
         grid_cells.x,

@@ -11,8 +11,8 @@ use bytemuck::cast_slice;
 use std::mem::size_of;
 
 use super::buffers::{
-    GpuChunkEventRecord, GpuChunkMeta, GpuGridLayout, GpuGridNode, GpuMoverResult, GpuMpmParams,
-    GpuParticle, GpuStatisticsScalars,
+    ACTIVE_TILE_NODE_DIM, GpuActiveTileRecord, GpuChunkEventRecord, GpuChunkMeta, GpuGridLayout,
+    GpuGridNode, GpuMoverResult, GpuMpmParams, GpuParticle, GpuStatisticsScalars,
 };
 use crate::physics::world::constants::{
     CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
@@ -24,9 +24,16 @@ pub const MAX_MOVER_RECORDS: u32 = MAX_PARTICLES;
 pub const MAX_CHUNK_EVENT_RECORDS: u32 = MAX_RESIDENT_CHUNK_SLOTS * 4;
 pub const MPM_CHUNK_NODE_DIM: u32 = CHUNK_SIZE_I32 as u32;
 pub const MPM_CHUNK_NODES_PER_SLOT: u32 = MPM_CHUNK_NODE_DIM * MPM_CHUNK_NODE_DIM;
+pub const MPM_ACTIVE_TILE_DIM_PER_AXIS: u32 =
+    (MPM_CHUNK_NODE_DIM + ACTIVE_TILE_NODE_DIM - 1) / ACTIVE_TILE_NODE_DIM;
+pub const MPM_ACTIVE_TILES_PER_SLOT: u32 =
+    MPM_ACTIVE_TILE_DIM_PER_AXIS * MPM_ACTIVE_TILE_DIM_PER_AXIS;
 pub const MAX_RESIDENT_CHUNK_SLOTS: u32 = 256;
 pub const MAX_RESIDENT_NODE_CAPACITY: u64 =
     MAX_RESIDENT_CHUNK_SLOTS as u64 * MPM_CHUNK_NODES_PER_SLOT as u64;
+pub const MAX_ACTIVE_TILE_RECORDS: u64 =
+    MAX_RESIDENT_CHUNK_SLOTS as u64 * MPM_ACTIVE_TILES_PER_SLOT as u64;
+const _: () = assert!(MPM_ACTIVE_TILES_PER_SLOT <= 32);
 
 /// Computes the canonical grid layout covering the full world extent.
 pub fn world_grid_layout() -> GpuGridLayout {
@@ -62,6 +69,12 @@ pub struct MpmGpuBuffers {
 
     /// Chunk metadata buffer.
     pub chunk_meta_buf: Buffer,
+    /// Atomic active-tile count for sparse clear/grid-update dispatch.
+    pub active_tile_count_buf: Buffer,
+    /// Compacted active-tile records for sparse clear/grid-update dispatch.
+    pub active_tile_list_buf: Buffer,
+    /// Indirect dispatch arguments derived from the active-tile list.
+    pub active_tile_dispatch_buf: Buffer,
 
     /// Terrain SDF buffer: node_count * 4 bytes (f32 per node).
     pub terrain_sdf_buf: Buffer,
@@ -146,6 +159,24 @@ impl MpmGpuBuffers {
             label: Some("mpm_chunk_meta"),
             size: MAX_RESIDENT_CHUNK_SLOTS as u64 * size_of::<GpuChunkMeta>() as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let active_tile_count_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_active_tile_count"),
+            size: size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let active_tile_list_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_active_tile_list"),
+            size: MAX_ACTIVE_TILE_RECORDS * size_of::<GpuActiveTileRecord>() as u64,
+            usage: BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let active_tile_dispatch_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_active_tile_dispatch"),
+            size: (size_of::<u32>() * 3) as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -266,6 +297,9 @@ impl MpmGpuBuffers {
             particle_buf,
             grid_buf,
             chunk_meta_buf,
+            active_tile_count_buf,
+            active_tile_list_buf,
+            active_tile_dispatch_buf,
             terrain_sdf_buf,
             terrain_normal_buf,
             terrain_cell_solid_buf,

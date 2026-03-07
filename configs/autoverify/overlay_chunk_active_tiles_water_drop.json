@@ -1,0 +1,15 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "water_drop",
+    "output_path": "artifacts/autoverify/overlay_chunk_active_tiles_water_drop.png",
+    "warmup_frames": 180,
+    "max_wait_after_capture_frames": 240,
+    "overlay": {
+      "chunk": true,
+      "sdf": false,
+      "physics_area": true,
+      "particle": false
+    }
+  }
+}

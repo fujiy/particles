@@ -1,7 +1,7 @@
 // Grid update pass: convert momentum to velocity, apply gravity and terrain boundary.
-// One thread per grid node.
+// One workgroup per active tile, one thread per node within the 8x8 tile.
 
-#import particles::mpm_types::{GpuGridNode, MpmParams, node_capacity}
+#import particles::mpm_types::{GpuGridNode, MpmParams}
 
 struct GpuChunkMeta {
     chunk_coord_x: i32,
@@ -22,10 +22,12 @@ struct GpuChunkMeta {
 // Terrain normal buffer: 2 x f32 per grid node (nx, ny).
 @group(0) @binding(3) var<storage, read> terrain_normal: array<vec2<f32>>;
 @group(0) @binding(4) var<storage, read> chunk_meta: array<GpuChunkMeta>;
+@group(0) @binding(5) var<storage, read> active_tiles: array<vec2<u32>>;
 
 const MASS_EPSILON: f32 = 1e-8;
 const RECOVERY_SPEED_CAP: f32 = 1.2;
 const INVALID_SLOT: u32 = 0xffffffffu;
+const ACTIVE_TILE_NODE_DIM: u32 = 8u;
 
 // Terrain boundary: non-penetration + Coulomb stick/slip friction [Eqs.28-29, physics.md].
 // Triggers within a thin buffer zone (sdf < threshold) to preemptively block approach.
@@ -164,21 +166,28 @@ fn shifted_node_index(
 }
 
 @compute @workgroup_size(64)
-fn grid_update(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
-    let total = node_capacity(params);
-    if idx >= total {
-        return;
-    }
+fn grid_update(
+    @builtin(workgroup_id) workgroup_id: vec3<u32>,
+    @builtin(local_invocation_index) local_invocation_index: u32,
+) {
     let cdim = params.chunk_node_dim;
     if cdim == 0u {
         return;
     }
-    let nodes_per_chunk = cdim * cdim;
-    let chunk_slot = idx / nodes_per_chunk;
-    let local_idx = idx - chunk_slot * nodes_per_chunk;
-    let local_x = i32(local_idx % cdim);
-    let local_y = i32(local_idx / cdim);
+    let record = active_tiles[workgroup_id.x];
+    let chunk_slot = record.x;
+    let tile_id = record.y;
+    let tiles_per_axis = max((cdim + ACTIVE_TILE_NODE_DIM - 1u) / ACTIVE_TILE_NODE_DIM, 1u);
+    let tile_x = tile_id % tiles_per_axis;
+    let tile_y = tile_id / tiles_per_axis;
+    let local_x_u = tile_x * ACTIVE_TILE_NODE_DIM + (local_invocation_index % ACTIVE_TILE_NODE_DIM);
+    let local_y_u = tile_y * ACTIVE_TILE_NODE_DIM + (local_invocation_index / ACTIVE_TILE_NODE_DIM);
+    if local_x_u >= cdim || local_y_u >= cdim {
+        return;
+    }
+    let local_x = i32(local_x_u);
+    let local_y = i32(local_y_u);
+    let idx = node_index_from_slot_local(chunk_slot, local_x_u, local_y_u, params);
 
     let mw = grid[idx].water_mass;
     let mg = grid[idx].granular_mass;
@@ -223,7 +232,6 @@ fn grid_update(@builtin(global_invocation_id) gid: vec3<u32>) {
         vg -= j_drag / mg;
 
         // 2) Interface normal from granular fill gradient [Eq.41].
-        let node = node_coord_from_slot_index(idx, params);
         var idx_l = shifted_node_index(chunk_slot, local_x, local_y, -1, 0, params);
         var idx_r = shifted_node_index(chunk_slot, local_x, local_y, 1, 0, params);
         var idx_d = shifted_node_index(chunk_slot, local_x, local_y, 0, -1, params);
