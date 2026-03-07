@@ -758,10 +758,10 @@ const _: () = assert!(std::mem::size_of::<TerrainComposeParams>() == 96);
 
 // ── GPU resources (render world) ──────────────────────────────────────────────
 
-struct TerrainNearGpuCache {
+pub(crate) struct TerrainNearGpuCache {
     /// R16Uint persistent texture: material IDs at cell resolution.
     _near_texture: Texture,
-    near_texture_view: TextureView,
+    pub(crate) near_texture_view: TextureView,
     extent_cells: UVec2,
 }
 
@@ -782,9 +782,9 @@ struct TerrainBackGpuCache {
 }
 
 #[derive(Resource)]
-struct TerrainNearGpuResources {
-    near_cache: TerrainNearGpuCache,
-    override_cache: TerrainNearGpuCache,
+pub(crate) struct TerrainNearGpuResources {
+    pub(crate) near_cache: TerrainNearGpuCache,
+    pub(crate) override_cache: TerrainNearGpuCache,
     far_cache: TerrainFarGpuCache,
     back_cache: TerrainBackGpuCache,
     /// Storage buffer: dirty world cells to update in the current dispatch.
@@ -808,7 +808,7 @@ struct TerrainNearGpuResources {
     /// Uniform buffer for back compute pass (TerrainFarParams).
     back_params_buf: Buffer,
     /// Uniform buffer for fragment pass (TerrainComposeParams).
-    compose_params_buf: Buffer,
+    pub(crate) compose_params_buf: Buffer,
     /// How many more frames to keep the dirty flag set, used to retry when the
     /// pipeline is still compiling on the first frame data arrives.
     pending_dispatch_frames: u32,
@@ -2708,7 +2708,8 @@ fn init_terrain_compose_pipeline(mut commands: Commands, asset_server: Res<Asset
 }
 
 fn link_terrain_and_water_graph(mut graph: ResMut<RenderGraph>) {
-    // Add Core2d edge: TerrainCompose → WaterDotGpu (terrain renders before water).
+    // Add Core2d edge: TerrainCompose → WaterDotGpu.
+    // Water pass performs terrain-occlusion discard so terrain remains visually in front.
     if let Some(core2d) = graph.get_sub_graph_mut(Core2d) {
         let _ = core2d.try_add_node_edge(TerrainComposeLabel, WaterDotGpuLabel);
     }

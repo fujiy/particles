@@ -3,29 +3,33 @@ use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::ecs::query::QueryItem;
 use bevy::log::warn;
 use bevy::prelude::*;
-use bevy::render::extract_resource::ExtractResourcePlugin;
+use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::graph::CameraDriverLabel;
 use bevy::render::render_graph::{
     Node, NodeRunError, RenderGraph, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode,
     ViewNodeRunner,
 };
 use bevy::render::render_resource::binding_types::{
-    storage_buffer_read_only_sized, storage_buffer_sized, uniform_buffer, uniform_buffer_sized,
+    storage_buffer_read_only_sized, storage_buffer_sized, texture_2d, uniform_buffer,
+    uniform_buffer_sized,
 };
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer,
-    BufferDescriptor, BufferUsages, CachedComputePipelineId, CachedPipelineState,
-    CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor,
-    ComputePipelineDescriptor, FragmentState, MultisampleState, PipelineCache, PrimitiveState,
-    RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages, SpecializedRenderPipeline,
-    SpecializedRenderPipelines, TextureFormat, VertexState,
+    BindGroupLayoutEntries, BindingResource, BlendComponent, BlendFactor, BlendOperation,
+    BlendState, Buffer, BufferDescriptor, BufferUsages, CachedComputePipelineId,
+    CachedPipelineState, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+    ComputePassDescriptor, ComputePipelineDescriptor, FragmentState, MultisampleState,
+    PipelineCache, PrimitiveState, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages,
+    SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat, TextureSampleType,
+    VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::view::{Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bytemuck::{Pod, Zeroable};
 
+use super::terrain_gpu::TerrainNearGpuResources;
+use crate::camera_controller::MainCamera;
 use crate::params::palette::{MaterialPalette4, PaletteColor};
 use crate::params::{ActivePaletteParams, ActiveRenderParams};
 use crate::physics::gpu_mpm::{MpmComputeLabel, gpu_resources::MpmGpuBuffers};
@@ -137,11 +141,26 @@ struct WaterDotGpuResources {
     blurred_density_sand_buf: Buffer,
 }
 
+#[derive(Resource, Clone, Copy, Debug, Default, ExtractResource)]
+struct WaterDotCameraState {
+    center_world: Vec2,
+}
+
+fn update_water_dot_camera_state(
+    mut state: ResMut<WaterDotCameraState>,
+    camera_q: Query<&Transform, With<MainCamera>>,
+) {
+    if let Ok(transform) = camera_q.single() {
+        state.center_world = transform.translation.truncate();
+    }
+}
+
 impl WaterDotGpuResources {
     fn params_for(
         &self,
         particle_count: u32,
         active_render: Option<&ActiveRenderParams>,
+        camera_center_world: Option<Vec2>,
     ) -> WaterDotParams {
         let (
             density_threshold,
@@ -169,9 +188,17 @@ impl WaterDotGpuResources {
                 DEFAULT_BLUR_RADIUS_DOTS,
                 DEFAULT_WATER_PALETTE_SEED,
             ));
+        let grid_world_size = Vec2::new(
+            self.layout.width as f32 * self.layout.dot_size_m,
+            self.layout.height as f32 * self.layout.dot_size_m,
+        );
+        let origin = camera_center_world
+            .map(|center| center - 0.5 * grid_world_size)
+            .unwrap_or(self.layout.origin);
+
         WaterDotParams {
-            origin_x: self.layout.origin.x,
-            origin_y: self.layout.origin.y,
+            origin_x: origin.x,
+            origin_y: origin.y,
             dot_size_m: self.layout.dot_size_m,
             density_threshold,
             atomic_scale,
@@ -526,6 +553,9 @@ fn init_water_dot_gpu_render_pipeline(mut commands: Commands, asset_server: Res<
                 storage_buffer_read_only_sized(false, None),
                 storage_buffer_read_only_sized(false, None),
                 uniform_buffer_sized(false, core::num::NonZeroU64::new(192)),
+                uniform_buffer_sized(false, None),
+                texture_2d(TextureSampleType::Uint),
+                texture_2d(TextureSampleType::Uint),
             ),
         ),
     );
@@ -598,8 +628,14 @@ impl Node for WaterDotPreprocessNode {
             std::sync::atomic::AtomicBool::new(false);
         let had_particles_previous_frame =
             HAD_PARTICLES_PREVIOUS_FRAME.load(std::sync::atomic::Ordering::Relaxed);
-        let params =
-            resources.params_for(particle_count, world.get_resource::<ActiveRenderParams>());
+        let camera_center_world = world
+            .get_resource::<WaterDotCameraState>()
+            .map(|state| state.center_world);
+        let params = resources.params_for(
+            particle_count,
+            world.get_resource::<ActiveRenderParams>(),
+            camera_center_world,
+        );
         world.resource::<RenderQueue>().write_buffer(
             &resources.params_buf,
             0,
@@ -858,6 +894,9 @@ impl ViewNode for WaterDotGpuNode {
         let Some(resources) = world.get_resource::<WaterDotGpuResources>() else {
             return Ok(());
         };
+        let Some(terrain_resources) = world.get_resource::<TerrainNearGpuResources>() else {
+            return Ok(());
+        };
 
         let pipeline_cache = world.resource::<PipelineCache>();
         let Some(pipeline) = pipeline_cache.get_render_pipeline(view_pipeline.id) else {
@@ -890,6 +929,9 @@ impl ViewNode for WaterDotGpuNode {
                 resources.blurred_density_soil_buf.as_entire_binding(),
                 resources.blurred_density_sand_buf.as_entire_binding(),
                 resources.palette_buf.as_entire_binding(),
+                terrain_resources.compose_params_buf.as_entire_binding(),
+                BindingResource::TextureView(&terrain_resources.near_cache.near_texture_view),
+                BindingResource::TextureView(&terrain_resources.override_cache.near_texture_view),
             )),
         );
 
@@ -912,6 +954,9 @@ pub struct WaterDotGpuPlugin;
 
 impl Plugin for WaterDotGpuPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<WaterDotCameraState>()
+            .add_systems(Update, update_water_dot_camera_state)
+            .add_plugins(ExtractResourcePlugin::<WaterDotCameraState>::default());
         app.add_plugins(ExtractResourcePlugin::<ActivePaletteParams>::default());
         app.add_plugins(ExtractResourcePlugin::<ActiveRenderParams>::default());
         let render_app = app.sub_app_mut(RenderApp);
