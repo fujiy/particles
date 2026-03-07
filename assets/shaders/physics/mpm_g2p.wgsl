@@ -1,16 +1,29 @@
 // G2P pass: gather grid velocity to particles, update v, x, C, F.
 // One thread per particle.
 
-#import particles::mpm_types::{GpuParticle, GpuGridNode, MpmParams, PHASE_WATER, PHASE_GRANULAR_SOIL, phase_is_granular, bspline_w_dw, node_index, node_in_bounds, mat2_det}
+#import particles::mpm_types::{GpuParticle, GpuGridNode, MpmParams, PHASE_WATER, PHASE_GRANULAR_SOIL, phase_is_granular, bspline_w_dw, mat2_det}
+
+struct GpuChunkMeta {
+    chunk_coord_x: i32,
+    chunk_coord_y: i32,
+    neighbor_slot_id: array<u32, 8>,
+    active_tile_mask: u32,
+    particle_count_curr: u32,
+    particle_count_next: u32,
+    occupied_bit_curr: u32,
+    occupied_bit_next: u32,
+}
 
 @group(0) @binding(0) var<uniform> params: MpmParams;
 @group(0) @binding(1) var<storage, read_write> particles: array<GpuParticle>;
 @group(0) @binding(2) var<storage, read> grid: array<GpuGridNode>;
+@group(0) @binding(3) var<storage, read> chunk_meta: array<GpuChunkMeta>;
 
 const MASS_EPSILON: f32 = 1e-8;
 const SVD_SIGMA_MIN: f32 = 1.0e-5;
 const DP_NORM_EPS: f32 = 1.0e-8;
 const V_VOL_CLAMP: f32 = 6.0;
+const INVALID_SLOT: u32 = 0xffffffffu;
 
 struct DpParams {
     lambda: f32,
@@ -38,6 +51,23 @@ struct ProjectionResult {
     f10: f32,
     f11: f32,
     v_vol: f32,
+}
+
+fn neighbor_index_from_delta(dx: i32, dy: i32) -> u32 {
+    if dx == -1 && dy == -1 { return 0u; }
+    if dx ==  0 && dy == -1 { return 1u; }
+    if dx ==  1 && dy == -1 { return 2u; }
+    if dx == -1 && dy ==  0 { return 3u; }
+    if dx ==  1 && dy ==  0 { return 4u; }
+    if dx == -1 && dy ==  1 { return 5u; }
+    if dx ==  0 && dy ==  1 { return 6u; }
+    if dx ==  1 && dy ==  1 { return 7u; }
+    return INVALID_SLOT;
+}
+
+fn node_index_from_slot_local(slot_id: u32, local_x: u32, local_y: u32, params: MpmParams) -> u32 {
+    let nodes_per_chunk = params.chunk_node_dim * params.chunk_node_dim;
+    return slot_id * nodes_per_chunk + local_y * params.chunk_node_dim + local_x;
 }
 
 fn finite_f32(x: f32) -> bool {
@@ -217,6 +247,16 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dt = params.dt;
 
     let p = particles[pid];
+    let home_slot = p.home_chunk_slot_id;
+    if home_slot >= params.resident_chunk_count || home_slot == INVALID_SLOT {
+        return;
+    }
+    let home_chunk = chunk_meta[home_slot];
+    let cdim_i = i32(params.chunk_node_dim);
+    if cdim_i <= 0 {
+        return;
+    }
+    let home_node_origin = vec2<i32>(home_chunk.chunk_coord_x * cdim_i, home_chunk.chunk_coord_y * cdim_i);
     let xp = p.x;
     let phase_id = p.phase_id;
     let granular = phase_is_granular(phase_id);
@@ -239,10 +279,41 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var oy: i32 = 0; oy < 3; oy++) {
         for (var ox: i32 = 0; ox < 3; ox++) {
             let node = base + vec2<i32>(ox, oy);
-            if !node_in_bounds(node.x, node.y, params) {
+            let local = node - home_node_origin;
+            var delta_chunk_x = 0;
+            var delta_chunk_y = 0;
+            if local.x < 0 {
+                delta_chunk_x = -1;
+            } else if local.x >= cdim_i {
+                delta_chunk_x = 1;
+            }
+            if local.y < 0 {
+                delta_chunk_y = -1;
+            } else if local.y >= cdim_i {
+                delta_chunk_y = 1;
+            }
+            if abs(delta_chunk_x) > 1 || abs(delta_chunk_y) > 1 {
                 continue;
             }
-            let nidx = node_index(node.x, node.y, params);
+
+            var slot_id = home_slot;
+            if delta_chunk_x != 0 || delta_chunk_y != 0 {
+                let neighbor_idx = neighbor_index_from_delta(delta_chunk_x, delta_chunk_y);
+                if neighbor_idx == INVALID_SLOT {
+                    continue;
+                }
+                let neighbor_slot = home_chunk.neighbor_slot_id[neighbor_idx];
+                if neighbor_slot == INVALID_SLOT {
+                    continue;
+                }
+                slot_id = neighbor_slot;
+            }
+            let local_x = local.x - delta_chunk_x * cdim_i;
+            let local_y = local.y - delta_chunk_y * cdim_i;
+            if local_x < 0 || local_y < 0 || local_x >= cdim_i || local_y >= cdim_i {
+                continue;
+            }
+            let nidx = node_index_from_slot_local(slot_id, u32(local_x), u32(local_y), params);
             var mi = 0.0;
             var vi = vec2<f32>(0.0, 0.0);
             if granular {

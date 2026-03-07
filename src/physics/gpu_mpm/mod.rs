@@ -24,14 +24,15 @@ use bevy::render::{Render, RenderApp, RenderSystems};
 use std::mem::size_of;
 
 use self::gpu_resources::{
-    MAX_MOVER_RECORDS, MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest,
-    MpmGpuStepClock, MpmGpuUploadRequest,
+    MAX_CHUNK_EVENT_RECORDS, MAX_MOVER_RECORDS, MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest,
+    MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest,
 };
 use self::node::MpmComputeNode;
 use self::pipeline::MpmComputePipelines;
 use self::readback::{
-    GpuMoverApplyAck, GpuMoverReadbackResult, GpuMoverReadbackState, GpuReadbackResult,
-    GpuReadbackState, GpuStatisticsReadbackResult, GpuStatisticsReadbackState,
+    GpuChunkEventReadbackResult, GpuChunkEventReadbackState, GpuMoverApplyAck,
+    GpuMoverReadbackResult, GpuMoverReadbackState, GpuReadbackResult, GpuReadbackState,
+    GpuStatisticsReadbackResult, GpuStatisticsReadbackState,
 };
 use self::shaders::MpmShaders;
 use crate::physics::state::SimUpdateSet;
@@ -58,12 +59,15 @@ impl ExtractResource for MpmGpuUploadRequest {
             upload_chunks: source.upload_chunks,
             upload_chunk_diffs: source.upload_chunk_diffs,
             upload_terrain: source.upload_terrain,
+            upload_terrain_cell_slot_diffs: source.upload_terrain_cell_slot_diffs,
             chunk_meta: source.chunk_meta.clone(),
             particles: source.particles.clone(),
             mover_results: source.mover_results.clone(),
             chunk_meta_diffs: source.chunk_meta_diffs.clone(),
             terrain_sdf: source.terrain_sdf.clone(),
             terrain_normal: source.terrain_normal.clone(),
+            terrain_slot_ids: source.terrain_slot_ids.clone(),
+            terrain_cell_solid_slot_diffs: source.terrain_cell_solid_slot_diffs.clone(),
             last_uploaded_terrain_version: source.last_uploaded_terrain_version,
         }
     }
@@ -79,12 +83,15 @@ impl Clone for MpmGpuUploadRequest {
             upload_chunks: self.upload_chunks,
             upload_chunk_diffs: self.upload_chunk_diffs,
             upload_terrain: self.upload_terrain,
+            upload_terrain_cell_slot_diffs: self.upload_terrain_cell_slot_diffs,
             chunk_meta: self.chunk_meta.clone(),
             particles: self.particles.clone(),
             mover_results: self.mover_results.clone(),
             chunk_meta_diffs: self.chunk_meta_diffs.clone(),
             terrain_sdf: self.terrain_sdf.clone(),
             terrain_normal: self.terrain_normal.clone(),
+            terrain_slot_ids: self.terrain_slot_ids.clone(),
+            terrain_cell_solid_slot_diffs: self.terrain_cell_solid_slot_diffs.clone(),
             last_uploaded_terrain_version: self.last_uploaded_terrain_version,
         }
     }
@@ -179,6 +186,21 @@ fn prepare_gpu_uploads(
     if upload.upload_terrain && !upload.terrain_sdf.is_empty() && !upload.terrain_normal.is_empty()
     {
         buffers.upload_terrain(&queue, &upload.terrain_sdf, &upload.terrain_normal);
+    }
+    if upload.upload_terrain_cell_slot_diffs
+        && !upload.terrain_slot_ids.is_empty()
+        && !upload.terrain_cell_solid_slot_diffs.is_empty()
+    {
+        buffers.upload_terrain_cell_slot_diffs(
+            &queue,
+            &upload.terrain_slot_ids,
+            &upload.terrain_cell_solid_slot_diffs,
+        );
+    }
+    if upload.upload_terrain_cell_slot_diffs {
+        buffers.upload_terrain_update_slots(&queue, &upload.terrain_slot_ids);
+    } else {
+        buffers.upload_terrain_update_slots(&queue, &[]);
     }
 }
 
@@ -385,6 +407,78 @@ fn readback_movers(
         .store(false, std::sync::atomic::Ordering::Release);
 }
 
+fn readback_chunk_events(
+    control: Res<MpmGpuControl>,
+    buffers: Res<MpmGpuBuffers>,
+    mut state: ResMut<GpuChunkEventReadbackState>,
+    readback_result: Res<GpuChunkEventReadbackResult>,
+) {
+    if control.init_only || !control.readback_enabled {
+        return;
+    }
+
+    if state.mapped {
+        let ready = state
+            .mapped_ready
+            .load(std::sync::atomic::Ordering::Acquire);
+        if ready {
+            let byte_size = size_of::<u32>() as u64
+                + MAX_CHUNK_EVENT_RECORDS as u64
+                    * size_of::<buffers::GpuChunkEventRecord>() as u64;
+            let slice = buffers.chunk_event_readback_buf.slice(..byte_size);
+            let data = slice.get_mapped_range();
+            if data.len() >= size_of::<u32>() {
+                let count = *bytemuck::from_bytes::<u32>(&data[..size_of::<u32>()]);
+                let event_count = count.min(MAX_CHUNK_EVENT_RECORDS);
+                let records_offset = size_of::<u32>();
+                let records_bytes = event_count as usize * size_of::<buffers::GpuChunkEventRecord>();
+                if data.len() >= records_offset + records_bytes {
+                    let mut events = Vec::with_capacity(event_count as usize);
+                    for chunk in data[records_offset..records_offset + records_bytes]
+                        .chunks_exact(size_of::<buffers::GpuChunkEventRecord>())
+                    {
+                        events.push(bytemuck::pod_read_unaligned::<buffers::GpuChunkEventRecord>(
+                            chunk,
+                        ));
+                    }
+                    readback_result.store(events);
+                }
+            }
+            drop(data);
+            buffers.chunk_event_readback_buf.unmap();
+            state
+                .mapped_ready
+                .store(false, std::sync::atomic::Ordering::Release);
+            state.mapped = false;
+            state
+                .copy_pending
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        return;
+    }
+
+    if !state
+        .copy_pending
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return;
+    }
+
+    let byte_size = size_of::<u32>() as u64
+        + MAX_CHUNK_EVENT_RECORDS as u64 * size_of::<buffers::GpuChunkEventRecord>() as u64;
+    let slice = buffers.chunk_event_readback_buf.slice(..byte_size);
+    let flag = state.mapped_ready.clone();
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        if result.is_ok() {
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        }
+    });
+    state.mapped = true;
+    state
+        .copy_pending
+        .store(false, std::sync::atomic::Ordering::Release);
+}
+
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -399,6 +493,8 @@ impl Plugin for GpuMpmPlugin {
         let statistics_readback_for_render = statistics_readback.clone();
         let mover_readback = GpuMoverReadbackResult::default();
         let mover_readback_for_render = mover_readback.clone();
+        let chunk_event_readback = GpuChunkEventReadbackResult::default();
+        let chunk_event_readback_for_render = chunk_event_readback.clone();
         let mover_apply_ack = GpuMoverApplyAck::default();
         let mover_apply_ack_for_render = mover_apply_ack.clone();
 
@@ -415,6 +511,7 @@ impl Plugin for GpuMpmPlugin {
             .insert_resource(readback)
             .insert_resource(statistics_readback)
             .insert_resource(mover_readback)
+            .insert_resource(chunk_event_readback)
             .insert_resource(mover_apply_ack)
             .configure_sets(
                 Update,
@@ -431,6 +528,7 @@ impl Plugin for GpuMpmPlugin {
                     sync::apply_world_edit_requests,
                     sync::prepare_particle_upload,
                     sync::prepare_terrain_upload,
+                    sync::apply_chunk_event_readback,
                     sync::prepare_gpu_params,
                     sync::prepare_gpu_run_state,
                 )
@@ -460,14 +558,21 @@ impl Plugin for GpuMpmPlugin {
             .insert_resource(readback_for_render)
             .insert_resource(statistics_readback_for_render)
             .insert_resource(mover_readback_for_render)
+            .insert_resource(chunk_event_readback_for_render)
             .insert_resource(mover_apply_ack_for_render)
             .init_resource::<GpuReadbackState>()
             .init_resource::<GpuStatisticsReadbackState>()
             .init_resource::<GpuMoverReadbackState>()
+            .init_resource::<GpuChunkEventReadbackState>()
             .add_systems(Render, prepare_gpu_uploads.in_set(RenderSystems::Prepare))
             .add_systems(
                 Render,
-                (readback_particles, readback_statistics, readback_movers)
+                (
+                    readback_particles,
+                    readback_statistics,
+                    readback_movers,
+                    readback_chunk_events,
+                )
                     .in_set(RenderSystems::Cleanup),
             );
 

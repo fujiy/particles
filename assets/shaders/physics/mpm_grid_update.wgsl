@@ -1,7 +1,18 @@
 // Grid update pass: convert momentum to velocity, apply gravity and terrain boundary.
 // One thread per grid node.
 
-#import particles::mpm_types::{GpuGridNode, MpmParams, node_capacity, node_index}
+#import particles::mpm_types::{GpuGridNode, MpmParams, node_capacity}
+
+struct GpuChunkMeta {
+    chunk_coord_x: i32,
+    chunk_coord_y: i32,
+    neighbor_slot_id: array<u32, 8>,
+    active_tile_mask: u32,
+    particle_count_curr: u32,
+    particle_count_next: u32,
+    occupied_bit_curr: u32,
+    occupied_bit_next: u32,
+}
 
 @group(0) @binding(0) var<uniform> params: MpmParams;
 @group(0) @binding(1) var<storage, read_write> grid: array<GpuGridNode>;
@@ -10,9 +21,11 @@
 @group(0) @binding(2) var<storage, read> terrain_sdf: array<f32>;
 // Terrain normal buffer: 2 x f32 per grid node (nx, ny).
 @group(0) @binding(3) var<storage, read> terrain_normal: array<vec2<f32>>;
+@group(0) @binding(4) var<storage, read> chunk_meta: array<GpuChunkMeta>;
 
 const MASS_EPSILON: f32 = 1e-8;
 const RECOVERY_SPEED_CAP: f32 = 1.2;
+const INVALID_SLOT: u32 = 0xffffffffu;
 
 // Terrain boundary: non-penetration + Coulomb stick/slip friction [Eqs.28-29, physics.md].
 // Triggers within a thin buffer zone (sdf < threshold) to preemptively block approach.
@@ -71,14 +84,83 @@ fn node_coord_from_slot_index(idx: u32, params: MpmParams) -> vec2<i32> {
 
     let local_x = i32(local_idx % cdim);
     let local_y = i32(local_idx / cdim);
-    let chunk_lx = i32(chunk_slot % params.chunk_dims_x);
-    let chunk_ly = i32(chunk_slot / params.chunk_dims_x);
+    let chunk = chunk_meta[chunk_slot];
     let cdim_i = i32(cdim);
 
     return vec2<i32>(
-        (params.chunk_origin_x + chunk_lx) * cdim_i + local_x,
-        (params.chunk_origin_y + chunk_ly) * cdim_i + local_y,
+        chunk.chunk_coord_x * cdim_i + local_x,
+        chunk.chunk_coord_y * cdim_i + local_y,
     );
+}
+
+fn neighbor_index_from_delta(dx: i32, dy: i32) -> u32 {
+    if dx == -1 && dy == -1 { return 0u; }
+    if dx ==  0 && dy == -1 { return 1u; }
+    if dx ==  1 && dy == -1 { return 2u; }
+    if dx == -1 && dy ==  0 { return 3u; }
+    if dx ==  1 && dy ==  0 { return 4u; }
+    if dx == -1 && dy ==  1 { return 5u; }
+    if dx ==  0 && dy ==  1 { return 6u; }
+    if dx ==  1 && dy ==  1 { return 7u; }
+    return INVALID_SLOT;
+}
+
+fn node_index_from_slot_local(slot_id: u32, local_x: u32, local_y: u32, params: MpmParams) -> u32 {
+    let nodes_per_chunk = params.chunk_node_dim * params.chunk_node_dim;
+    return slot_id * nodes_per_chunk + local_y * params.chunk_node_dim + local_x;
+}
+
+fn shifted_node_index(
+    chunk_slot: u32,
+    local_x: i32,
+    local_y: i32,
+    shift_x: i32,
+    shift_y: i32,
+    params: MpmParams,
+) -> u32 {
+    let cdim_i = i32(params.chunk_node_dim);
+    if cdim_i <= 0 {
+        return INVALID_SLOT;
+    }
+    var nx = local_x + shift_x;
+    var ny = local_y + shift_y;
+    var delta_x = 0;
+    var delta_y = 0;
+    if nx < 0 {
+        delta_x = -1;
+        nx += cdim_i;
+    } else if nx >= cdim_i {
+        delta_x = 1;
+        nx -= cdim_i;
+    }
+    if ny < 0 {
+        delta_y = -1;
+        ny += cdim_i;
+    } else if ny >= cdim_i {
+        delta_y = 1;
+        ny -= cdim_i;
+    }
+    if abs(delta_x) > 1 || abs(delta_y) > 1 {
+        return INVALID_SLOT;
+    }
+
+    var slot_id = chunk_slot;
+    if delta_x != 0 || delta_y != 0 {
+        let neighbor_idx = neighbor_index_from_delta(delta_x, delta_y);
+        if neighbor_idx == INVALID_SLOT {
+            return INVALID_SLOT;
+        }
+        let neighbor_slot = chunk_meta[chunk_slot].neighbor_slot_id[neighbor_idx];
+        if neighbor_slot == INVALID_SLOT {
+            return INVALID_SLOT;
+        }
+        slot_id = neighbor_slot;
+    }
+
+    if nx < 0 || ny < 0 || nx >= cdim_i || ny >= cdim_i {
+        return INVALID_SLOT;
+    }
+    return node_index_from_slot_local(slot_id, u32(nx), u32(ny), params);
 }
 
 @compute @workgroup_size(64)
@@ -88,6 +170,15 @@ fn grid_update(@builtin(global_invocation_id) gid: vec3<u32>) {
     if idx >= total {
         return;
     }
+    let cdim = params.chunk_node_dim;
+    if cdim == 0u {
+        return;
+    }
+    let nodes_per_chunk = cdim * cdim;
+    let chunk_slot = idx / nodes_per_chunk;
+    let local_idx = idx - chunk_slot * nodes_per_chunk;
+    let local_x = i32(local_idx % cdim);
+    let local_y = i32(local_idx / cdim);
 
     let mw = grid[idx].water_mass;
     let mg = grid[idx].granular_mass;
@@ -133,21 +224,19 @@ fn grid_update(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         // 2) Interface normal from granular fill gradient [Eq.41].
         let node = node_coord_from_slot_index(idx, params);
-        let cdim_i = i32(params.chunk_node_dim);
-        let min_node = vec2<i32>(params.chunk_origin_x * cdim_i, params.chunk_origin_y * cdim_i);
-        let max_node = min_node + vec2<i32>(
-            i32(params.chunk_dims_x) * cdim_i - 1,
-            i32(params.chunk_dims_y) * cdim_i - 1,
-        );
-        let x_l = max(node.x - 1, min_node.x);
-        let x_r = min(node.x + 1, max_node.x);
-        let y_d = max(node.y - 1, min_node.y);
-        let y_u = min(node.y + 1, max_node.y);
+        var idx_l = shifted_node_index(chunk_slot, local_x, local_y, -1, 0, params);
+        var idx_r = shifted_node_index(chunk_slot, local_x, local_y, 1, 0, params);
+        var idx_d = shifted_node_index(chunk_slot, local_x, local_y, 0, -1, params);
+        var idx_u = shifted_node_index(chunk_slot, local_x, local_y, 0, 1, params);
+        if idx_l == INVALID_SLOT { idx_l = idx; }
+        if idx_r == INVALID_SLOT { idx_r = idx; }
+        if idx_d == INVALID_SLOT { idx_d = idx; }
+        if idx_u == INVALID_SLOT { idx_u = idx; }
 
-        let phi_l = granular_phi(node_index(x_l, node.y, params), params);
-        let phi_r = granular_phi(node_index(x_r, node.y, params), params);
-        let phi_d = granular_phi(node_index(node.x, y_d, params), params);
-        let phi_u = granular_phi(node_index(node.x, y_u, params), params);
+        let phi_l = granular_phi(idx_l, params);
+        let phi_r = granular_phi(idx_r, params);
+        let phi_d = granular_phi(idx_d, params);
+        let phi_u = granular_phi(idx_u, params);
 
         let grad_phi = vec2<f32>(
             (phi_r - phi_l) / max(2.0 * params.h, 1.0e-6),

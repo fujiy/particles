@@ -16,7 +16,8 @@ use super::buffers::{GPU_STATS_SCALAR_LANES, GpuStatisticsScalars};
 use super::gpu_resources::{MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest};
 use super::pipeline::MpmComputePipelines;
 use super::readback::{
-    GpuMoverApplyAck, GpuMoverReadbackState, GpuReadbackState, GpuStatisticsReadbackState,
+    GpuChunkEventReadbackState, GpuMoverApplyAck, GpuMoverReadbackState, GpuReadbackState,
+    GpuStatisticsReadbackState,
 };
 use super::sync::MpmStatisticsStatus;
 
@@ -33,6 +34,8 @@ static G2P_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static EXTRACT_MOVERS_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+static EXTRACT_CHUNK_EVENTS_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 static APPLY_MOVER_RESULTS_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static CHUNK_META_CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
@@ -40,6 +43,8 @@ static CHUNK_META_CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
 static CHUNK_META_ACCUM_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static CHUNK_META_FINALIZE_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static TERRAIN_SDF_UPDATE_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static STATS_CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -174,6 +179,51 @@ impl Node for MpmComputeNode {
             }
         }
 
+        if buffers.terrain_update_slot_count > 0 && params_req.params.chunk_node_dim > 0 {
+            let Some(terrain_sdf_update_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.terrain_sdf_update_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &TERRAIN_SDF_UPDATE_PIPELINE_WARNED,
+                    "terrain_sdf_update",
+                    pipelines.terrain_sdf_update_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let terrain_sdf_update_bg = device.create_bind_group(
+                "mpm_terrain_sdf_update_bg",
+                &pipelines.terrain_sdf_update_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                    buffers.terrain_cell_solid_buf.as_entire_binding(),
+                    buffers.terrain_sdf_buf.as_entire_binding(),
+                    buffers.terrain_normal_buf.as_entire_binding(),
+                    buffers.terrain_update_slot_count_buf.as_entire_binding(),
+                    buffers.terrain_update_slot_buf.as_entire_binding(),
+                )),
+            );
+            let nodes_per_chunk = params_req
+                .params
+                .chunk_node_dim
+                .saturating_mul(params_req.params.chunk_node_dim);
+            let total_nodes = buffers.terrain_update_slot_count.saturating_mul(nodes_per_chunk);
+            let terrain_update_wgs = (total_nodes + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+            if terrain_update_wgs > 0 {
+                let mut pass =
+                    render_context
+                        .command_encoder()
+                        .begin_compute_pass(&ComputePassDescriptor {
+                            label: Some("mpm_terrain_sdf_update"),
+                            timestamp_writes: None,
+                        });
+                pass.set_pipeline(terrain_sdf_update_pipeline);
+                pass.set_bind_group(0, &terrain_sdf_update_bg, &[]);
+                pass.dispatch_workgroups(terrain_update_wgs, 1, 1);
+            }
+        }
+
         if should_step {
             let Some(clear_pipeline) =
                 pipeline_cache.get_compute_pipeline(pipelines.clear_pipeline)
@@ -228,6 +278,17 @@ impl Node for MpmComputeNode {
                 );
                 return Ok(());
             };
+            let Some(extract_chunk_events_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.extract_chunk_events_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &EXTRACT_CHUNK_EVENTS_PIPELINE_WARNED,
+                    "extract_chunk_events",
+                    pipelines.extract_chunk_events_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
             let Some(chunk_meta_clear_pipeline) =
                 pipeline_cache.get_compute_pipeline(pipelines.chunk_meta_clear_pipeline)
             else {
@@ -277,6 +338,7 @@ impl Node for MpmComputeNode {
                     buffers.params_buf.as_entire_binding(),
                     buffers.particle_buf.as_entire_binding(),
                     buffers.grid_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
                 )),
             );
             let grid_update_bg = device.create_bind_group(
@@ -287,6 +349,7 @@ impl Node for MpmComputeNode {
                     buffers.grid_buf.as_entire_binding(),
                     buffers.terrain_sdf_buf.as_entire_binding(),
                     buffers.terrain_normal_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
                 )),
             );
             let g2p_bg = device.create_bind_group(
@@ -296,6 +359,7 @@ impl Node for MpmComputeNode {
                     buffers.params_buf.as_entire_binding(),
                     buffers.particle_buf.as_entire_binding(),
                     buffers.grid_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
                 )),
             );
             let extract_movers_bg = device.create_bind_group(
@@ -307,6 +371,16 @@ impl Node for MpmComputeNode {
                     buffers.chunk_meta_buf.as_entire_binding(),
                     buffers.mover_count_buf.as_entire_binding(),
                     buffers.mover_buf.as_entire_binding(),
+                )),
+            );
+            let extract_chunk_events_bg = device.create_bind_group(
+                "mpm_extract_chunk_events_bg",
+                &pipelines.extract_chunk_events_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                    buffers.chunk_event_count_buf.as_entire_binding(),
+                    buffers.chunk_event_buf.as_entire_binding(),
                 )),
             );
             let chunk_meta_clear_bg = device.create_bind_group(
@@ -387,6 +461,7 @@ impl Node for MpmComputeNode {
                 pass.dispatch_workgroups(particles_wgs.max(1), 1, 1);
             }
             if chunk_count > 0 {
+                encoder.clear_buffer(&buffers.chunk_event_count_buf, 0, None);
                 {
                     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                         label: Some("mpm_chunk_meta_clear"),
@@ -412,6 +487,15 @@ impl Node for MpmComputeNode {
                     });
                     pass.set_pipeline(chunk_meta_finalize_pipeline);
                     pass.set_bind_group(0, &chunk_meta_finalize_bg, &[]);
+                    pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
+                }
+                {
+                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mpm_extract_chunk_events"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(extract_chunk_events_pipeline);
+                    pass.set_bind_group(0, &extract_chunk_events_bg, &[]);
                     pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
                 }
             }
@@ -920,6 +1004,10 @@ impl Node for MpmComputeNode {
                     .get_resource::<GpuMoverReadbackState>()
                     .map(|state| !state.mapped)
                     .unwrap_or(true);
+                let can_copy_chunk_events = world
+                    .get_resource::<GpuChunkEventReadbackState>()
+                    .map(|state| !state.mapped)
+                    .unwrap_or(true);
 
                 if has_particles && can_copy_particles {
                     let particle_byte_size =
@@ -960,6 +1048,32 @@ impl Node for MpmComputeNode {
                     );
                     if let Some(mover_state) = world.get_resource::<GpuMoverReadbackState>() {
                         mover_state
+                            .copy_pending
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+                if should_step && can_copy_chunk_events {
+                    let chunk_event_record_bytes =
+                        super::gpu_resources::MAX_CHUNK_EVENT_RECORDS as u64
+                            * size_of::<super::buffers::GpuChunkEventRecord>() as u64;
+                    render_context.command_encoder().copy_buffer_to_buffer(
+                        &buffers.chunk_event_count_buf,
+                        0,
+                        &buffers.chunk_event_readback_buf,
+                        0,
+                        size_of::<u32>() as u64,
+                    );
+                    render_context.command_encoder().copy_buffer_to_buffer(
+                        &buffers.chunk_event_buf,
+                        0,
+                        &buffers.chunk_event_readback_buf,
+                        size_of::<u32>() as u64,
+                        chunk_event_record_bytes,
+                    );
+                    if let Some(chunk_event_state) =
+                        world.get_resource::<GpuChunkEventReadbackState>()
+                    {
+                        chunk_event_state
                             .copy_pending
                             .store(true, std::sync::atomic::Ordering::Release);
                     }

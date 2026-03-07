@@ -4,12 +4,24 @@
 // Uses MLS-MPM with quadratic B-spline kernel.
 // Atomic float additions via atomicAdd on bitcast u32.
 
-#import particles::mpm_types::{GpuParticle, MpmParams, PHASE_WATER, PHASE_GRANULAR_SOIL, phase_is_granular, bspline_w_dw, node_index, node_in_bounds, mat2_det}
+#import particles::mpm_types::{GpuParticle, MpmParams, PHASE_WATER, PHASE_GRANULAR_SOIL, phase_is_granular, bspline_w_dw, mat2_det}
 
 // Fill-fraction thresholds for tension suppression [Eqs.10-11, physics.md].
 // Below PHI_MIN: tension fully suppressed (s=0); above PHI_MAX: full tension (s=1).
 const PHI_MIN: f32 = 0.10;
 const PHI_MAX: f32 = 0.80;
+const INVALID_SLOT: u32 = 0xffffffffu;
+
+struct GpuChunkMeta {
+    chunk_coord_x: i32,
+    chunk_coord_y: i32,
+    neighbor_slot_id: array<u32, 8>,
+    active_tile_mask: u32,
+    particle_count_curr: u32,
+    particle_count_next: u32,
+    occupied_bit_curr: u32,
+    occupied_bit_next: u32,
+}
 
 @group(0) @binding(0) var<uniform> params: MpmParams;
 @group(0) @binding(1) var<storage, read_write> particles: array<GpuParticle>;
@@ -17,6 +29,7 @@ const PHI_MAX: f32 = 0.80;
 // GpuGridNode layout:
 //   [water_px, water_py, water_mass, water_pad, granular_px, granular_py, granular_mass, granular_pad]
 @group(0) @binding(2) var<storage, read_write> grid_atomic: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read> chunk_meta: array<GpuChunkMeta>;
 
 const GRID_NODE_STRIDE_U32: u32 = 8u;
 
@@ -49,6 +62,23 @@ fn atomic_add_phase(node_idx: u32, phase_id: u32, dp: vec2<f32>, dm: f32) {
     }
 }
 
+fn neighbor_index_from_delta(dx: i32, dy: i32) -> u32 {
+    if dx == -1 && dy == -1 { return 0u; }
+    if dx ==  0 && dy == -1 { return 1u; }
+    if dx ==  1 && dy == -1 { return 2u; }
+    if dx == -1 && dy ==  0 { return 3u; }
+    if dx ==  1 && dy ==  0 { return 4u; }
+    if dx == -1 && dy ==  1 { return 5u; }
+    if dx ==  0 && dy ==  1 { return 6u; }
+    if dx ==  1 && dy ==  1 { return 7u; }
+    return INVALID_SLOT;
+}
+
+fn node_index_from_slot_local(slot_id: u32, local_x: u32, local_y: u32, params: MpmParams) -> u32 {
+    let nodes_per_chunk = params.chunk_node_dim * params.chunk_node_dim;
+    return slot_id * nodes_per_chunk + local_y * params.chunk_node_dim + local_x;
+}
+
 fn elastic_params_for_phase(phase_id: u32, params: MpmParams) -> ElasticParams {
     if phase_id == PHASE_GRANULAR_SOIL {
         return ElasticParams(params.dp_lambda_soil, params.dp_mu_soil);
@@ -64,6 +94,16 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let p = particles[pid];
+    let home_slot = p.home_chunk_slot_id;
+    if home_slot >= params.resident_chunk_count || home_slot == INVALID_SLOT {
+        return;
+    }
+    let home_chunk = chunk_meta[home_slot];
+    let cdim_i = i32(params.chunk_node_dim);
+    if cdim_i <= 0 {
+        return;
+    }
+    let home_node_origin = vec2<i32>(home_chunk.chunk_coord_x * cdim_i, home_chunk.chunk_coord_y * cdim_i);
     let h = params.h;
     let inv_h = 1.0 / h;
     let dt = params.dt;
@@ -142,10 +182,42 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var oy: i32 = 0; oy < 3; oy++) {
         for (var ox: i32 = 0; ox < 3; ox++) {
             let node = base + vec2<i32>(ox, oy);
-            if !node_in_bounds(node.x, node.y, params) {
+            let local = node - home_node_origin;
+            var delta_chunk_x = 0;
+            var delta_chunk_y = 0;
+            if local.x < 0 {
+                delta_chunk_x = -1;
+            } else if local.x >= cdim_i {
+                delta_chunk_x = 1;
+            }
+            if local.y < 0 {
+                delta_chunk_y = -1;
+            } else if local.y >= cdim_i {
+                delta_chunk_y = 1;
+            }
+            if abs(delta_chunk_x) > 1 || abs(delta_chunk_y) > 1 {
                 continue;
             }
-            let nidx = node_index(node.x, node.y, params);
+
+            var slot_id = home_slot;
+            if delta_chunk_x != 0 || delta_chunk_y != 0 {
+                let neighbor_idx = neighbor_index_from_delta(delta_chunk_x, delta_chunk_y);
+                if neighbor_idx == INVALID_SLOT {
+                    continue;
+                }
+                let neighbor_slot = home_chunk.neighbor_slot_id[neighbor_idx];
+                if neighbor_slot == INVALID_SLOT {
+                    continue;
+                }
+                slot_id = neighbor_slot;
+            }
+
+            let local_x = local.x - delta_chunk_x * cdim_i;
+            let local_y = local.y - delta_chunk_y * cdim_i;
+            if local_x < 0 || local_y < 0 || local_x >= cdim_i || local_y >= cdim_i {
+                continue;
+            }
+            let nidx = node_index_from_slot_local(slot_id, u32(local_x), u32(local_y), params);
 
             let rel = grid_pos - vec2<f32>(f32(node.x), f32(node.y));
             let wx_dw = bspline_w_dw(rel.x);

@@ -6,6 +6,10 @@ use bevy::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
 pub const INVALID_CHUNK_SLOT_ID: u32 = u32::MAX;
+pub const CHUNK_EVENT_KIND_NEWLY_OCCUPIED: u32 = 1;
+pub const CHUNK_EVENT_KIND_NEWLY_EMPTY: u32 = 2;
+pub const CHUNK_EVENT_KIND_FRONTIER_REQUEST: u32 = 3;
+pub const CHUNK_EVENT_KIND_SLOT_SNAPSHOT: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // GPU-side chunk metadata (static residency for MPM-CHUNK-01)
@@ -126,6 +130,17 @@ pub struct GpuMoverResult {
 }
 
 const _: () = assert!(std::mem::size_of::<GpuMoverResult>() == 16);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct GpuChunkEventRecord {
+    pub slot_id: u32,
+    pub event_kind: u32,
+    pub _pad_a: u32,
+    pub _pad_b: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<GpuChunkEventRecord>() == 16);
 
 // ---------------------------------------------------------------------------
 // GPU-side grid node (matches mpm_types.wgsl::GpuGridNode, 32 bytes)

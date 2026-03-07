@@ -15,7 +15,7 @@ use bevy::render::view::{Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewU
 use std::mem::size_of;
 
 use super::SdfOverlayState;
-use crate::physics::gpu_mpm::buffers::GpuMpmParams;
+use crate::physics::gpu_mpm::buffers::{GpuChunkMeta, GpuMpmParams};
 use crate::physics::gpu_mpm::gpu_resources::MpmGpuBuffers;
 
 const SDF_OVERLAY_GPU_SHADER_PATH: &str = "shaders/overlay/sdf_overlay_gpu.wgsl";
@@ -32,6 +32,7 @@ pub(super) struct SdfOverlayGpuPipeline {
     pub shader: Handle<Shader>,
     pub fallback_params_buf: Buffer,
     pub fallback_sdf_buf: Buffer,
+    pub fallback_chunk_meta_buf: Buffer,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
@@ -107,6 +108,7 @@ pub(super) fn init_sdf_overlay_gpu_pipeline(
                     core::num::NonZeroU64::new(size_of::<GpuMpmParams>() as u64),
                 ),
                 storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
             ),
         ),
     );
@@ -123,12 +125,19 @@ pub(super) fn init_sdf_overlay_gpu_pipeline(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let fallback_chunk_meta_buf = render_device.create_buffer(&BufferDescriptor {
+        label: Some("sdf_overlay_fallback_chunk_meta"),
+        size: size_of::<GpuChunkMeta>() as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
     commands.insert_resource(SdfOverlayGpuPipeline {
         bind_group_layout,
         shader: asset_server.load(SDF_OVERLAY_GPU_SHADER_PATH),
         fallback_params_buf,
         fallback_sdf_buf,
+        fallback_chunk_meta_buf,
     });
 }
 
@@ -181,17 +190,19 @@ impl ViewNode for SdfOverlayGpuNode {
         };
         let overlay_pipeline = world.resource::<SdfOverlayGpuPipeline>();
 
-        let (params_binding, sdf_binding, chunk_count) =
+        let (params_binding, sdf_binding, chunk_meta_binding, chunk_count) =
             if let Some(buffers) = world.get_resource::<MpmGpuBuffers>() {
                 (
                     buffers.params_buf.as_entire_binding(),
                     buffers.terrain_sdf_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
                     buffers.active_chunk_count,
                 )
             } else {
                 (
                     overlay_pipeline.fallback_params_buf.as_entire_binding(),
                     overlay_pipeline.fallback_sdf_buf.as_entire_binding(),
+                    overlay_pipeline.fallback_chunk_meta_buf.as_entire_binding(),
                     0,
                 )
             };
@@ -206,7 +217,12 @@ impl ViewNode for SdfOverlayGpuNode {
         let bind_group = render_context.render_device().create_bind_group(
             "sdf_overlay_gpu_bind_group",
             &pipeline_cache.get_bind_group_layout(&overlay_pipeline.bind_group_layout),
-            &BindGroupEntries::sequential((view_binding, params_binding, sdf_binding)),
+            &BindGroupEntries::sequential((
+                view_binding,
+                params_binding,
+                sdf_binding,
+                chunk_meta_binding,
+            )),
         );
 
         let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {

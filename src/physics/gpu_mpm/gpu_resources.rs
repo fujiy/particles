@@ -11,8 +11,8 @@ use bytemuck::cast_slice;
 use std::mem::size_of;
 
 use super::buffers::{
-    GpuChunkMeta, GpuGridLayout, GpuGridNode, GpuMoverResult, GpuMpmParams, GpuParticle,
-    GpuStatisticsScalars,
+    GpuChunkEventRecord, GpuChunkMeta, GpuGridLayout, GpuGridNode, GpuMoverResult, GpuMpmParams,
+    GpuParticle, GpuStatisticsScalars,
 };
 use crate::physics::world::constants::{
     CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
@@ -21,6 +21,7 @@ use crate::physics::world::constants::{
 const GRID_PADDING_CELLS: i32 = 8;
 pub const MAX_PARTICLES: u32 = 131_072; // 128k particles max
 pub const MAX_MOVER_RECORDS: u32 = MAX_PARTICLES;
+pub const MAX_CHUNK_EVENT_RECORDS: u32 = MAX_RESIDENT_CHUNK_SLOTS * 4;
 pub const MPM_CHUNK_NODE_DIM: u32 = CHUNK_SIZE_I32 as u32;
 pub const MPM_CHUNK_NODES_PER_SLOT: u32 = MPM_CHUNK_NODE_DIM * MPM_CHUNK_NODE_DIM;
 pub const MAX_RESIDENT_CHUNK_SLOTS: u32 = 256;
@@ -67,6 +68,12 @@ pub struct MpmGpuBuffers {
 
     /// Terrain normal buffer: node_count * 8 bytes (vec2<f32> per node).
     pub terrain_normal_buf: Buffer,
+    /// Terrain solid-cell occupancy buffer: one u32(0/1) per slot-local cell/node.
+    pub terrain_cell_solid_buf: Buffer,
+    /// Slot-update count for terrain SDF recompute pass.
+    pub terrain_update_slot_count_buf: Buffer,
+    /// Slot ids to recompute terrain SDF/normal.
+    pub terrain_update_slot_buf: Buffer,
     /// Temporary per-cell occupancy flags for interaction statistics.
     pub stats_cell_flags_buf: Buffer,
 
@@ -82,6 +89,12 @@ pub struct MpmGpuBuffers {
     pub mover_result_buf: Buffer,
     /// Staging buffer for GPU→CPU mover readback (count + records, MAP_READ).
     pub mover_readback_buf: Buffer,
+    /// Atomic chunk-event count generated on GPU each step.
+    pub chunk_event_count_buf: Buffer,
+    /// GPU chunk-event append buffer.
+    pub chunk_event_buf: Buffer,
+    /// Staging buffer for GPU→CPU chunk-event readback (count + records, MAP_READ).
+    pub chunk_event_readback_buf: Buffer,
 
     /// GPU-side statistics scalar lanes (atomic<u32>).
     pub stats_scalar_buf: Buffer,
@@ -94,6 +107,8 @@ pub struct MpmGpuBuffers {
     pub active_chunk_count: u32,
     /// Current mover-result count to apply on GPU this frame.
     pub mover_result_count: u32,
+    /// Current terrain slot-update count for GPU terrain SDF recompute.
+    pub terrain_update_slot_count: u32,
     /// Max grid-node capacity allocated for sparse chunk layout.
     pub max_node_capacity: usize,
 
@@ -147,6 +162,24 @@ impl MpmGpuBuffers {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let terrain_cell_solid_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_terrain_cell_solid"),
+            size: MAX_RESIDENT_NODE_CAPACITY * size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let terrain_update_slot_count_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_terrain_update_slot_count"),
+            size: size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let terrain_update_slot_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_terrain_update_slot_ids"),
+            size: MAX_RESIDENT_CHUNK_SLOTS as u64 * size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let stats_cell_flags_buf = device.create_buffer(&BufferDescriptor {
             label: Some("mpm_stats_cell_flags"),
@@ -193,6 +226,25 @@ impl MpmGpuBuffers {
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
+        let chunk_event_count_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_chunk_event_count"),
+            size: size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let chunk_event_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_chunk_events"),
+            size: MAX_CHUNK_EVENT_RECORDS as u64 * size_of::<GpuChunkEventRecord>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let chunk_event_readback_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_chunk_event_readback"),
+            size: size_of::<u32>() as u64
+                + MAX_CHUNK_EVENT_RECORDS as u64 * size_of::<GpuChunkEventRecord>() as u64,
+            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
 
         let stats_scalar_buf = device.create_buffer(&BufferDescriptor {
             label: Some("mpm_stats_scalar"),
@@ -216,6 +268,9 @@ impl MpmGpuBuffers {
             chunk_meta_buf,
             terrain_sdf_buf,
             terrain_normal_buf,
+            terrain_cell_solid_buf,
+            terrain_update_slot_count_buf,
+            terrain_update_slot_buf,
             stats_cell_flags_buf,
             readback_buf,
             mover_count_buf,
@@ -223,11 +278,15 @@ impl MpmGpuBuffers {
             mover_result_count_buf,
             mover_result_buf,
             mover_readback_buf,
+            chunk_event_count_buf,
+            chunk_event_buf,
+            chunk_event_readback_buf,
             stats_scalar_buf,
             stats_scalar_readback_buf,
             particle_count: 0,
             active_chunk_count: 0,
             mover_result_count: 0,
+            terrain_update_slot_count: 0,
             max_node_capacity,
             ready: false,
         }
@@ -263,6 +322,44 @@ impl MpmGpuBuffers {
         assert!(sdf.len() <= self.max_node_capacity);
         queue.write_buffer(&self.terrain_sdf_buf, 0, cast_slice(sdf));
         queue.write_buffer(&self.terrain_normal_buf, 0, cast_slice(normals));
+    }
+
+    /// Upload terrain solid-cell diffs for selected chunk slots.
+    pub fn upload_terrain_cell_slot_diffs(
+        &self,
+        queue: &RenderQueue,
+        slot_ids: &[u32],
+        cell_solid: &[u32],
+    ) {
+        let nodes_per_slot = MPM_CHUNK_NODES_PER_SLOT as usize;
+        assert_eq!(cell_solid.len(), slot_ids.len() * nodes_per_slot);
+        let slot_bytes = (MPM_CHUNK_NODES_PER_SLOT as u64) * size_of::<u32>() as u64;
+        for (i, &slot_id) in slot_ids.iter().enumerate() {
+            assert!(slot_id < MAX_RESIDENT_CHUNK_SLOTS);
+            let base = i * nodes_per_slot;
+            let end = base + nodes_per_slot;
+            let offset = slot_id as u64 * slot_bytes;
+            queue.write_buffer(
+                &self.terrain_cell_solid_buf,
+                offset,
+                cast_slice(&cell_solid[base..end]),
+            );
+        }
+    }
+
+    /// Upload slot update list for GPU terrain SDF recompute pass.
+    pub fn upload_terrain_update_slots(&mut self, queue: &RenderQueue, slot_ids: &[u32]) {
+        assert!(slot_ids.len() <= MAX_RESIDENT_CHUNK_SLOTS as usize);
+        self.terrain_update_slot_count = slot_ids.len() as u32;
+        queue.write_buffer(
+            &self.terrain_update_slot_count_buf,
+            0,
+            cast_slice(std::slice::from_ref(&self.terrain_update_slot_count)),
+        );
+        if slot_ids.is_empty() {
+            return;
+        }
+        queue.write_buffer(&self.terrain_update_slot_buf, 0, cast_slice(slot_ids));
     }
 
     pub fn upload_chunks(&mut self, queue: &RenderQueue, chunks: &[GpuChunkMeta]) {
@@ -319,6 +416,8 @@ pub struct MpmGpuUploadRequest {
     pub upload_chunk_diffs: bool,
     /// If true, upload terrain SDF/normals this frame.
     pub upload_terrain: bool,
+    /// If true, upload terrain solid-cell diffs for selected slots this frame.
+    pub upload_terrain_cell_slot_diffs: bool,
     /// Chunk metadata (slot-indexed contiguous resident set).
     pub chunk_meta: Vec<GpuChunkMeta>,
     /// Particle data to upload.
@@ -331,6 +430,10 @@ pub struct MpmGpuUploadRequest {
     pub terrain_sdf: Vec<f32>,
     /// Terrain normals to upload.
     pub terrain_normal: Vec<[f32; 2]>,
+    /// Slot ids for terrain diff upload.
+    pub terrain_slot_ids: Vec<u32>,
+    /// Terrain solid-cell diffs for slot updates (`terrain_slot_ids.len() * NODES_PER_SLOT`).
+    pub terrain_cell_solid_slot_diffs: Vec<u32>,
     /// Last uploaded terrain version to avoid full-grid rebuilds every frame.
     pub last_uploaded_terrain_version: Option<u64>,
 }

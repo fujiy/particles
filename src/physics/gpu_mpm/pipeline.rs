@@ -30,6 +30,8 @@ pub struct MpmComputePipelines {
     pub g2p_pipeline: CachedComputePipelineId,
     pub extract_movers_layout: BindGroupLayout,
     pub extract_movers_pipeline: CachedComputePipelineId,
+    pub extract_chunk_events_layout: BindGroupLayout,
+    pub extract_chunk_events_pipeline: CachedComputePipelineId,
     pub apply_mover_results_layout: BindGroupLayout,
     pub apply_mover_results_pipeline: CachedComputePipelineId,
     pub chunk_meta_clear_layout: BindGroupLayout,
@@ -38,6 +40,8 @@ pub struct MpmComputePipelines {
     pub chunk_meta_accumulate_pipeline: CachedComputePipelineId,
     pub chunk_meta_finalize_layout: BindGroupLayout,
     pub chunk_meta_finalize_pipeline: CachedComputePipelineId,
+    pub terrain_sdf_update_layout: BindGroupLayout,
+    pub terrain_sdf_update_pipeline: CachedComputePipelineId,
 
     pub stats_clear_layout: BindGroupLayout,
     pub stats_clear_pipeline: CachedComputePipelineId,
@@ -114,13 +118,14 @@ impl FromWorld for MpmComputePipelines {
             zero_initialize_workgroup_memory: false,
         });
 
-        // p2g: 0=params, 1=particles(read), 2=grid_atomic(rw)
+        // p2g: 0=params, 1=particles(read), 2=grid_atomic(rw), 3=chunk_meta(read)
         let p2g_entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 binding_types::uniform_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
             ),
         );
         let p2g_layout = render_device.create_bind_group_layout("mpm_p2g_layout", &*p2g_entries);
@@ -137,12 +142,13 @@ impl FromWorld for MpmComputePipelines {
             zero_initialize_workgroup_memory: false,
         });
 
-        // grid_update: 0=params, 1=grid(rw), 2=terrain_sdf(read), 3=terrain_normal(read)
+        // grid_update: 0=params, 1=grid(rw), 2=terrain_sdf(read), 3=terrain_normal(read), 4=chunk_meta(read)
         let gu_entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 binding_types::uniform_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
             ),
@@ -163,12 +169,13 @@ impl FromWorld for MpmComputePipelines {
                 zero_initialize_workgroup_memory: false,
             });
 
-        // g2p: 0=params, 1=particles(rw), 2=grid(read)
+        // g2p: 0=params, 1=particles(rw), 2=grid(read), 3=chunk_meta(read)
         let g2p_entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 binding_types::uniform_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
             ),
         );
@@ -210,6 +217,34 @@ impl FromWorld for MpmComputePipelines {
                 shader: shaders.extract_movers.clone(),
                 shader_defs: vec![],
                 entry_point: Some("extract_movers".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // extract_chunk_events: 0=params, 1=chunk_meta(read), 2=event_count(rw), 3=events(rw)
+        let extract_chunk_events_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let extract_chunk_events_layout = render_device.create_bind_group_layout(
+            "mpm_extract_chunk_events_layout",
+            &*extract_chunk_events_entries,
+        );
+        let extract_chunk_events_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_extract_chunk_events".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_extract_chunk_events_layout",
+                    &*extract_chunk_events_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.extract_chunk_events.clone(),
+                shader_defs: vec![],
+                entry_point: Some("extract_chunk_events".into()),
                 zero_initialize_workgroup_memory: false,
             });
 
@@ -317,6 +352,39 @@ impl FromWorld for MpmComputePipelines {
                 shader: shaders.chunk_meta_update.clone(),
                 shader_defs: vec![],
                 entry_point: Some("finalize_chunk_flags".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // terrain_sdf_update:
+        // 0=params, 1=chunk_meta(read), 2=terrain_cell_solid(read),
+        // 3=terrain_sdf(rw), 4=terrain_normal(rw), 5=update_count(read), 6=update_slots(read)
+        let terrain_sdf_update_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+            ),
+        );
+        let terrain_sdf_update_layout = render_device.create_bind_group_layout(
+            "mpm_terrain_sdf_update_layout",
+            &*terrain_sdf_update_entries,
+        );
+        let terrain_sdf_update_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_terrain_sdf_update".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_terrain_sdf_update_layout",
+                    &*terrain_sdf_update_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.terrain_sdf_update.clone(),
+                shader_defs: vec![],
+                entry_point: Some("update_terrain_sdf_slots".into()),
                 zero_initialize_workgroup_memory: false,
             });
 
@@ -653,6 +721,8 @@ impl FromWorld for MpmComputePipelines {
             g2p_pipeline,
             extract_movers_layout,
             extract_movers_pipeline,
+            extract_chunk_events_layout,
+            extract_chunk_events_pipeline,
             apply_mover_results_layout,
             apply_mover_results_pipeline,
             chunk_meta_clear_layout,
@@ -661,6 +731,8 @@ impl FromWorld for MpmComputePipelines {
             chunk_meta_accumulate_pipeline,
             chunk_meta_finalize_layout,
             chunk_meta_finalize_pipeline,
+            terrain_sdf_update_layout,
+            terrain_sdf_update_pipeline,
             stats_clear_layout,
             stats_clear_pipeline,
             stats_total_layout,

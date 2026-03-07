@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
 
-use super::buffers::{GpuMoverRecord, GpuParticle, GpuStatisticsScalars};
+use super::buffers::{GpuChunkEventRecord, GpuMoverRecord, GpuParticle, GpuStatisticsScalars};
 
 // ---------------------------------------------------------------------------
 // Final parsed result (shared render world → main world via Arc)
@@ -45,6 +45,11 @@ pub struct GpuMoverReadbackResult {
     pub inner: Arc<Mutex<Option<Vec<GpuMoverRecord>>>>,
 }
 
+#[derive(Resource, Clone, Default)]
+pub struct GpuChunkEventReadbackResult {
+    pub inner: Arc<Mutex<Option<Vec<GpuChunkEventRecord>>>>,
+}
+
 impl GpuMoverReadbackResult {
     pub fn take(&self) -> Option<Vec<GpuMoverRecord>> {
         if let Ok(mut g) = self.inner.lock() {
@@ -56,6 +61,21 @@ impl GpuMoverReadbackResult {
     pub fn store(&self, movers: Vec<GpuMoverRecord>) {
         if let Ok(mut g) = self.inner.lock() {
             *g = Some(movers);
+        }
+    }
+}
+
+impl GpuChunkEventReadbackResult {
+    pub fn take(&self) -> Option<Vec<GpuChunkEventRecord>> {
+        if let Ok(mut g) = self.inner.lock() {
+            g.take()
+        } else {
+            None
+        }
+    }
+    pub fn store(&self, events: Vec<GpuChunkEventRecord>) {
+        if let Ok(mut g) = self.inner.lock() {
+            *g = Some(events);
         }
     }
 }
@@ -145,6 +165,25 @@ pub struct GpuMoverReadbackState {
 }
 
 impl Default for GpuMoverReadbackState {
+    fn default() -> Self {
+        Self {
+            mapped: false,
+            mapped_ready: Arc::new(AtomicBool::new(false)),
+            frame_counter: 0,
+            copy_pending: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+#[derive(Resource)]
+pub struct GpuChunkEventReadbackState {
+    pub mapped: bool,
+    pub mapped_ready: Arc<AtomicBool>,
+    pub frame_counter: u64,
+    pub copy_pending: Arc<AtomicBool>,
+}
+
+impl Default for GpuChunkEventReadbackState {
     fn default() -> Self {
         Self {
             mapped: false,

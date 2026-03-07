@@ -150,9 +150,11 @@
   - 粒子ごとの mover readback は exceptional mover（8近傍外移動）向け fallback として維持する。
 - Subtasks:
   - [x] GPU chunk meta に `particle_count_curr/next`（または occupied bit 同等情報）を追加し、ステップ内 occupancy 遷移を抽出可能にする。
-  - [ ] GPU 側で `newly occupied` / `newly empty` / `frontier expansion request` / `exceptional mover` の event 抽出パスを実装する。
+  - [x] GPU 側で `newly occupied` / `newly empty` / `frontier expansion request` の chunk event 抽出パスを実装する。
+  - [x] `exceptional mover` は既存 mover 抽出パスを fallback として維持し、通常 chunk event 同期と分離する。
   - [x] Chunk/Grid Overlay の occupied/halo/free 可視化を GPU `chunk_meta` 更新結果のみで成立させ、overlay 表示状態に依存した CPU 同期経路を排除する。
-  - [x] CPU 側で event 駆動の `occupied_particle_count` / `resident_ref_count` 更新、slot allocate/free、`neighbor_slot_id` 差分更新を実装する。
+  - [x] CPU 側で event 駆動の `occupied_particle_count` / `resident_ref_count` 更新、slot allocate、`neighbor_slot_id` 差分更新を実装する。
+  - [ ] `not occupied && not halo` 条件での slot free/reuse を安定化して常時有効化する（現状は free 経路を保留）。
   - [x] slot table / `neighbor_slot_id` の GPU 反映を非同期キュー化し、通常ステップを同期停止させない。
   - [x] CPU->GPU 反映を `chunk meta diff` 中心に切替し、通常フレームで mover result upload を不要化する。
   - [x] exceptional mover 発生時のみ既存 mover 解決ルートを起動する分岐を実装する。
@@ -176,6 +178,17 @@
   - 2026-03-07: overlay 色設定を `assets/params/overlay.ron` に移管（occupied/halo/free の edge/grid 色）。`chunk_physics_overlay_gpu.wgsl` は uniform 参照へ変更し、色のハードコードを廃止。
   - 2026-03-07: `apply_gpu_readback` で生成した `chunk_meta_diffs` が prepare 先頭クリアで失われる不整合を修正（`pending_snapshot_refresh` で prepare 側適用へ移動）。
   - 2026-03-07: `mpm_chunk_meta_update.wgsl`（clear/accumulate/finalize）を追加し、GPU 側で per-step に `particle_count`/`occupied`/`resident(halo)` を更新。Chunk/Grid Overlay の occupied/halo/free 更新を CPU readback 非依存化。
+  - 2026-03-07: `mpm_extract_chunk_events.wgsl` と `chunk_event_*` readback バッファを追加し、`newly occupied/newly empty/frontier` を GPU で抽出して CPU へ同期する経路を実装。CPU 側は event 駆動で `occupied_particle_count/halo_ref_count/resident` を更新し、`chunk_meta diff` upload へ接続。
+  - 2026-03-07: `pending_snapshot_refresh`（全粒子 readback 差分再構築）経路を撤去し、chunk table 更新の主経路を chunk event readback へ切替。
+  - 2026-03-07: `configs/autoverify/water_drop_motion.json` で再検証し `passed=true` を確認。現状は `runtime_rebuild_count=18`（frontier request 起因）が残っており、rebuildゼロ化は未完。
+  - 2026-03-07: CPU residency を `coord->slot` map（`chunk_to_slot`/`slot_to_chunk`）で保持する経路を導入。frontier event は rebuild せず halo refcount を再構築して resident を更新する方針へ変更。
+  - 2026-03-07: slot window を `MAX_RESIDENT_CHUNK_SLOTS` 固定矩形（16x16）として初期化し、runtime の frontier-rebuild を抑止。`water_drop_motion`/`sand_water_interaction_drop` で `runtime_rebuild_count=0` を確認。
+  - 2026-03-07: 現状の制約として、fixed slot window 外へ halo が必要になった場合は `runtime_rebuild` せず警告ログのみ（`frontier halo reached slot-window edge`）。`sand_water_interaction_drop` で `invalid_slot_access_count=1` / `runtime_rebuild_reason_halo_update_fail=42` を確認。
+  - 2026-03-07: GPU 側の `chunk_origin/chunk_dims` 依存を縮小するため、`mpm_chunk_meta_update` の occupancy 集計を world→slot 逆算から `particle.home_chunk_slot_id` 参照へ変更し、resident 判定も `neighbor_slot_id` 経路に切替。
+  - 2026-03-07: `mpm_p2g` / `mpm_g2p` / `mpm_grid_update` を `home_slot + neighbor_slot_id + chunk_meta.chunk_coord(slot->coord)` ベースの node 参照へ更新。`water_drop_motion` / `sand_water_interaction_drop` 再検証で `passed=true` / `runtime_rebuild_count=0` / `invalid_slot_access_count=0` を確認。
+  - 2026-03-07: CPU slot table を free-list 付き pool へ拡張し、frontier event 時に halo chunk を動的 allocate する経路を追加。`prepare_terrain_upload` の初期構築も resident chunk 集合ベースへ変更し、terrain SDF は slot->coord から再生成。
+  - 2026-03-07: exceptional mover で未登録 chunk へ飛んだ際も CPU 側で slot allocate して fallback 解決できるよう更新。再検証で `water_drop_motion` / `sand_water_interaction_drop` は `passed=true` / `runtime_rebuild_count=0`。
+  - 2026-03-07: free/reuse を有効化した実験で `sand_water_interaction_drop` の `invalid_slot_access_count` と assertion 不安定化が発生したため、現時点では free 経路を保留（allocate-only 運用）に戻して安定性を優先。
 
 ### [MPM-CHUNK-03] active tile再構築と sparse実行最適化
 
@@ -195,19 +208,23 @@
 
 ### [MPM-CHUNK-04] 地形改変・ロードに伴う chunk SDF 更新
 
-- Status: `Planned`
+- Status: `In Progress`
 - 背景:
   - 初段の静的SDFでは runtime地形改変と整合しない。
 - スコープ:
   - 地形改変/ロード差分から chunk SDF dirty を生成し、必要slotのみ更新する。
 - Subtasks:
-  - [ ] 地形改変イベントから chunk SDF dirty 範囲を計算する。
-  - [ ] chunk SDF 差分更新computeを実装する。
-  - [ ] セーブロード直後の chunk SDF 再構築フローを実装する。
+  - [x] 地形改変イベントから chunk SDF dirty 範囲を計算する。
+  - [x] chunk SDF 差分更新computeを実装する。
+  - [x] セーブロード直後の chunk SDF 再構築フローを実装する。
   - [ ] 改変地形シナリオで表示・SDF・接触の一致を検証する。
 - 完了条件:
   - 地形改変後も chunk SDF と描画・接触が整合する。
   - 全面再生成なしで差分更新が成立する。
+- Progress:
+  - 2026-03-07: CPU の slotごとSDF差分生成を廃止し、`terrain_cell_solid` 差分のみを upload して GPU compute (`mpm_terrain_sdf_update.wgsl`) で `terrain_sdf/terrain_normal` を再計算する経路へ移行。
+  - 2026-03-07: `TerrainWorld` の dirty chunk から `collect_slots_for_dirty_chunks` で dirty slot(+近傍) を抽出し、必要 slot のみ更新する差分フローを実装。
+  - 2026-03-07: `water_drop_motion` / `sand_water_interaction_drop` / `terrain_edit_solid_tool` の autoverify 実行で回帰なしを確認（いずれも実行終了コード 0、MPM系は `passed=true`）。
 
 ### [MPM-CHUNK-05] 安定化・運用仕上げ（容量、監視、フェイルセーフ）
 

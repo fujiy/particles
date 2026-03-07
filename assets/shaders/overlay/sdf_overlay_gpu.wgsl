@@ -4,6 +4,29 @@
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<uniform> params: MpmParams;
 @group(0) @binding(2) var<storage, read> terrain_sdf: array<f32>;
+@group(0) @binding(3) var<storage, read> chunk_meta: array<GpuChunkMeta>;
+
+struct GpuChunkMeta {
+    chunk_coord_x: i32,
+    chunk_coord_y: i32,
+    neighbor_slot_id: array<u32, 8>,
+    active_tile_mask: u32,
+    particle_count_curr: u32,
+    particle_count_next: u32,
+    occupied_bit_curr: u32,
+    occupied_bit_next: u32,
+}
+
+const INVALID_SLOT: u32 = 0xffffffffu;
+
+fn floor_div_i32(a: i32, b: i32) -> i32 {
+    let q = a / b;
+    let r = a % b;
+    if r != 0 && ((r < 0) != (b < 0)) {
+        return q - 1;
+    }
+    return q;
+}
 
 struct VertexOut {
     @builtin(position)
@@ -55,11 +78,29 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let gy_local =
         u32(clamp(round(in.local_uv.y * max(grid_h_f - 1.0, 0.0)), 0.0, grid_h_f - 1.0));
     let cdim = params.chunk_node_dim;
-    let chunk_lx = gx_local / cdim;
-    let chunk_ly = gy_local / cdim;
-    let local_x = gx_local - chunk_lx * cdim;
-    let local_y = gy_local - chunk_ly * cdim;
-    let slot_id = chunk_ly * params.chunk_dims_x + chunk_lx;
+    let cdim_i = i32(cdim);
+    let node_x = i32(gx_local) + params.grid_origin_x;
+    let node_y = i32(gy_local) + params.grid_origin_y;
+    let chunk_x = floor_div_i32(node_x, cdim_i);
+    let chunk_y = floor_div_i32(node_y, cdim_i);
+    let local_x = u32(node_x - chunk_x * cdim_i);
+    let local_y = u32(node_y - chunk_y * cdim_i);
+
+    var slot_id = INVALID_SLOT;
+    for (var s = 0u; s < params.resident_chunk_count; s++) {
+        let ch = chunk_meta[s];
+        if ch.chunk_coord_x == chunk_x
+            && ch.chunk_coord_y == chunk_y
+            && ch.occupied_bit_next != 0u
+        {
+            slot_id = s;
+            break;
+        }
+    }
+    if slot_id == INVALID_SLOT {
+        discard;
+    }
+
     let nodes_per_chunk = cdim * cdim;
     let idx = slot_id * nodes_per_chunk + local_y * cdim + local_x;
 
