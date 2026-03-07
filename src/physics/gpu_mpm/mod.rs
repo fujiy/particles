@@ -30,8 +30,8 @@ use self::gpu_resources::{
 use self::node::MpmComputeNode;
 use self::pipeline::MpmComputePipelines;
 use self::readback::{
-    GpuMoverReadbackResult, GpuMoverReadbackState, GpuReadbackResult, GpuReadbackState,
-    GpuStatisticsReadbackResult, GpuStatisticsReadbackState,
+    GpuMoverApplyAck, GpuMoverReadbackResult, GpuMoverReadbackState, GpuReadbackResult,
+    GpuReadbackState, GpuStatisticsReadbackResult, GpuStatisticsReadbackState,
 };
 use self::shaders::MpmShaders;
 use crate::physics::state::SimUpdateSet;
@@ -174,8 +174,6 @@ fn prepare_gpu_uploads(
 
     if upload.upload_mover_results {
         buffers.upload_mover_results(&queue, &upload.mover_results);
-    } else {
-        buffers.upload_mover_results(&queue, &[]);
     }
 
     if upload.upload_terrain && !upload.terrain_sdf.is_empty() && !upload.terrain_normal.is_empty()
@@ -358,13 +356,17 @@ fn readback_movers(
                 .mapped_ready
                 .store(false, std::sync::atomic::Ordering::Release);
             state.mapped = false;
+            state
+                .copy_pending
+                .store(false, std::sync::atomic::Ordering::Release);
         }
         return;
     }
 
-    state.frame_counter = state.frame_counter.wrapping_add(1);
-    let interval = control.readback_interval_frames.max(1) as u64;
-    if state.frame_counter % interval != 0 {
+    if !state
+        .copy_pending
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
         return;
     }
 
@@ -378,6 +380,9 @@ fn readback_movers(
         }
     });
     state.mapped = true;
+    state
+        .copy_pending
+        .store(false, std::sync::atomic::Ordering::Release);
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +399,8 @@ impl Plugin for GpuMpmPlugin {
         let statistics_readback_for_render = statistics_readback.clone();
         let mover_readback = GpuMoverReadbackResult::default();
         let mover_readback_for_render = mover_readback.clone();
+        let mover_apply_ack = GpuMoverApplyAck::default();
+        let mover_apply_ack_for_render = mover_apply_ack.clone();
 
         app.init_resource::<MpmGpuUploadRequest>()
             .init_resource::<MpmGpuParamsRequest>()
@@ -408,6 +415,16 @@ impl Plugin for GpuMpmPlugin {
             .insert_resource(readback)
             .insert_resource(statistics_readback)
             .insert_resource(mover_readback)
+            .insert_resource(mover_apply_ack)
+            .configure_sets(
+                Update,
+                (
+                    sync::MpmSyncSet::ApplyReadback,
+                    sync::MpmSyncSet::PrepareUpload,
+                )
+                    .chain()
+                    .in_set(SimUpdateSet::Rendering),
+            )
             .add_systems(
                 Update,
                 (
@@ -418,17 +435,18 @@ impl Plugin for GpuMpmPlugin {
                     sync::prepare_gpu_run_state,
                 )
                     .chain()
-                    .in_set(SimUpdateSet::Rendering),
+                    .in_set(sync::MpmSyncSet::PrepareUpload),
             )
             .add_systems(
                 Update,
                 (
                     sync::apply_gpu_readback,
                     sync::apply_statistics_readback,
+                    sync::consume_mover_apply_ack,
                     sync::apply_mover_readback,
                 )
                     .chain()
-                    .in_set(SimUpdateSet::Rendering),
+                    .in_set(sync::MpmSyncSet::ApplyReadback),
             )
             .add_plugins(ExtractResourcePlugin::<MpmGpuUploadRequest>::default())
             .add_plugins(ExtractResourcePlugin::<MpmGpuParamsRequest>::default())
@@ -442,6 +460,7 @@ impl Plugin for GpuMpmPlugin {
             .insert_resource(readback_for_render)
             .insert_resource(statistics_readback_for_render)
             .insert_resource(mover_readback_for_render)
+            .insert_resource(mover_apply_ack_for_render)
             .init_resource::<GpuReadbackState>()
             .init_resource::<GpuStatisticsReadbackState>()
             .init_resource::<GpuMoverReadbackState>()

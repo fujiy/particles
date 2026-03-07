@@ -15,7 +15,9 @@ use super::gpu_resources::{
     MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest, world_grid_layout,
 };
 use super::phase::mpm_phase_id_for_particle;
-use super::readback::{GpuMoverReadbackResult, GpuReadbackResult, GpuStatisticsReadbackResult};
+use super::readback::{
+    GpuMoverApplyAck, GpuMoverReadbackResult, GpuReadbackResult, GpuStatisticsReadbackResult,
+};
 use crate::params::ActivePhysicsParams;
 use crate::physics::material::{ParticleMaterial, particle_properties};
 use crate::physics::state::{ReplayState, SimulationState};
@@ -42,6 +44,12 @@ struct ChunkSlotState {
     resident: bool,
 }
 
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
+pub enum MpmSyncSet {
+    ApplyReadback,
+    PrepareUpload,
+}
+
 #[derive(Resource, Debug, Default)]
 pub struct MpmReadbackSnapshot {
     pub particles: Vec<GpuParticle>,
@@ -59,6 +67,17 @@ pub struct MpmChunkResidencyState {
     pub active_resident_chunk_count: u32,
     pub chunk_sdf_samples: u32,
     pub invalid_slot_access_count: u64,
+    pub runtime_rebuild_count: u64,
+    pub runtime_rebuild_reason_empty_state: u64,
+    pub runtime_rebuild_reason_invalid_old_slot: u64,
+    pub runtime_rebuild_reason_new_chunk_oob: u64,
+    pub runtime_rebuild_reason_old_slot_empty: u64,
+    pub runtime_rebuild_reason_halo_update_fail: u64,
+    pub runtime_rebuild_waiting_readback_count: u64,
+    pub pending_mover_apply: bool,
+    pub pending_mover_readback: bool,
+    pub observed_mover_apply_ack: u64,
+    pub mover_readback_flush_budget: u32,
     rebuild_requested: bool,
     slot_state: Vec<ChunkSlotState>,
     chunk_meta_cache: Vec<GpuChunkMeta>,
@@ -75,6 +94,17 @@ impl Default for MpmChunkResidencyState {
             active_resident_chunk_count: 0,
             chunk_sdf_samples: 0,
             invalid_slot_access_count: 0,
+            runtime_rebuild_count: 0,
+            runtime_rebuild_reason_empty_state: 0,
+            runtime_rebuild_reason_invalid_old_slot: 0,
+            runtime_rebuild_reason_new_chunk_oob: 0,
+            runtime_rebuild_reason_old_slot_empty: 0,
+            runtime_rebuild_reason_halo_update_fail: 0,
+            runtime_rebuild_waiting_readback_count: 0,
+            pending_mover_apply: false,
+            pending_mover_readback: false,
+            observed_mover_apply_ack: 0,
+            mover_readback_flush_budget: 0,
             rebuild_requested: false,
             slot_state: Vec::new(),
             chunk_meta_cache: Vec::new(),
@@ -468,6 +498,17 @@ pub fn prepare_terrain_upload(
         residency.active_resident_chunk_count = 0;
         residency.chunk_sdf_samples = 0;
         residency.invalid_slot_access_count = 0;
+        residency.runtime_rebuild_count = 0;
+        residency.runtime_rebuild_reason_empty_state = 0;
+        residency.runtime_rebuild_reason_invalid_old_slot = 0;
+        residency.runtime_rebuild_reason_new_chunk_oob = 0;
+        residency.runtime_rebuild_reason_old_slot_empty = 0;
+        residency.runtime_rebuild_reason_halo_update_fail = 0;
+        residency.runtime_rebuild_waiting_readback_count = 0;
+        residency.pending_mover_apply = false;
+        residency.pending_mover_readback = false;
+        residency.observed_mover_apply_ack = 0;
+        residency.mover_readback_flush_budget = 0;
         residency.rebuild_requested = false;
         residency.slot_state.clear();
         residency.chunk_meta_cache.clear();
@@ -491,6 +532,14 @@ pub fn prepare_terrain_upload(
     } else {
         readback_snapshot.particles.as_slice()
     };
+    if residency.rebuild_requested && !upload.upload_particles_frame && particle_source.is_empty() {
+        // Rebuild requested from runtime movers, but fresh GPU readback has not arrived yet.
+        // Keep current residency and retry next frame to avoid stale-particle rollback.
+        residency.runtime_rebuild_waiting_readback_count = residency
+            .runtime_rebuild_waiting_readback_count
+            .saturating_add(1);
+        return;
+    }
     let Some(build) = build_static_chunk_upload(&terrain, particle_source) else {
         upload.chunk_meta.clear();
         upload.terrain_sdf.clear();
@@ -499,6 +548,17 @@ pub fn prepare_terrain_upload(
         residency.resident_chunk_count = 0;
         residency.active_resident_chunk_count = 0;
         residency.chunk_sdf_samples = 0;
+        residency.runtime_rebuild_count = 0;
+        residency.runtime_rebuild_reason_empty_state = 0;
+        residency.runtime_rebuild_reason_invalid_old_slot = 0;
+        residency.runtime_rebuild_reason_new_chunk_oob = 0;
+        residency.runtime_rebuild_reason_old_slot_empty = 0;
+        residency.runtime_rebuild_reason_halo_update_fail = 0;
+        residency.runtime_rebuild_waiting_readback_count = 0;
+        residency.pending_mover_apply = false;
+        residency.pending_mover_readback = false;
+        residency.observed_mover_apply_ack = 0;
+        residency.mover_readback_flush_budget = 0;
         residency.rebuild_requested = false;
         residency.slot_state.clear();
         residency.chunk_meta_cache.clear();
@@ -514,6 +574,11 @@ pub fn prepare_terrain_upload(
                 unresolved
             );
         }
+        upload.mover_results.clear();
+        upload.upload_mover_results = false;
+        upload.upload_mover_results_frame = false;
+        residency.pending_mover_apply = false;
+        residency.pending_mover_readback = false;
     } else {
         let mut rebuilt_particles = particle_source.to_vec();
         let unresolved =
@@ -524,17 +589,25 @@ pub fn prepare_terrain_upload(
                 unresolved
             );
         }
+        upload.mover_results = rebuilt_particles
+            .iter()
+            .enumerate()
+            .map(|(pid, particle)| GpuMoverResult {
+                particle_id: pid as u32,
+                new_home_slot_id: particle.home_chunk_slot_id,
+                _pad_a: 0,
+                _pad_b: 0,
+            })
+            .collect();
+        upload.upload_mover_results = !upload.mover_results.is_empty();
+        upload.upload_mover_results_frame = false;
+        residency.pending_mover_apply = upload.upload_mover_results;
+        residency.pending_mover_readback = false;
+        // Keep CPU snapshot in sync with latest readback-derived positions.
         upload.particles = rebuilt_particles;
         upload.upload_particles = false;
-        upload.upload_particles_frame = true;
+        upload.upload_particles_frame = false;
     }
-
-    initialize_chunk_slot_state(&mut residency, upload.particles.as_slice());
-    upload.chunk_meta = residency.chunk_meta_cache.clone();
-    upload.upload_chunks = true;
-    upload.terrain_sdf = build.terrain_sdf;
-    upload.terrain_normal = build.terrain_normal;
-    upload.upload_terrain = true;
 
     residency.initialized = true;
     residency.chunk_origin = build.chunk_origin;
@@ -544,6 +617,12 @@ pub fn prepare_terrain_upload(
         .chunk_dims
         .x
         .saturating_mul(residency.chunk_dims.y);
+    initialize_chunk_slot_state(&mut residency, upload.particles.as_slice());
+    upload.chunk_meta = residency.chunk_meta_cache.clone();
+    upload.upload_chunks = true;
+    upload.terrain_sdf = build.terrain_sdf;
+    upload.terrain_normal = build.terrain_normal;
+    upload.upload_terrain = true;
     residency.active_resident_chunk_count = residency
         .slot_state
         .iter()
@@ -551,6 +630,7 @@ pub fn prepare_terrain_upload(
         .count() as u32;
     residency.chunk_sdf_samples = build.grid_layout.node_count() as u32;
     residency.invalid_slot_access_count = 0;
+    residency.mover_readback_flush_budget = 2;
     residency.rebuild_requested = false;
 }
 
@@ -650,6 +730,7 @@ pub fn prepare_gpu_params(
 /// System: update GPU compute run state from SimulationState.
 pub fn prepare_gpu_run_state(
     control: Res<MpmGpuControl>,
+    mut residency: ResMut<MpmChunkResidencyState>,
     mut sim_state: ResMut<SimulationState>,
     mut replay_state: ResMut<ReplayState>,
     active_params: Res<ActivePhysicsParams>,
@@ -673,10 +754,24 @@ pub fn prepare_gpu_run_state(
         return;
     }
 
+    // Strict mover lockstep: no new substep/extract until previous step readback and
+    // pending home-slot updates are fully consumed.
+    if control.readback_enabled && (residency.pending_mover_apply || residency.pending_mover_readback)
+    {
+        run_req.enabled = false;
+        run_req.substeps = 0;
+        step_clock.accumulator_secs = 0.0;
+        sim_state.step_once = false;
+        return;
+    }
+
     // Single-step command always executes exactly one substep.
     if sim_state.step_once {
         run_req.enabled = true;
         run_req.substeps = 1;
+        if control.readback_enabled {
+            residency.pending_mover_readback = true;
+        }
         step_clock.accumulator_secs = 0.0;
         if replay_state.enabled {
             replay_state.current_step = replay_state.current_step.saturating_add(1);
@@ -709,10 +804,17 @@ pub fn prepare_gpu_run_state(
         return;
     }
 
+    if control.readback_enabled {
+        // movers readback is currently single-buffered per frame; keep one-step lockstep.
+        substeps = 1;
+    }
     step_clock.accumulator_secs =
         (step_clock.accumulator_secs - fixed_dt * substeps as f32).max(0.0);
     run_req.enabled = true;
     run_req.substeps = substeps;
+    if control.readback_enabled {
+        residency.pending_mover_readback = true;
+    }
     if replay_state.enabled {
         replay_state.current_step = replay_state.current_step.saturating_add(substeps as usize);
     }
@@ -797,6 +899,25 @@ pub fn apply_statistics_readback(
     *stats_snapshot = MpmStatisticsSnapshot::from_gpu_scalars(scalars);
 }
 
+pub fn consume_mover_apply_ack(
+    control: Res<MpmGpuControl>,
+    mover_apply_ack: Res<GpuMoverApplyAck>,
+    mut residency: ResMut<MpmChunkResidencyState>,
+    mut upload: ResMut<MpmGpuUploadRequest>,
+) {
+    if control.init_only || !control.readback_enabled {
+        return;
+    }
+    let ack = mover_apply_ack.value();
+    if ack == residency.observed_mover_apply_ack {
+        return;
+    }
+    residency.observed_mover_apply_ack = ack;
+    residency.pending_mover_apply = false;
+    upload.mover_results.clear();
+    upload.upload_mover_results = true;
+}
+
 pub fn apply_mover_readback(
     control: Res<MpmGpuControl>,
     mover_readback: Res<GpuMoverReadbackResult>,
@@ -809,10 +930,22 @@ pub fn apply_mover_readback(
     let Some(movers) = mover_readback.take() else {
         return;
     };
+    residency.pending_mover_readback = false;
+    if residency.mover_readback_flush_budget > 0 {
+        residency.mover_readback_flush_budget -= 1;
+        return;
+    }
+    if residency.pending_mover_apply {
+        return;
+    }
     if !residency.initialized {
         return;
     }
     if residency.slot_state.is_empty() || residency.chunk_meta_cache.is_empty() {
+        residency.runtime_rebuild_count = residency.runtime_rebuild_count.saturating_add(1);
+        residency.runtime_rebuild_reason_empty_state = residency
+            .runtime_rebuild_reason_empty_state
+            .saturating_add(1);
         residency.rebuild_requested = true;
         return;
     }
@@ -822,6 +955,10 @@ pub fn apply_mover_readback(
     upload.upload_chunk_diffs = false;
 
     let mut rebuild_required = false;
+    let mut reason_invalid_old_slot = 0u32;
+    let mut reason_new_chunk_oob = 0u32;
+    let mut reason_old_slot_empty = 0u32;
+    let mut reason_halo_update_fail = 0u32;
     let mut became_occupied = Vec::<u32>::new();
     let mut became_empty = Vec::<u32>::new();
 
@@ -829,6 +966,7 @@ pub fn apply_mover_readback(
         let old_slot = mover.old_home_slot_id;
         if old_slot == INVALID_CHUNK_SLOT_ID || old_slot as usize >= residency.slot_state.len() {
             rebuild_required = true;
+            reason_invalid_old_slot = reason_invalid_old_slot.saturating_add(1);
             continue;
         }
         let new_chunk = IVec2::new(mover.new_chunk_coord_x, mover.new_chunk_coord_y);
@@ -836,6 +974,7 @@ pub fn apply_mover_readback(
             slot_id_from_chunk_coord(new_chunk, residency.chunk_origin, residency.chunk_dims)
         else {
             rebuild_required = true;
+            reason_new_chunk_oob = reason_new_chunk_oob.saturating_add(1);
             continue;
         };
         if new_slot == old_slot {
@@ -846,6 +985,7 @@ pub fn apply_mover_readback(
         let new_idx = new_slot as usize;
         if residency.slot_state[old_idx].occupied_particle_count == 0 {
             rebuild_required = true;
+            reason_old_slot_empty = reason_old_slot_empty.saturating_add(1);
             continue;
         }
 
@@ -881,6 +1021,7 @@ pub fn apply_mover_readback(
             1,
         ) {
             rebuild_required = true;
+            reason_halo_update_fail = reason_halo_update_fail.saturating_add(1);
         }
     }
     for slot_id in became_empty {
@@ -892,10 +1033,24 @@ pub fn apply_mover_readback(
             -1,
         ) {
             rebuild_required = true;
+            reason_halo_update_fail = reason_halo_update_fail.saturating_add(1);
         }
     }
 
     if rebuild_required {
+        residency.runtime_rebuild_count = residency.runtime_rebuild_count.saturating_add(1);
+        residency.runtime_rebuild_reason_invalid_old_slot = residency
+            .runtime_rebuild_reason_invalid_old_slot
+            .saturating_add(reason_invalid_old_slot as u64);
+        residency.runtime_rebuild_reason_new_chunk_oob = residency
+            .runtime_rebuild_reason_new_chunk_oob
+            .saturating_add(reason_new_chunk_oob as u64);
+        residency.runtime_rebuild_reason_old_slot_empty = residency
+            .runtime_rebuild_reason_old_slot_empty
+            .saturating_add(reason_old_slot_empty as u64);
+        residency.runtime_rebuild_reason_halo_update_fail = residency
+            .runtime_rebuild_reason_halo_update_fail
+            .saturating_add(reason_halo_update_fail as u64);
         upload.mover_results.clear();
         upload.upload_mover_results = false;
         upload.chunk_meta_diffs.clear();
@@ -1099,14 +1254,15 @@ fn update_halo_ref_count(
     let Some(center_chunk) = slot_coord_from_slot_id(center_slot_id, origin, dims) else {
         return false;
     };
-    let mut in_bounds = true;
     for oy in -CHUNK_HALO_RADIUS..=CHUNK_HALO_RADIUS {
         for ox in -CHUNK_HALO_RADIUS..=CHUNK_HALO_RADIUS {
             let chunk = center_chunk + IVec2::new(ox, oy);
             let Some(slot_id) = slot_id_from_chunk_coord(chunk, origin, dims) else {
-                in_bounds = false;
                 continue;
             };
+            if slot_id as usize >= slot_state.len() {
+                return false;
+            }
             let slot = &mut slot_state[slot_id as usize];
             if delta > 0 {
                 slot.halo_ref_count = slot.halo_ref_count.saturating_add(delta as u32);
@@ -1115,7 +1271,7 @@ fn update_halo_ref_count(
             }
         }
     }
-    in_bounds
+    true
 }
 
 fn recompute_resident_flags(slot_state: &mut [ChunkSlotState]) -> Vec<u32> {

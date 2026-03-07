@@ -440,6 +440,15 @@ struct MpmAutoVerifyReport {
     resident_chunk_count: u32,
     invalid_slot_access_count: u64,
     chunk_sdf_samples: u32,
+    runtime_rebuild_count: u64,
+    runtime_rebuild_reason_empty_state: u64,
+    runtime_rebuild_reason_invalid_old_slot: u64,
+    runtime_rebuild_reason_new_chunk_oob: u64,
+    runtime_rebuild_reason_old_slot_empty: u64,
+    runtime_rebuild_reason_halo_update_fail: u64,
+    runtime_rebuild_waiting_readback_count: u64,
+    pending_mover_apply: bool,
+    pending_mover_readback: bool,
     failed_assertions: Vec<String>,
 }
 
@@ -839,6 +848,21 @@ fn run_mpm_autoverify(
                     resident_chunk_count: chunk_residency.resident_chunk_count,
                     invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
                     chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
+                    runtime_rebuild_count: chunk_residency.runtime_rebuild_count,
+                    runtime_rebuild_reason_empty_state: chunk_residency
+                        .runtime_rebuild_reason_empty_state,
+                    runtime_rebuild_reason_invalid_old_slot: chunk_residency
+                        .runtime_rebuild_reason_invalid_old_slot,
+                    runtime_rebuild_reason_new_chunk_oob: chunk_residency
+                        .runtime_rebuild_reason_new_chunk_oob,
+                    runtime_rebuild_reason_old_slot_empty: chunk_residency
+                        .runtime_rebuild_reason_old_slot_empty,
+                    runtime_rebuild_reason_halo_update_fail: chunk_residency
+                        .runtime_rebuild_reason_halo_update_fail,
+                    runtime_rebuild_waiting_readback_count: chunk_residency
+                        .runtime_rebuild_waiting_readback_count,
+                    pending_mover_apply: chunk_residency.pending_mover_apply,
+                    pending_mover_readback: chunk_residency.pending_mover_readback,
                     failed_assertions: Vec::new(),
                 };
                 write_report(&state.output_path, &report);
@@ -950,6 +974,20 @@ fn run_mpm_autoverify(
             resident_chunk_count: chunk_residency.resident_chunk_count,
             invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
             chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
+            runtime_rebuild_count: chunk_residency.runtime_rebuild_count,
+            runtime_rebuild_reason_empty_state: chunk_residency.runtime_rebuild_reason_empty_state,
+            runtime_rebuild_reason_invalid_old_slot: chunk_residency
+                .runtime_rebuild_reason_invalid_old_slot,
+            runtime_rebuild_reason_new_chunk_oob: chunk_residency
+                .runtime_rebuild_reason_new_chunk_oob,
+            runtime_rebuild_reason_old_slot_empty: chunk_residency
+                .runtime_rebuild_reason_old_slot_empty,
+            runtime_rebuild_reason_halo_update_fail: chunk_residency
+                .runtime_rebuild_reason_halo_update_fail,
+            runtime_rebuild_waiting_readback_count: chunk_residency
+                .runtime_rebuild_waiting_readback_count,
+            pending_mover_apply: chunk_residency.pending_mover_apply,
+            pending_mover_readback: chunk_residency.pending_mover_readback,
             failed_assertions: Vec::new(),
         };
         write_report(&state.output_path, &report);
@@ -1107,6 +1145,15 @@ fn run_mpm_autoverify(
         resident_chunk_count: chunk_residency.resident_chunk_count,
         invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
         chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
+        runtime_rebuild_count: chunk_residency.runtime_rebuild_count,
+        runtime_rebuild_reason_empty_state: chunk_residency.runtime_rebuild_reason_empty_state,
+        runtime_rebuild_reason_invalid_old_slot: chunk_residency.runtime_rebuild_reason_invalid_old_slot,
+        runtime_rebuild_reason_new_chunk_oob: chunk_residency.runtime_rebuild_reason_new_chunk_oob,
+        runtime_rebuild_reason_old_slot_empty: chunk_residency.runtime_rebuild_reason_old_slot_empty,
+        runtime_rebuild_reason_halo_update_fail: chunk_residency.runtime_rebuild_reason_halo_update_fail,
+        runtime_rebuild_waiting_readback_count: chunk_residency.runtime_rebuild_waiting_readback_count,
+        pending_mover_apply: chunk_residency.pending_mover_apply,
+        pending_mover_readback: chunk_residency.pending_mover_readback,
         failed_assertions,
     };
     bevy::log::info!(

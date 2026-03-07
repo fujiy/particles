@@ -15,7 +15,9 @@ use std::mem::size_of;
 use super::buffers::{GPU_STATS_SCALAR_LANES, GpuStatisticsScalars};
 use super::gpu_resources::{MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest};
 use super::pipeline::MpmComputePipelines;
-use super::readback::{GpuMoverReadbackState, GpuReadbackState, GpuStatisticsReadbackState};
+use super::readback::{
+    GpuMoverApplyAck, GpuMoverReadbackState, GpuReadbackState, GpuStatisticsReadbackState,
+};
 use super::sync::MpmStatisticsStatus;
 
 const WORKGROUP_SIZE: u32 = 64;
@@ -120,6 +122,49 @@ impl Node for MpmComputeNode {
         let pipelines = world.resource::<MpmComputePipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
         let device = render_context.render_device().clone();
+        let mover_result_wgs = (buffers.mover_result_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+        let apply_mover_results_bg = if buffers.mover_result_count > 0 {
+            let Some(pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.apply_mover_results_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &APPLY_MOVER_RESULTS_PIPELINE_WARNED,
+                    "apply_mover_results",
+                    pipelines.apply_mover_results_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let bg = device.create_bind_group(
+                "mpm_apply_mover_results_bg",
+                &pipelines.apply_mover_results_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                    buffers.mover_result_count_buf.as_entire_binding(),
+                    buffers.mover_result_buf.as_entire_binding(),
+                )),
+            );
+            Some((pipeline, bg))
+        } else {
+            None
+        };
+
+        if let Some((pipeline, bg)) = apply_mover_results_bg.as_ref() {
+            let mut pass =
+                render_context
+                    .command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mpm_apply_mover_results"),
+                        timestamp_writes: None,
+                    });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            pass.dispatch_workgroups(mover_result_wgs.max(1), 1, 1);
+            if let Some(ack) = world.get_resource::<GpuMoverApplyAck>() {
+                ack.signal();
+            }
+        }
 
         if should_step {
             let Some(clear_pipeline) =
@@ -223,45 +268,8 @@ impl Node for MpmComputeNode {
                     buffers.mover_buf.as_entire_binding(),
                 )),
             );
-            let mover_result_wgs =
-                (buffers.mover_result_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
-            let apply_mover_results_bg = if buffers.mover_result_count > 0 {
-                let Some(pipeline) =
-                    pipeline_cache.get_compute_pipeline(pipelines.apply_mover_results_pipeline)
-                else {
-                    warn_missing_pipeline_once(
-                        &APPLY_MOVER_RESULTS_PIPELINE_WARNED,
-                        "apply_mover_results",
-                        pipelines.apply_mover_results_pipeline,
-                        pipeline_cache,
-                    );
-                    return Ok(());
-                };
-                let bg = device.create_bind_group(
-                    "mpm_apply_mover_results_bg",
-                    &pipelines.apply_mover_results_layout,
-                    &BindGroupEntries::sequential((
-                        buffers.params_buf.as_entire_binding(),
-                        buffers.particle_buf.as_entire_binding(),
-                        buffers.mover_result_count_buf.as_entire_binding(),
-                        buffers.mover_result_buf.as_entire_binding(),
-                    )),
-                );
-                Some((pipeline, bg))
-            } else {
-                None
-            };
 
             let encoder = render_context.command_encoder();
-            if let Some((pipeline, bg)) = apply_mover_results_bg.as_ref() {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("mpm_apply_mover_results"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, bg, &[]);
-                pass.dispatch_workgroups(mover_result_wgs.max(1), 1, 1);
-            }
             for _ in 0..run_req.substeps {
                 {
                     let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -836,10 +844,9 @@ impl Node for MpmComputeNode {
                         size_of::<GpuStatisticsScalars>() as u64,
                     );
                 }
-                if has_particles && can_copy_movers {
-                    let mover_record_bytes =
-                        super::gpu_resources::MAX_MOVER_RECORDS as u64
-                            * size_of::<super::buffers::GpuMoverRecord>() as u64;
+                if should_step && has_particles && can_copy_movers {
+                    let mover_record_bytes = super::gpu_resources::MAX_MOVER_RECORDS as u64
+                        * size_of::<super::buffers::GpuMoverRecord>() as u64;
                     render_context.command_encoder().copy_buffer_to_buffer(
                         &buffers.mover_count_buf,
                         0,
@@ -854,6 +861,11 @@ impl Node for MpmComputeNode {
                         size_of::<u32>() as u64,
                         mover_record_bytes,
                     );
+                    if let Some(mover_state) = world.get_resource::<GpuMoverReadbackState>() {
+                        mover_state
+                            .copy_pending
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
                 }
             }
         }

@@ -159,6 +159,9 @@
   - 2026-03-07: CPU 側に `occupied_particle_count` / `halo_ref_count` を持つ slot 台帳を追加。mover 差分から occupied 0↔1 遷移を更新し、resident slot を incremental に維持。
   - 2026-03-07: `neighbor_slot_id` を resident 変化 slot + Moore近傍で再計算し、`chunk_meta` 差分 upload（多件時は全量 upload fallback）を実装。
   - 2026-03-07: `water_drop_motion` と `sand_water_interaction_drop` の autoverify を実行し、いずれも `passed=true` / `invalid_slot_access_count=0` を確認。
+  - 2026-03-07: mover 同期を strict lockstep 化。`readback適用 -> upload準備` の順序セットを明示し、`pending_mover_readback/pending_mover_apply` が解消するまで次 substep を停止。`mpm_apply_mover_results` の ACK を main world へ返し、ACK 受領で mover_result バッファを明示クリアする経路へ変更。
+  - 2026-03-07: mover readback を「GPU copy が発生したフレームのみ map」するよう修正し、同一 mover バッファの再読を防止。`update_halo_ref_count` の境界処理も見直し、chunk layout 境界での不要 rebuild を除去。
+  - 2026-03-07: autoverify report へ `runtime_rebuild_*` / `pending_mover_*` 指標を追加。再検証（`water_drop_motion`, `sand_water_interaction_drop`）で `runtime_rebuild_count=0` を確認。
 
 ### [MPM-CHUNK-03] active tile再構築と sparse実行最適化
 

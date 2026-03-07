@@ -4,7 +4,7 @@
 // an AtomicBool flag when mapping completes. The following Cleanup reads the
 // mapped range, parses particles, and unmaps — no poll(Wait), no frame stall.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bevy::prelude::*;
@@ -57,6 +57,21 @@ impl GpuMoverReadbackResult {
         if let Ok(mut g) = self.inner.lock() {
             *g = Some(movers);
         }
+    }
+}
+
+#[derive(Resource, Clone, Default)]
+pub struct GpuMoverApplyAck {
+    inner: Arc<AtomicU64>,
+}
+
+impl GpuMoverApplyAck {
+    pub fn signal(&self) {
+        self.inner.fetch_add(1, Ordering::AcqRel);
+    }
+
+    pub fn value(&self) -> u64 {
+        self.inner.load(Ordering::Acquire)
     }
 }
 
@@ -126,6 +141,7 @@ pub struct GpuMoverReadbackState {
     pub mapped: bool,
     pub mapped_ready: Arc<AtomicBool>,
     pub frame_counter: u64,
+    pub copy_pending: Arc<AtomicBool>,
 }
 
 impl Default for GpuMoverReadbackState {
@@ -134,6 +150,7 @@ impl Default for GpuMoverReadbackState {
             mapped: false,
             mapped_ready: Arc::new(AtomicBool::new(false)),
             frame_counter: 0,
+            copy_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 }
