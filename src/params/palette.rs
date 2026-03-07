@@ -4,14 +4,35 @@
 
 use bevy::asset::{AssetLoader, LoadContext, io::Reader};
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::params::color_serde::{Rgba8Color, deserialize_u8_color_from_ron};
 
 /// RGB8カラー（sRGB）。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct PaletteColor {
     pub r: u8,
     pub g: u8,
     pub b: u8,
+}
+
+impl From<Rgba8Color> for PaletteColor {
+    fn from(color: Rgba8Color) -> Self {
+        Self {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PaletteColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(deserialize_u8_color_from_ron(deserializer)?.into())
+    }
 }
 
 /// 4色パレット。

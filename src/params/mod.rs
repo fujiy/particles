@@ -11,6 +11,7 @@
 //   palette.ron    — 水ドット材質パレット
 //   overlay.ron    — Overlay UI / SDF 描画パラメータ
 pub mod camera;
+mod color_serde;
 pub mod interface;
 pub mod overlay;
 pub mod palette;

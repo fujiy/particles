@@ -43,7 +43,8 @@ impl FromWorld for MpmShaders {
             extract_movers: asset_server.load("shaders/physics/mpm_extract_movers.wgsl"),
             apply_mover_results: asset_server.load("shaders/physics/mpm_apply_mover_results.wgsl"),
             chunk_meta_update: asset_server.load("shaders/physics/mpm_chunk_meta_update.wgsl"),
-            extract_chunk_events: asset_server.load("shaders/physics/mpm_extract_chunk_events.wgsl"),
+            extract_chunk_events: asset_server
+                .load("shaders/physics/mpm_extract_chunk_events.wgsl"),
             terrain_sdf_update: asset_server.load("shaders/physics/mpm_terrain_sdf_update.wgsl"),
             stats_clear: asset_server.load("shaders/stats/clear_scalars.wgsl"),
             stats_total_particles: asset_server.load("shaders/stats/total_particles.wgsl"),

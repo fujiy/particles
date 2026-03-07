@@ -279,7 +279,9 @@ impl ViewNode for ChunkPhysicsOverlayGpuNode {
             return Ok(());
         };
         let overlay_pipeline = world.resource::<ChunkPhysicsOverlayGpuPipeline>();
-        let overlay_colors_binding = overlay_pipeline.fallback_overlay_colors_buf.as_entire_binding();
+        let overlay_colors_binding = overlay_pipeline
+            .fallback_overlay_colors_buf
+            .as_entire_binding();
 
         let (params_binding, chunk_meta_binding, chunk_count) =
             if let Some(buffers) = world.get_resource::<MpmGpuBuffers>() {

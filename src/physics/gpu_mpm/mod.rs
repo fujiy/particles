@@ -423,23 +423,23 @@ fn readback_chunk_events(
             .load(std::sync::atomic::Ordering::Acquire);
         if ready {
             let byte_size = size_of::<u32>() as u64
-                + MAX_CHUNK_EVENT_RECORDS as u64
-                    * size_of::<buffers::GpuChunkEventRecord>() as u64;
+                + MAX_CHUNK_EVENT_RECORDS as u64 * size_of::<buffers::GpuChunkEventRecord>() as u64;
             let slice = buffers.chunk_event_readback_buf.slice(..byte_size);
             let data = slice.get_mapped_range();
             if data.len() >= size_of::<u32>() {
                 let count = *bytemuck::from_bytes::<u32>(&data[..size_of::<u32>()]);
                 let event_count = count.min(MAX_CHUNK_EVENT_RECORDS);
                 let records_offset = size_of::<u32>();
-                let records_bytes = event_count as usize * size_of::<buffers::GpuChunkEventRecord>();
+                let records_bytes =
+                    event_count as usize * size_of::<buffers::GpuChunkEventRecord>();
                 if data.len() >= records_offset + records_bytes {
                     let mut events = Vec::with_capacity(event_count as usize);
                     for chunk in data[records_offset..records_offset + records_bytes]
                         .chunks_exact(size_of::<buffers::GpuChunkEventRecord>())
                     {
-                        events.push(bytemuck::pod_read_unaligned::<buffers::GpuChunkEventRecord>(
-                            chunk,
-                        ));
+                        events.push(
+                            bytemuck::pod_read_unaligned::<buffers::GpuChunkEventRecord>(chunk),
+                        );
                     }
                     readback_result.store(events);
                 }

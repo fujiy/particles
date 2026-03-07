@@ -4,14 +4,36 @@
 
 use bevy::asset::{AssetLoader, LoadContext, io::Reader};
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+use crate::params::color_serde::{RgbaColor, deserialize_rgba_color_from_ron};
+
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct OverlayColor {
     pub r: f32,
     pub g: f32,
     pub b: f32,
     pub a: f32,
+}
+
+impl From<RgbaColor> for OverlayColor {
+    fn from(color: RgbaColor) -> Self {
+        Self {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: color.a,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OverlayColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(deserialize_rgba_color_from_ron(deserializer)?.into())
+    }
 }
 
 impl OverlayColor {

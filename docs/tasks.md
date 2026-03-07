@@ -240,6 +240,28 @@
 - 完了条件:
   - chunk構造が長時間実行で安定し、異常時の挙動が定義どおりになる。
 
+### [PARAM-HEX-01] RONカラー記法をhex形式へ拡張
+
+- Status: `Done`
+- 背景:
+  - `overlay.ron` や `palette.ron` の色指定が `r/g/b/a` 記法のみのため、VSCode のカラーピッカー入力が使いにくい。
+- スコープ:
+  - `#RRGGBB` / `#RRGGBBAA` を受け付けるデシリアライズ互換を `params` 側で実装する。
+  - 既存 `r/g/b/a` フォーマットの後方互換を維持する。
+  - `interface/overlay/palette` の対象 RON を hex 記法へ移行する。
+- Subtasks:
+  - [x] `src/params` に共通 hex パース/デシリアライズヘルパーを追加する。
+  - [x] `UiColor`, `UiColor8`, `OverlayColor`, `PaletteColor` を hex 対応へ更新する。
+  - [x] `assets/params/interface.ron`, `assets/params/overlay.ron`, `assets/params/palette.ron` を hex 形式へ更新する。
+  - [x] パース回帰を抑える単体テストを追加する。
+- 完了条件:
+  - 3種類（`r/g/b`, `r/g/b/a`, hex）を読み分けず読み込める。
+  - 既存シナリオ検証が壊れず、`cargo check`/`cargo test` が通る。
+- 進捗:
+  - 2026-03-07: `hex` 文字列の色指定を受けるパーサーを追加し、`palette/interface/overlay` へ反映。
+  - 2026-03-07: `assets/params/*.ron` の該当色値を hex 形式へ移行。
+  - 2026-03-07: 追加テストを含む状態で `cargo check` / `cargo test` を全件通過。
+
 ## Done (Recent)
 
 - `DESIGN-CHUNK-PLAN-01` / `Done` / `chunks.md` 準拠で `design.md` 更新、`tasks.md` コンパクション、chunk実装WU分解を完了 / `docs/tasks_archive/2026-03-07-before-chunk-structuring.md`

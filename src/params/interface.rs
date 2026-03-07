@@ -4,14 +4,38 @@
 
 use bevy::asset::{AssetLoader, LoadContext, io::Reader};
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+use crate::params::color_serde::{
+    Rgba8Color, RgbaColor, deserialize_rgba_color_from_ron, deserialize_u8_color_from_ron,
+};
+
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct UiColor {
     pub r: f32,
     pub g: f32,
     pub b: f32,
     pub a: f32,
+}
+
+impl From<RgbaColor> for UiColor {
+    fn from(color: RgbaColor) -> Self {
+        Self {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: color.a,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UiColor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(deserialize_rgba_color_from_ron(deserializer)?.into())
+    }
 }
 
 impl UiColor {
@@ -20,12 +44,32 @@ impl UiColor {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize)]
 pub struct UiColor8 {
     pub r: u8,
     pub g: u8,
     pub b: u8,
     pub a: u8,
+}
+
+impl From<Rgba8Color> for UiColor8 {
+    fn from(color: Rgba8Color) -> Self {
+        Self {
+            r: color.r,
+            g: color.g,
+            b: color.b,
+            a: color.a,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UiColor8 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(deserialize_u8_color_from_ron(deserializer)?.into())
+    }
 }
 
 impl UiColor8 {

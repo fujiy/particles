@@ -208,7 +208,9 @@ impl Node for MpmComputeNode {
                 .params
                 .chunk_node_dim
                 .saturating_mul(params_req.params.chunk_node_dim);
-            let total_nodes = buffers.terrain_update_slot_count.saturating_mul(nodes_per_chunk);
+            let total_nodes = buffers
+                .terrain_update_slot_count
+                .saturating_mul(nodes_per_chunk);
             let terrain_update_wgs = (total_nodes + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
             if terrain_update_wgs > 0 {
                 let mut pass =
@@ -1053,9 +1055,9 @@ impl Node for MpmComputeNode {
                     }
                 }
                 if should_step && can_copy_chunk_events {
-                    let chunk_event_record_bytes =
-                        super::gpu_resources::MAX_CHUNK_EVENT_RECORDS as u64
-                            * size_of::<super::buffers::GpuChunkEventRecord>() as u64;
+                    let chunk_event_record_bytes = super::gpu_resources::MAX_CHUNK_EVENT_RECORDS
+                        as u64
+                        * size_of::<super::buffers::GpuChunkEventRecord>() as u64;
                     render_context.command_encoder().copy_buffer_to_buffer(
                         &buffers.chunk_event_count_buf,
                         0,

@@ -1147,11 +1147,15 @@ fn run_mpm_autoverify(
         chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
         runtime_rebuild_count: chunk_residency.runtime_rebuild_count,
         runtime_rebuild_reason_empty_state: chunk_residency.runtime_rebuild_reason_empty_state,
-        runtime_rebuild_reason_invalid_old_slot: chunk_residency.runtime_rebuild_reason_invalid_old_slot,
+        runtime_rebuild_reason_invalid_old_slot: chunk_residency
+            .runtime_rebuild_reason_invalid_old_slot,
         runtime_rebuild_reason_new_chunk_oob: chunk_residency.runtime_rebuild_reason_new_chunk_oob,
-        runtime_rebuild_reason_old_slot_empty: chunk_residency.runtime_rebuild_reason_old_slot_empty,
-        runtime_rebuild_reason_halo_update_fail: chunk_residency.runtime_rebuild_reason_halo_update_fail,
-        runtime_rebuild_waiting_readback_count: chunk_residency.runtime_rebuild_waiting_readback_count,
+        runtime_rebuild_reason_old_slot_empty: chunk_residency
+            .runtime_rebuild_reason_old_slot_empty,
+        runtime_rebuild_reason_halo_update_fail: chunk_residency
+            .runtime_rebuild_reason_halo_update_fail,
+        runtime_rebuild_waiting_readback_count: chunk_residency
+            .runtime_rebuild_waiting_readback_count,
         pending_mover_apply: chunk_residency.pending_mover_apply,
         pending_mover_readback: chunk_residency.pending_mover_readback,
         failed_assertions,

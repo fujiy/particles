@@ -13,8 +13,7 @@ use super::buffers::{
 };
 use super::gpu_resources::{
     MAX_RESIDENT_CHUNK_SLOTS, MPM_CHUNK_NODE_DIM, MPM_CHUNK_NODES_PER_SLOT, MpmGpuControl,
-    MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest,
-    world_grid_layout,
+    MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest, world_grid_layout,
 };
 use super::phase::mpm_phase_id_for_particle;
 use super::readback::{
@@ -25,7 +24,9 @@ use crate::params::ActivePhysicsParams;
 use crate::physics::material::{ParticleMaterial, particle_properties};
 use crate::physics::state::{ReplayState, SimulationState};
 use crate::physics::world::constants::{CELL_SIZE_M, CHUNK_SIZE_I32};
-use crate::physics::world::terrain::{TerrainCell, TerrainWorld, cell_to_world_center, world_to_cell};
+use crate::physics::world::terrain::{
+    TerrainCell, TerrainWorld, cell_to_world_center, world_to_cell,
+};
 
 const CHUNK_HALO_RADIUS: i32 = 1;
 const MOORE_OFFSETS: [IVec2; 8] = [
@@ -552,8 +553,9 @@ pub fn prepare_terrain_upload(
             enqueue_terrain_slot_updates(&residency, &terrain, &dirty_slots, &mut upload);
             upload.last_uploaded_terrain_version = Some(terrain_version);
             if !dirty_slots.is_empty() {
-                residency.chunk_sdf_samples =
-                    residency.resident_chunk_count.saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
+                residency.chunk_sdf_samples = residency
+                    .resident_chunk_count
+                    .saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
             }
         }
         return;
@@ -688,7 +690,9 @@ pub fn prepare_terrain_upload(
         .slot_state
         .iter()
         .enumerate()
-        .filter(|(idx, slot)| residency.slot_allocated.get(*idx).copied().unwrap_or(false) && slot.resident)
+        .filter(|(idx, slot)| {
+            residency.slot_allocated.get(*idx).copied().unwrap_or(false) && slot.resident
+        })
         .count() as u32;
     residency.chunk_sdf_samples = residency
         .resident_chunk_count
@@ -891,7 +895,6 @@ pub fn apply_gpu_readback(
         residency.invalid_slot_access_count = residency
             .invalid_slot_access_count
             .saturating_add(invalid_particles);
-
     }
 
     let frame = GPU_READBACK_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -969,7 +972,10 @@ pub fn apply_chunk_event_readback(
     let Some(events) = chunk_event_readback.take() else {
         return;
     };
-    if !residency.initialized || residency.slot_state.is_empty() || residency.chunk_meta_cache.is_empty() {
+    if !residency.initialized
+        || residency.slot_state.is_empty()
+        || residency.chunk_meta_cache.is_empty()
+    {
         return;
     }
     if events.is_empty() {
@@ -1062,8 +1068,11 @@ pub fn apply_chunk_event_readback(
 
     let changed_resident_slots = recompute_resident_flags(&mut residency.slot_state);
     if !changed_resident_slots.is_empty() {
-        let neighbor_dirty =
-            collect_neighbor_dirty_slots(&changed_resident_slots, &residency.slot_to_chunk, &residency.chunk_to_slot);
+        let neighbor_dirty = collect_neighbor_dirty_slots(
+            &changed_resident_slots,
+            &residency.slot_to_chunk,
+            &residency.chunk_to_slot,
+        );
         for slot_id in neighbor_dirty {
             if (slot_id as usize) < dirty.len() {
                 dirty[slot_id as usize] = true;
@@ -1076,7 +1085,9 @@ pub fn apply_chunk_event_readback(
         .slot_state
         .iter()
         .enumerate()
-        .filter(|(idx, slot)| residency.slot_allocated.get(*idx).copied().unwrap_or(false) && slot.resident)
+        .filter(|(idx, slot)| {
+            residency.slot_allocated.get(*idx).copied().unwrap_or(false) && slot.resident
+        })
         .count() as u32;
 
     upload.chunk_meta_diffs.clear();
@@ -1121,8 +1132,9 @@ pub fn apply_chunk_event_readback(
     if pool_changed && !newly_allocated_slots.is_empty() {
         let update_slots = collect_slots_with_neighbors(&residency, &newly_allocated_slots);
         enqueue_terrain_slot_updates(&residency, &terrain, &update_slots, &mut upload);
-        residency.chunk_sdf_samples =
-            residency.resident_chunk_count.saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
+        residency.chunk_sdf_samples = residency
+            .resident_chunk_count
+            .saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
     }
 }
 
@@ -1248,8 +1260,9 @@ pub fn apply_mover_readback(
         if !newly_allocated_slots.is_empty() {
             let update_slots = collect_slots_with_neighbors(&residency, &newly_allocated_slots);
             enqueue_terrain_slot_updates(&residency, &terrain, &update_slots, &mut upload);
-            residency.chunk_sdf_samples =
-                residency.resident_chunk_count.saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
+            residency.chunk_sdf_samples = residency
+                .resident_chunk_count
+                .saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
         }
     }
 }
@@ -1402,7 +1415,8 @@ fn rebuild_halo_ref_counts(
                 let neighbor = center_chunk + IVec2::new(ox, oy);
                 if let Some(neighbor_slot) = chunk_to_slot.get(&neighbor).copied() {
                     if let Some(neighbor_state) = slot_state.get_mut(neighbor_slot as usize) {
-                        neighbor_state.halo_ref_count = neighbor_state.halo_ref_count.saturating_add(1);
+                        neighbor_state.halo_ref_count =
+                            neighbor_state.halo_ref_count.saturating_add(1);
                     }
                 } else {
                     missing_neighbors = missing_neighbors.saturating_add(1);
@@ -1640,7 +1654,12 @@ fn ensure_halo_slots_for_occupied(
 ) -> Result<Vec<u32>, ()> {
     let mut occupied_chunks = Vec::new();
     for slot_id in 0..residency.slot_state.len() {
-        if !residency.slot_allocated.get(slot_id).copied().unwrap_or(false) {
+        if !residency
+            .slot_allocated
+            .get(slot_id)
+            .copied()
+            .unwrap_or(false)
+        {
             continue;
         }
         if residency.slot_state[slot_id].occupied_particle_count == 0 {
@@ -1681,7 +1700,12 @@ fn ensure_halo_slots_for_occupied(
 fn release_free_slots(residency: &mut MpmChunkResidencyState, dirty: &mut [bool]) -> bool {
     let mut to_free = Vec::new();
     for slot_id in 0..residency.slot_state.len() {
-        if !residency.slot_allocated.get(slot_id).copied().unwrap_or(false) {
+        if !residency
+            .slot_allocated
+            .get(slot_id)
+            .copied()
+            .unwrap_or(false)
+        {
             continue;
         }
         let slot = &residency.slot_state[slot_id];
@@ -1724,7 +1748,10 @@ fn collect_allocated_slots(residency: &MpmChunkResidencyState) -> Vec<u32> {
     slots
 }
 
-fn collect_slots_with_neighbors(residency: &MpmChunkResidencyState, seed_slots: &[u32]) -> Vec<u32> {
+fn collect_slots_with_neighbors(
+    residency: &MpmChunkResidencyState,
+    seed_slots: &[u32],
+) -> Vec<u32> {
     let mut slots = HashSet::<u32>::default();
     for &slot_id in seed_slots {
         let idx = slot_id as usize;
@@ -1813,7 +1840,8 @@ fn enqueue_terrain_slot_updates(
     merged_slots.extend_from_slice(slot_ids);
     merged_slots.sort_unstable();
     merged_slots.dedup();
-    let (ordered_slots, cell_solid) = build_terrain_cells_for_slots(residency, terrain, &merged_slots);
+    let (ordered_slots, cell_solid) =
+        build_terrain_cells_for_slots(residency, terrain, &merged_slots);
     if ordered_slots.is_empty() {
         return;
     }
