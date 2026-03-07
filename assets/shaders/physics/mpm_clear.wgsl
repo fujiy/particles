@@ -1,7 +1,7 @@
 // Grid clear pass: zero out all active grid nodes.
 // One thread per grid node.
 
-#import particles::mpm_types::{GpuGridNode, MpmParams, node_in_bounds}
+#import particles::mpm_types::{GpuGridNode, MpmParams, node_capacity}
 
 @group(0) @binding(0) var<uniform> params: MpmParams;
 @group(0) @binding(1) var<storage, read_write> grid: array<GpuGridNode>;
@@ -9,7 +9,7 @@
 @compute @workgroup_size(64)
 fn clear_grid(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
-    let total = params.grid_width * params.grid_height;
+    let total = node_capacity(params);
     if idx >= total {
         return;
     }

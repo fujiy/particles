@@ -142,20 +142,54 @@ fn bspline_w_dw(dist: f32) -> vec2<f32> {
     return vec2<f32>(0.0, 0.0);
 }
 
-// Node flat index from grid coordinates.
-fn node_index(gx: i32, gy: i32, params: MpmParams) -> u32 {
-    let lx = gx - params.grid_origin_x;
-    let ly = gy - params.grid_origin_y;
-    return u32(ly) * params.grid_width + u32(lx);
+// Resident node capacity in slot-major layout.
+fn node_capacity(params: MpmParams) -> u32 {
+    let nodes_per_chunk = params.chunk_node_dim * params.chunk_node_dim;
+    return params.resident_chunk_count * nodes_per_chunk;
 }
 
-// Check if grid coordinate is within bounds.
+fn chunk_node_dim_i(params: MpmParams) -> i32 {
+    return i32(params.chunk_node_dim);
+}
+
+fn node_origin_from_chunks(params: MpmParams) -> vec2<i32> {
+    let cdim = chunk_node_dim_i(params);
+    return vec2<i32>(params.chunk_origin_x * cdim, params.chunk_origin_y * cdim);
+}
+
+fn node_extent_from_chunks(params: MpmParams) -> vec2<i32> {
+    let cdim = chunk_node_dim_i(params);
+    return vec2<i32>(i32(params.chunk_dims_x) * cdim, i32(params.chunk_dims_y) * cdim);
+}
+
+// Check if global node coordinate is within resident chunk bounds.
 fn node_in_bounds(gx: i32, gy: i32, params: MpmParams) -> bool {
-    let lx = gx - params.grid_origin_x;
-    let ly = gy - params.grid_origin_y;
-    return lx >= 0 && ly >= 0
-        && u32(lx) < params.grid_width
-        && u32(ly) < params.grid_height;
+    if params.chunk_node_dim == 0u || params.chunk_dims_x == 0u || params.chunk_dims_y == 0u {
+        return false;
+    }
+    let origin = node_origin_from_chunks(params);
+    let extent = node_extent_from_chunks(params);
+    let lx = gx - origin.x;
+    let ly = gy - origin.y;
+    return lx >= 0 && ly >= 0 && lx < extent.x && ly < extent.y;
+}
+
+// Node flat index from global node coordinates.
+// Slot-major layout: slot_id * (chunk_node_dim^2) + local_node_index.
+fn node_index(gx: i32, gy: i32, params: MpmParams) -> u32 {
+    let cdim = chunk_node_dim_i(params);
+    let origin = node_origin_from_chunks(params);
+    let lx = gx - origin.x;
+    let ly = gy - origin.y;
+
+    let chunk_lx = u32(lx / cdim);
+    let chunk_ly = u32(ly / cdim);
+    let local_x = u32(lx - i32(chunk_lx) * cdim);
+    let local_y = u32(ly - i32(chunk_ly) * cdim);
+
+    let slot_id = chunk_ly * params.chunk_dims_x + chunk_lx;
+    let nodes_per_chunk = params.chunk_node_dim * params.chunk_node_dim;
+    return slot_id * nodes_per_chunk + local_y * params.chunk_node_dim + local_x;
 }
 
 // Determinant of a 2x2 matrix stored as (m00, m01, m10, m11).

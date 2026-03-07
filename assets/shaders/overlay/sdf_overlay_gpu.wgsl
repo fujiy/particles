@@ -39,15 +39,29 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    if params.grid_width == 0u || params.grid_height == 0u {
+    if params.grid_width == 0u
+        || params.grid_height == 0u
+        || params.chunk_node_dim == 0u
+        || params.chunk_dims_x == 0u
+        || params.chunk_dims_y == 0u
+    {
         discard;
     }
 
     let grid_w_f = f32(params.grid_width);
     let grid_h_f = f32(params.grid_height);
-    let gx = u32(clamp(round(in.local_uv.x * max(grid_w_f - 1.0, 0.0)), 0.0, grid_w_f - 1.0));
-    let gy = u32(clamp(round(in.local_uv.y * max(grid_h_f - 1.0, 0.0)), 0.0, grid_h_f - 1.0));
-    let idx = gy * params.grid_width + gx;
+    let gx_local =
+        u32(clamp(round(in.local_uv.x * max(grid_w_f - 1.0, 0.0)), 0.0, grid_w_f - 1.0));
+    let gy_local =
+        u32(clamp(round(in.local_uv.y * max(grid_h_f - 1.0, 0.0)), 0.0, grid_h_f - 1.0));
+    let cdim = params.chunk_node_dim;
+    let chunk_lx = gx_local / cdim;
+    let chunk_ly = gy_local / cdim;
+    let local_x = gx_local - chunk_lx * cdim;
+    let local_y = gy_local - chunk_ly * cdim;
+    let slot_id = chunk_ly * params.chunk_dims_x + chunk_lx;
+    let nodes_per_chunk = cdim * cdim;
+    let idx = slot_id * nodes_per_chunk + local_y * cdim + local_x;
 
     let sdf = terrain_sdf[idx];
     let range_m = max(params.h * 6.0, 1.0e-4);

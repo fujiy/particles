@@ -1,7 +1,7 @@
 // Grid update pass: convert momentum to velocity, apply gravity and terrain boundary.
 // One thread per grid node.
 
-#import particles::mpm_types::{GpuGridNode, MpmParams}
+#import particles::mpm_types::{GpuGridNode, MpmParams, node_capacity, node_index}
 
 @group(0) @binding(0) var<uniform> params: MpmParams;
 @group(0) @binding(1) var<storage, read_write> grid: array<GpuGridNode>;
@@ -63,14 +63,28 @@ fn granular_phi(idx: u32, params: MpmParams) -> f32 {
     return mg / max(params.rho_ref * params.h * params.h, 1.0e-8);
 }
 
-fn node_idx_from_xy(x: i32, y: i32, params: MpmParams) -> u32 {
-    return u32(y) * params.grid_width + u32(x);
+fn node_coord_from_slot_index(idx: u32, params: MpmParams) -> vec2<i32> {
+    let cdim = params.chunk_node_dim;
+    let nodes_per_chunk = cdim * cdim;
+    let chunk_slot = idx / nodes_per_chunk;
+    let local_idx = idx - chunk_slot * nodes_per_chunk;
+
+    let local_x = i32(local_idx % cdim);
+    let local_y = i32(local_idx / cdim);
+    let chunk_lx = i32(chunk_slot % params.chunk_dims_x);
+    let chunk_ly = i32(chunk_slot / params.chunk_dims_x);
+    let cdim_i = i32(cdim);
+
+    return vec2<i32>(
+        (params.chunk_origin_x + chunk_lx) * cdim_i + local_x,
+        (params.chunk_origin_y + chunk_ly) * cdim_i + local_y,
+    );
 }
 
 @compute @workgroup_size(64)
 fn grid_update(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
-    let total = params.grid_width * params.grid_height;
+    let total = node_capacity(params);
     if idx >= total {
         return;
     }
@@ -118,17 +132,22 @@ fn grid_update(@builtin(global_invocation_id) gid: vec3<u32>) {
         vg -= j_drag / mg;
 
         // 2) Interface normal from granular fill gradient [Eq.41].
-        let x = i32(idx % params.grid_width);
-        let y = i32(idx / params.grid_width);
-        let x_l = max(x - 1, 0);
-        let x_r = min(x + 1, i32(params.grid_width) - 1);
-        let y_d = max(y - 1, 0);
-        let y_u = min(y + 1, i32(params.grid_height) - 1);
+        let node = node_coord_from_slot_index(idx, params);
+        let cdim_i = i32(params.chunk_node_dim);
+        let min_node = vec2<i32>(params.chunk_origin_x * cdim_i, params.chunk_origin_y * cdim_i);
+        let max_node = min_node + vec2<i32>(
+            i32(params.chunk_dims_x) * cdim_i - 1,
+            i32(params.chunk_dims_y) * cdim_i - 1,
+        );
+        let x_l = max(node.x - 1, min_node.x);
+        let x_r = min(node.x + 1, max_node.x);
+        let y_d = max(node.y - 1, min_node.y);
+        let y_u = min(node.y + 1, max_node.y);
 
-        let phi_l = granular_phi(node_idx_from_xy(x_l, y, params), params);
-        let phi_r = granular_phi(node_idx_from_xy(x_r, y, params), params);
-        let phi_d = granular_phi(node_idx_from_xy(x, y_d, params), params);
-        let phi_u = granular_phi(node_idx_from_xy(x, y_u, params), params);
+        let phi_l = granular_phi(node_index(x_l, node.y, params), params);
+        let phi_r = granular_phi(node_index(x_r, node.y, params), params);
+        let phi_d = granular_phi(node_index(node.x, y_d, params), params);
+        let phi_u = granular_phi(node_index(node.x, y_u, params), params);
 
         let grad_phi = vec2<f32>(
             (phi_r - phi_l) / max(2.0 * params.h, 1.0e-6),

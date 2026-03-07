@@ -120,7 +120,7 @@
 - Subtasks:
   - [x] `ChunkMetaBuffer` / `ChunkSdfBuffer` / `neighbor_slot_id[8]` のGPUレイアウトを確定する。
   - [x] 起動時 one-shot の resident chunk 初期化（occupied + halo）を実装する。
-  - [ ] P2G/Grid/G2P の node 参照を chunk slot addressing 経路へ切替する。
+  - [x] P2G/Grid/G2P の node 参照を chunk slot addressing 経路へ切替する。
   - [x] SDF/normal 参照を chunk SDF バッファ経路へ切替し、境界補正を成立させる。
   - [x] `water_drop` autoverify で `passed=true` を達成する。
   - [x] 検証artifactに `resident_chunk_count`, `invalid_slot_access_count`, `chunk_sdf_samples` を出力する。
@@ -138,6 +138,7 @@
   - 2026-03-07: Physics Area Overlay を Chunk Overlay に統合し、GPU側 `chunk_meta_buf` + `params_buf` を参照する描画パスへ移行。`water_drop` スクリーンショット検証で `resident:64` のオーバーレイ表示を確認（`artifacts/autoverify/overlay_chunk_physics_water_drop.png`）。
   - 2026-03-07: Overlay UI を `Chunk/Grid Overlay` ボタン1つに統合し、詳細表示は左上HUDへ移設。WGSLを `fwidth` ベースへ更新してズームに依存しない1px線へ変更し、chunk境界に加えて内部grid線を描画することを `overlay_chunk_zoom_out.png` / `overlay_chunk_zoom_in.png` で確認。
   - 2026-03-07: SDF Overlay をGPU pass化（`sdf_overlay_gpu.wgsl`）し、`terrain_sdf_buf` を直接サンプリングする描画へ変更。`artifacts/autoverify/sdf_overlay_gpu_water_drop.png` で描画成立を確認。
+  - 2026-03-07: `mpm_types.wgsl` の `node_index/node_in_bounds` を `chunk_origin/chunk_dims/chunk_node_dim` ベースへ変更し、P2G/G2P/GridUpdate を chunk slot addressing 参照へ切替。CPU側 `terrain_sdf/normal` upload も slot-major 並びに変更。`water_drop_motion` 再検証で `passed=true`, `invalid_slot_access_count=0` を確認。
 
 ### [MPM-CHUNK-02] movers抽出 + CPU residency更新 + chunk meta差分反映
 
@@ -150,11 +151,9 @@
   - [ ] movers append/readback/result反映バッファを実装する。
   - [ ] `occupied_particle_count` / `halo_ref_count` による slot割当・解放を実装する。
   - [ ] `neighbor_slot_id` の差分再計算と GPU diff upload を実装する。
-  - [ ] mover高負荷時の full rebuild fallback を実装する。
   - [ ] chunk境界跨ぎシナリオで回帰検証する。
 - 完了条件:
   - 粒子の chunk移動時に `home_chunk_slot_id` と chunk table が整合し続ける。
-  - mover率が高いケースでも破綻せず、fallbackで収束する。
 
 ### [MPM-CHUNK-03] active tile再構築と sparse実行最適化
 

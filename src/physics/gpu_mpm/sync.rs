@@ -928,12 +928,22 @@ fn build_static_chunk_upload(
     let node_count = grid_layout.node_count();
     let mut terrain_sdf = vec![TERRAIN_SDF_DISABLED_DISTANCE_M; node_count];
     let mut terrain_normal = vec![[0.0_f32, 1.0_f32]; node_count];
+    let chunk_node_dim_u = MPM_CHUNK_NODE_DIM as usize;
+    let nodes_per_chunk = chunk_node_dim_u * chunk_node_dim_u;
+    let chunk_dims_x = chunk_dims.x as usize;
     for y in 0..grid_layout.dims.y {
         for x in 0..grid_layout.dims.x {
             let node = IVec2::new(grid_layout.origin.x + x as i32, grid_layout.origin.y + y as i32);
             let world_pos = Vec2::new(node.x as f32 * CELL_SIZE_M, node.y as f32 * CELL_SIZE_M);
             if let Some((sdf, normal)) = terrain.sample_signed_distance_and_normal(world_pos) {
-                let idx = (y as usize) * (grid_layout.dims.x as usize) + x as usize;
+                let x_u = x as usize;
+                let y_u = y as usize;
+                let chunk_lx = x_u / chunk_node_dim_u;
+                let chunk_ly = y_u / chunk_node_dim_u;
+                let local_x = x_u % chunk_node_dim_u;
+                let local_y = y_u % chunk_node_dim_u;
+                let slot_id = chunk_ly * chunk_dims_x + chunk_lx;
+                let idx = slot_id * nodes_per_chunk + local_y * chunk_node_dim_u + local_x;
                 terrain_sdf[idx] = sdf;
                 let n = normal.normalize_or_zero();
                 terrain_normal[idx] = if n == Vec2::ZERO {
