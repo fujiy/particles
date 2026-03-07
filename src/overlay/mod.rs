@@ -189,9 +189,9 @@ impl Default for SdfOverlayState {
 
 use ui::{
     apply_overlay_ui_params, handle_particle_overlay_button, handle_sdf_overlay_button,
-    handle_tile_overlay_button, setup_overlay_ui,
-    sync_overlay_button_backgrounds, update_particle_overlay_button_label,
-    update_sdf_overlay_button_label, update_tile_overlay_button_label,
+    handle_tile_overlay_button, setup_overlay_ui, sync_overlay_button_backgrounds,
+    update_particle_overlay_button_label, update_sdf_overlay_button_label,
+    update_tile_overlay_button_label,
 };
 
 impl ExtractResource for ParticleOverlayState {

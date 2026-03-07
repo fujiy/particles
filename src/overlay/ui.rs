@@ -72,7 +72,6 @@ pub(super) fn setup_overlay_ui(mut commands: Commands, overlay_params: Res<Activ
                 ParticleOverlayToggleButtonLabel,
             ));
         });
-
 }
 
 pub(super) fn apply_overlay_ui_params(

@@ -148,7 +148,9 @@ pub(super) fn prepare_sdf_overlay_gpu_pipeline(
                 sample_count: msaa.map_or(1, Msaa::samples),
             },
         );
-        commands.entity(entity).insert(ViewSdfOverlayGpuPipeline { id });
+        commands
+            .entity(entity)
+            .insert(ViewSdfOverlayGpuPipeline { id });
     }
 }
 

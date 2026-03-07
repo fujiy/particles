@@ -644,7 +644,11 @@ pub(super) fn update_simulation_hud(
         grid_cells.y,
         loaded_chunks,
         modified_chunks,
-        if sdf_overlay_state.enabled { "ON" } else { "OFF" },
+        if sdf_overlay_state.enabled {
+            "ON"
+        } else {
+            "OFF"
+        },
     );
 }
 

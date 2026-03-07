@@ -191,10 +191,8 @@ impl FromWorld for MpmComputePipelines {
                 binding_types::storage_buffer_sized(false, None),
             ),
         );
-        let extract_movers_layout = render_device.create_bind_group_layout(
-            "mpm_extract_movers_layout",
-            &*extract_movers_entries,
-        );
+        let extract_movers_layout = render_device
+            .create_bind_group_layout("mpm_extract_movers_layout", &*extract_movers_entries);
         let extract_movers_pipeline =
             pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
                 label: Some("mpm_extract_movers".into()),
