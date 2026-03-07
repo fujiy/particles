@@ -82,10 +82,11 @@
 - 地形境界参照のため、slot ごとに `ChunkSdfBuffer`（`phi`, `normal`）を保持する。
 - v1 では以下を明確に分ける。
   - **occupied chunk**: `home` 粒子が1つ以上存在する chunk
-  - **resident chunk**: occupied chunk 本体と、その stencil/更新に必要な近傍を含む、GPU 上に確保された chunk
+  - **resident chunk**: occupied chunk 本体と、その Moore 近傍 8 chunk（3x3）を含む、GPU 上に確保された chunk
 - resident chunk の確保・解放は CPU が保持する `chunk_coord -> slot_id` 台帳で管理する。
+- slot table / `neighbor_slot_id` 差分の GPU 反映は非同期で扱い、通常ステップを同期停止させない。
 - 導入初段（`MPM-CHUNK-01`）では resident chunk を起動時に one-shot 構築し、実行中は固定する。
-- 次段（`MPM-CHUNK-02` 以降）で movers を使った incremental 更新へ移行する。
+- 次段（`MPM-CHUNK-02` 以降）で occupancy/residency change event を使った incremental 更新へ移行する。
 - 詳細アルゴリズムとバッファ構成は `docs/chunks.md` を参照する。
 
 ### 4.4 Active Tile Metadata
@@ -131,19 +132,20 @@
 
 - `FixedUpdate` で基準刻み `dt_frame` を進める。
 - 1 step の実行順は以下を既定とする。
-  1. `Mover Extract`: 粒子ごとに world chunk 座標を再評価し、chunk 境界を跨いだ粒子だけを `movers` に追加する
-  2. `Chunk Residency Update`: CPU 側で `chunk_coord -> slot_id` 台帳を更新し、必要な resident chunk の追加/解放と近傍 slot 情報を反映する
-  3. `Active Tile Build`: GPU 上で active tile mask を再構築する
-  4. `Active Tile Clear`: active tile に対応する grid ノードだけを clear する
-  5. `P2G`: 粒子質量・運動量・応力寄与を格子へ転送する
-  6. `Grid Update`: 外力・内部力・境界条件・材料間連成を適用して node 速度を更新する
-  7. `G2P`: 格子速度から粒子速度・位置・`C_p`・`F_p` を更新する
-  8. `Post Process`: 保存量と監視量を集計する
+  1. `Home Chunk Update`: 粒子ごとに world chunk 座標を再評価し、隣接移動は GPU 内で `home_chunk_slot_id` を更新する
+  2. `Occupancy Event Extract`: GPU で `newly occupied` / `newly empty` / `frontier expansion request` / `exceptional mover` を抽出する
+  3. `Chunk Residency Update`: CPU 側で `chunk_coord -> slot_id` 台帳を更新し、resident 追加/解放と近傍 slot 情報差分を反映する（exceptional mover の slot 解決は必要時のみ）
+  4. `Active Tile Build`: GPU 上で active tile mask を再構築する
+  5. `Active Tile Clear`: active tile に対応する grid ノードだけを clear する
+  6. `P2G`: 粒子質量・運動量・応力寄与を格子へ転送する
+  7. `Grid Update`: 外力・内部力・境界条件・材料間連成を適用して node 速度を更新する
+  8. `G2P`: 格子速度から粒子速度・位置・`C_p`・`F_p` を更新する
+  9. `Post Process`: 保存量と監視量を集計する
 - 段階導入ポリシー:
-  - **Stage A（chunk導入初段）**: `Mover Extract` と `Chunk Residency Update` をスキップし、起動時に作った固定resident集合を使う。
-  - **Stage B（incremental化）**: 全ステップを有効化し、movers readback + CPU台帳更新 + chunk meta差分反映を行う。
+  - **Stage A（chunk導入初段）**: `Home Chunk Update` と `Chunk Residency Update` をスキップし、起動時に作った固定resident集合を使う。
+  - **Stage B（incremental化）**: occupancy/residency event readback + CPU台帳更新 + chunk meta差分反映を行う。
 - v1 の steady-state は incremental chunk 管理を前提にし、毎フレーム full sort / unique を要求しない。
-- mover 率が極端に高いフレームでは full rebuild を fallback として許容するが、通常経路の正しさ条件ではない。
+- frontier 変化や exceptional mover が極端に増えたフレームでは full rebuild を fallback として許容するが、通常経路の正しさ条件ではない。
 
 ### 6.2 水の構成則
 
@@ -207,7 +209,8 @@
 
 - 粒子/格子バッファは GPU 常駐とし、毎ステップ全量 readback しない。
 - CPU へ戻すのは以下に限定する。
-  - `movers` のような低カードinalityな chunk residency 更新情報
+  - occupancy/residency change の低カードinalityイベント
+  - exceptional mover（8近傍外移動）情報
   - 最小限の統計量とデバッグ用途データ
 - 1 step は GPU compute pass を中心に連続実行する。
 - v1 の常用経路では、粒子を chunk 順に全量ソートすることを前提にしない。
@@ -327,6 +330,7 @@
   - 総質量誤差
   - 総運動量誤差
   - 最大 CFL 比
-  - mover 数 / resident chunk 数 / active tile 数
+  - resident chunk 数 / active tile 数
+  - newly occupied / newly empty / frontier expansion request / exceptional mover 数
   - step wall/cpu
-  - GPU pass 別時間（mover-extract / active-build / p2g / grid / g2p / render）
+  - GPU pass 別時間（home-chunk-update / occupancy-event-extract / active-build / p2g / grid / g2p / render）
