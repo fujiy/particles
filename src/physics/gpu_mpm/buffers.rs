@@ -12,7 +12,7 @@ pub const INVALID_CHUNK_SLOT_ID: u32 = u32::MAX;
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Pod, Zeroable)]
 pub struct GpuChunkMeta {
     pub chunk_coord_x: i32,
     pub chunk_coord_y: i32,

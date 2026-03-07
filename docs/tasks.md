@@ -142,18 +142,23 @@
 
 ### [MPM-CHUNK-02] movers抽出 + CPU residency更新 + chunk meta差分反映
 
-- Status: `Planned`
+- Status: `In Progress`
 - 背景:
   - `MPM-CHUNK-01` は静的residencyであり、chunk跨ぎ移動が増えるケースでは成立しない。
 - スコープ:
   - GPU movers抽出、CPU側 `chunk_coord -> slot_id` 更新、GPU差分反映を incremental に導入する。
 - Subtasks:
-  - [ ] movers append/readback/result反映バッファを実装する。
-  - [ ] `occupied_particle_count` / `halo_ref_count` による slot割当・解放を実装する。
-  - [ ] `neighbor_slot_id` の差分再計算と GPU diff upload を実装する。
-  - [ ] chunk境界跨ぎシナリオで回帰検証する。
+  - [x] movers append/readback/result反映バッファを実装する。
+  - [x] `occupied_particle_count` / `halo_ref_count` による slot割当・解放を実装する。
+  - [x] `neighbor_slot_id` の差分再計算と GPU diff upload を実装する。
+  - [x] chunk境界跨ぎシナリオで回帰検証する。
 - 完了条件:
   - 粒子の chunk移動時に `home_chunk_slot_id` と chunk table が整合し続ける。
+- 進捗:
+  - 2026-03-07: mover 抽出/読出/結果反映パス（`mpm_extract_movers` / `mpm_apply_mover_results`）を追加し、GPU→CPU readback と CPU→GPU 反映バッファを導入。
+  - 2026-03-07: CPU 側に `occupied_particle_count` / `halo_ref_count` を持つ slot 台帳を追加。mover 差分から occupied 0↔1 遷移を更新し、resident slot を incremental に維持。
+  - 2026-03-07: `neighbor_slot_id` を resident 変化 slot + Moore近傍で再計算し、`chunk_meta` 差分 upload（多件時は全量 upload fallback）を実装。
+  - 2026-03-07: `water_drop_motion` と `sand_water_interaction_drop` の autoverify を実行し、いずれも `passed=true` / `invalid_slot_access_count=0` を確認。
 
 ### [MPM-CHUNK-03] active tile再構築と sparse実行最適化
 
@@ -243,3 +248,4 @@
 - Render 側地形キャッシュ（Near/override）と MPM用 chunk SDF の更新順序を明文化し、同一フレーム整合を保証する必要がある。
 - mover率が高いケースの fallback 切替閾値（`mover_count` ベース）を事前に決める必要がある。
 - `chunks.md` 目標では `CHUNK_NODE_SIZE=32`（`NODE_SPACING_M=0.125`）を前提としているが、現実装の solver 格子は `h=0.25` のため `MPM-CHUNK-01` では `chunk_node_dim=16` を採用している。`MPM-CHUNK-02` 着手前に解像度移行方針（`h` 引き下げ時の安定条件と閾値再設定）を決める必要がある。
+- `MPM-CHUNK-02` 現段は `chunk_origin/chunk_dims` に基づく固定 slot pool 上で resident on/off と diff upload を実装しており、free list を使った任意 slot 再配置（完全疎 slot addressing）は未導入。P2G/Grid/G2P を `home_chunk_slot_id + neighbor_slot_id` 参照へ完全移行する追加WUが必要。

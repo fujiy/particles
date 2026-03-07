@@ -274,6 +274,19 @@ impl MpmGpuBuffers {
         queue.write_buffer(&self.chunk_meta_buf, 0, cast_slice(chunks));
     }
 
+    pub fn upload_chunk_diffs(&self, queue: &RenderQueue, diffs: &[(u32, GpuChunkMeta)]) {
+        let chunk_meta_stride = size_of::<GpuChunkMeta>() as u64;
+        for &(slot_id, meta) in diffs {
+            assert!(slot_id < MAX_RESIDENT_CHUNK_SLOTS);
+            let offset = slot_id as u64 * chunk_meta_stride;
+            queue.write_buffer(
+                &self.chunk_meta_buf,
+                offset,
+                cast_slice(std::slice::from_ref(&meta)),
+            );
+        }
+    }
+
     pub fn upload_mover_results(&mut self, queue: &RenderQueue, results: &[GpuMoverResult]) {
         assert!(results.len() <= MAX_MOVER_RECORDS as usize);
         self.mover_result_count = results.len() as u32;
@@ -302,6 +315,8 @@ pub struct MpmGpuUploadRequest {
     pub upload_mover_results_frame: bool,
     /// If true, upload chunk metadata this frame.
     pub upload_chunks: bool,
+    /// If true, upload partial chunk metadata updates this frame.
+    pub upload_chunk_diffs: bool,
     /// If true, upload terrain SDF/normals this frame.
     pub upload_terrain: bool,
     /// Chunk metadata (slot-indexed contiguous resident set).
@@ -310,6 +325,8 @@ pub struct MpmGpuUploadRequest {
     pub particles: Vec<GpuParticle>,
     /// CPU→GPU mover results (`particle_id -> new_home_slot_id`).
     pub mover_results: Vec<GpuMoverResult>,
+    /// CPU→GPU chunk metadata diffs (`slot_id`, `meta`).
+    pub chunk_meta_diffs: Vec<(u32, GpuChunkMeta)>,
     /// Terrain SDF to upload (indexed by grid layout).
     pub terrain_sdf: Vec<f32>,
     /// Terrain normals to upload.

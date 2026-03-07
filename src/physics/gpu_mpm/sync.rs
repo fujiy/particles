@@ -24,21 +24,44 @@ use crate::physics::world::terrain::{TerrainWorld, cell_to_world_center, world_t
 
 const TERRAIN_SDF_DISABLED_DISTANCE_M: f32 = 1.0e6;
 const CHUNK_HALO_RADIUS: i32 = 2;
+const MOORE_OFFSETS: [IVec2; 8] = [
+    IVec2::new(-1, -1),
+    IVec2::new(0, -1),
+    IVec2::new(1, -1),
+    IVec2::new(-1, 0),
+    IVec2::new(1, 0),
+    IVec2::new(-1, 1),
+    IVec2::new(0, 1),
+    IVec2::new(1, 1),
+];
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ChunkSlotState {
+    occupied_particle_count: u32,
+    halo_ref_count: u32,
+    resident: bool,
+}
 
 #[derive(Resource, Debug, Default)]
 pub struct MpmReadbackSnapshot {
     pub particles: Vec<GpuParticle>,
 }
 
-#[derive(Resource, Debug, Clone, Copy)]
+#[derive(Resource, Debug, Clone)]
 pub struct MpmChunkResidencyState {
     pub initialized: bool,
     pub chunk_origin: IVec2,
     pub chunk_dims: UVec2,
     pub grid_layout: GpuGridLayout,
+    /// Slot-capacity count used by GPU kernels (`chunk_dims.x * chunk_dims.y`).
     pub resident_chunk_count: u32,
+    /// CPU-tracked number of currently resident slots.
+    pub active_resident_chunk_count: u32,
     pub chunk_sdf_samples: u32,
     pub invalid_slot_access_count: u64,
+    rebuild_requested: bool,
+    slot_state: Vec<ChunkSlotState>,
+    chunk_meta_cache: Vec<GpuChunkMeta>,
 }
 
 impl Default for MpmChunkResidencyState {
@@ -49,8 +72,12 @@ impl Default for MpmChunkResidencyState {
             chunk_dims: UVec2::ZERO,
             grid_layout: world_grid_layout(),
             resident_chunk_count: 0,
+            active_resident_chunk_count: 0,
             chunk_sdf_samples: 0,
             invalid_slot_access_count: 0,
+            rebuild_requested: false,
+            slot_state: Vec::new(),
+            chunk_meta_cache: Vec::new(),
         }
     }
 }
@@ -391,9 +418,11 @@ pub fn prepare_particle_upload(
         upload.upload_mover_results = false;
         upload.upload_mover_results_frame = false;
         upload.upload_chunks = false;
+        upload.upload_chunk_diffs = false;
         sim_state.gpu_mpm_active = false;
         upload.particles.clear();
         upload.mover_results.clear();
+        upload.chunk_meta_diffs.clear();
         return;
     }
     let upload_requested = upload.upload_particles;
@@ -424,17 +453,24 @@ pub fn prepare_terrain_upload(
 ) {
     // Default: no chunk/terrain upload this frame unless explicitly requested below.
     upload.upload_chunks = false;
+    upload.upload_chunk_diffs = false;
     upload.upload_terrain = false;
+    upload.chunk_meta_diffs.clear();
 
     if control.init_only {
         upload.chunk_meta.clear();
         upload.terrain_sdf.clear();
         upload.terrain_normal.clear();
         upload.last_uploaded_terrain_version = None;
+        upload.chunk_meta_diffs.clear();
         residency.initialized = false;
         residency.resident_chunk_count = 0;
+        residency.active_resident_chunk_count = 0;
         residency.chunk_sdf_samples = 0;
         residency.invalid_slot_access_count = 0;
+        residency.rebuild_requested = false;
+        residency.slot_state.clear();
+        residency.chunk_meta_cache.clear();
         return;
     }
     // When MLS-MPM stepping is disabled, terrain upload is unnecessary for overlay debug.
@@ -444,12 +480,13 @@ pub fn prepare_terrain_upload(
 
     // MPM-CHUNK-01: static residency.
     // Rebuild only on initial bring-up or explicit particle upload (scenario/reset/edit).
-    let should_rebuild = !residency.initialized || upload.upload_particles_frame;
+    let should_rebuild =
+        !residency.initialized || upload.upload_particles_frame || residency.rebuild_requested;
     if !should_rebuild {
         return;
     }
 
-    let particle_source = if !upload.particles.is_empty() {
+    let particle_source = if upload.upload_particles_frame && !upload.particles.is_empty() {
         upload.particles.as_slice()
     } else {
         readback_snapshot.particles.as_slice()
@@ -460,22 +497,40 @@ pub fn prepare_terrain_upload(
         upload.terrain_normal.clear();
         residency.initialized = false;
         residency.resident_chunk_count = 0;
+        residency.active_resident_chunk_count = 0;
         residency.chunk_sdf_samples = 0;
+        residency.rebuild_requested = false;
+        residency.slot_state.clear();
+        residency.chunk_meta_cache.clear();
         return;
     };
 
-    if !upload.particles.is_empty() {
+    if upload.upload_particles_frame && !upload.particles.is_empty() {
         let unresolved =
             assign_home_slot_ids(&mut upload.particles, build.chunk_origin, build.chunk_dims);
         if unresolved > 0 {
             bevy::log::warn!(
-                "[gpu_mpm] unresolved home slots during static residency rebuild: {}",
+                "[gpu_mpm] unresolved home slots during residency rebuild (upload): {}",
                 unresolved
             );
         }
+    } else {
+        let mut rebuilt_particles = particle_source.to_vec();
+        let unresolved =
+            assign_home_slot_ids(&mut rebuilt_particles, build.chunk_origin, build.chunk_dims);
+        if unresolved > 0 {
+            bevy::log::warn!(
+                "[gpu_mpm] unresolved home slots during residency rebuild (readback): {}",
+                unresolved
+            );
+        }
+        upload.particles = rebuilt_particles;
+        upload.upload_particles = false;
+        upload.upload_particles_frame = true;
     }
 
-    upload.chunk_meta = build.chunk_meta;
+    initialize_chunk_slot_state(&mut residency, upload.particles.as_slice());
+    upload.chunk_meta = residency.chunk_meta_cache.clone();
     upload.upload_chunks = true;
     upload.terrain_sdf = build.terrain_sdf;
     upload.terrain_normal = build.terrain_normal;
@@ -485,9 +540,18 @@ pub fn prepare_terrain_upload(
     residency.chunk_origin = build.chunk_origin;
     residency.chunk_dims = build.chunk_dims;
     residency.grid_layout = build.grid_layout;
-    residency.resident_chunk_count = residency.chunk_dims.x.saturating_mul(residency.chunk_dims.y);
+    residency.resident_chunk_count = residency
+        .chunk_dims
+        .x
+        .saturating_mul(residency.chunk_dims.y);
+    residency.active_resident_chunk_count = residency
+        .slot_state
+        .iter()
+        .filter(|slot| slot.resident)
+        .count() as u32;
     residency.chunk_sdf_samples = build.grid_layout.node_count() as u32;
     residency.invalid_slot_access_count = 0;
+    residency.rebuild_requested = false;
 }
 
 /// System: update MpmGpuParamsRequest from simulation state and PhysicsParams asset.
@@ -736,7 +800,7 @@ pub fn apply_statistics_readback(
 pub fn apply_mover_readback(
     control: Res<MpmGpuControl>,
     mover_readback: Res<GpuMoverReadbackResult>,
-    residency: Res<MpmChunkResidencyState>,
+    mut residency: ResMut<MpmChunkResidencyState>,
     mut upload: ResMut<MpmGpuUploadRequest>,
 ) {
     if control.init_only || !control.readback_enabled {
@@ -748,18 +812,56 @@ pub fn apply_mover_readback(
     if !residency.initialized {
         return;
     }
+    if residency.slot_state.is_empty() || residency.chunk_meta_cache.is_empty() {
+        residency.rebuild_requested = true;
+        return;
+    }
 
     upload.mover_results.clear();
+    upload.chunk_meta_diffs.clear();
+    upload.upload_chunk_diffs = false;
+
+    let mut rebuild_required = false;
+    let mut became_occupied = Vec::<u32>::new();
+    let mut became_empty = Vec::<u32>::new();
+
     for mover in movers {
+        let old_slot = mover.old_home_slot_id;
+        if old_slot == INVALID_CHUNK_SLOT_ID || old_slot as usize >= residency.slot_state.len() {
+            rebuild_required = true;
+            continue;
+        }
         let new_chunk = IVec2::new(mover.new_chunk_coord_x, mover.new_chunk_coord_y);
         let Some(new_slot) =
             slot_id_from_chunk_coord(new_chunk, residency.chunk_origin, residency.chunk_dims)
         else {
+            rebuild_required = true;
             continue;
         };
-        if new_slot == mover.old_home_slot_id {
+        if new_slot == old_slot {
             continue;
         }
+
+        let old_idx = old_slot as usize;
+        let new_idx = new_slot as usize;
+        if residency.slot_state[old_idx].occupied_particle_count == 0 {
+            rebuild_required = true;
+            continue;
+        }
+
+        residency.slot_state[old_idx].occupied_particle_count -= 1;
+        if residency.slot_state[old_idx].occupied_particle_count == 0 {
+            became_empty.push(old_slot);
+        }
+
+        let was_unoccupied = residency.slot_state[new_idx].occupied_particle_count == 0;
+        residency.slot_state[new_idx].occupied_particle_count = residency.slot_state[new_idx]
+            .occupied_particle_count
+            .saturating_add(1);
+        if was_unoccupied {
+            became_occupied.push(new_slot);
+        }
+
         upload.mover_results.push(GpuMoverResult {
             particle_id: mover.particle_id,
             new_home_slot_id: new_slot,
@@ -767,6 +869,80 @@ pub fn apply_mover_readback(
             _pad_b: 0,
         });
     }
+
+    let chunk_origin = residency.chunk_origin;
+    let chunk_dims = residency.chunk_dims;
+    for slot_id in became_occupied {
+        if !update_halo_ref_count(
+            &mut residency.slot_state,
+            slot_id,
+            chunk_origin,
+            chunk_dims,
+            1,
+        ) {
+            rebuild_required = true;
+        }
+    }
+    for slot_id in became_empty {
+        if !update_halo_ref_count(
+            &mut residency.slot_state,
+            slot_id,
+            chunk_origin,
+            chunk_dims,
+            -1,
+        ) {
+            rebuild_required = true;
+        }
+    }
+
+    if rebuild_required {
+        upload.mover_results.clear();
+        upload.upload_mover_results = false;
+        upload.chunk_meta_diffs.clear();
+        upload.upload_chunk_diffs = false;
+        residency.rebuild_requested = true;
+        return;
+    }
+
+    let changed_resident_slots = recompute_resident_flags(&mut residency.slot_state);
+    residency.active_resident_chunk_count = residency
+        .slot_state
+        .iter()
+        .filter(|slot| slot.resident)
+        .count() as u32;
+    if !changed_resident_slots.is_empty() {
+        let dirty_slots = collect_neighbor_dirty_slots(
+            &changed_resident_slots,
+            residency.chunk_origin,
+            residency.chunk_dims,
+        );
+        for slot_id in dirty_slots {
+            let meta = build_chunk_meta_for_slot(
+                slot_id,
+                residency.chunk_origin,
+                residency.chunk_dims,
+                &residency.slot_state,
+            );
+            let idx = slot_id as usize;
+            if residency.chunk_meta_cache[idx] != meta {
+                residency.chunk_meta_cache[idx] = meta;
+                upload.chunk_meta_diffs.push((slot_id, meta));
+            }
+        }
+    }
+
+    let slot_capacity = residency.resident_chunk_count.max(1);
+    if !upload.chunk_meta_diffs.is_empty()
+        && upload.chunk_meta_diffs.len() as u32 >= slot_capacity / 2
+    {
+        upload.chunk_meta = residency.chunk_meta_cache.clone();
+        upload.upload_chunks = true;
+        upload.upload_chunk_diffs = false;
+        upload.chunk_meta_diffs.clear();
+    } else {
+        upload.upload_chunk_diffs = !upload.chunk_meta_diffs.is_empty();
+    }
+
     upload.upload_mover_results = !upload.mover_results.is_empty();
 }
 
@@ -860,7 +1036,6 @@ struct StaticChunkUploadBuild {
     chunk_origin: IVec2,
     chunk_dims: UVec2,
     grid_layout: GpuGridLayout,
-    chunk_meta: Vec<GpuChunkMeta>,
     terrain_sdf: Vec<f32>,
     terrain_normal: Vec<[f32; 2]>,
 }
@@ -899,6 +1074,170 @@ fn assign_home_slot_ids(particles: &mut [GpuParticle], origin: IVec2, dims: UVec
         }
     }
     unresolved
+}
+
+fn slot_coord_from_slot_id(slot_id: u32, origin: IVec2, dims: UVec2) -> Option<IVec2> {
+    if dims.x == 0 || dims.y == 0 {
+        return None;
+    }
+    let total = dims.x.saturating_mul(dims.y);
+    if slot_id >= total {
+        return None;
+    }
+    let lx = (slot_id % dims.x) as i32;
+    let ly = (slot_id / dims.x) as i32;
+    Some(origin + IVec2::new(lx, ly))
+}
+
+fn update_halo_ref_count(
+    slot_state: &mut [ChunkSlotState],
+    center_slot_id: u32,
+    origin: IVec2,
+    dims: UVec2,
+    delta: i32,
+) -> bool {
+    let Some(center_chunk) = slot_coord_from_slot_id(center_slot_id, origin, dims) else {
+        return false;
+    };
+    let mut in_bounds = true;
+    for oy in -CHUNK_HALO_RADIUS..=CHUNK_HALO_RADIUS {
+        for ox in -CHUNK_HALO_RADIUS..=CHUNK_HALO_RADIUS {
+            let chunk = center_chunk + IVec2::new(ox, oy);
+            let Some(slot_id) = slot_id_from_chunk_coord(chunk, origin, dims) else {
+                in_bounds = false;
+                continue;
+            };
+            let slot = &mut slot_state[slot_id as usize];
+            if delta > 0 {
+                slot.halo_ref_count = slot.halo_ref_count.saturating_add(delta as u32);
+            } else if delta < 0 {
+                slot.halo_ref_count = slot.halo_ref_count.saturating_sub((-delta) as u32);
+            }
+        }
+    }
+    in_bounds
+}
+
+fn recompute_resident_flags(slot_state: &mut [ChunkSlotState]) -> Vec<u32> {
+    let mut changed = Vec::new();
+    for (slot_id, slot) in slot_state.iter_mut().enumerate() {
+        let resident = slot.occupied_particle_count > 0 || slot.halo_ref_count > 0;
+        if resident != slot.resident {
+            slot.resident = resident;
+            changed.push(slot_id as u32);
+        }
+    }
+    changed
+}
+
+fn collect_neighbor_dirty_slots(changed_slots: &[u32], origin: IVec2, dims: UVec2) -> Vec<u32> {
+    let mut dirty = vec![false; dims.x.saturating_mul(dims.y) as usize];
+    for &slot_id in changed_slots {
+        if slot_id as usize >= dirty.len() {
+            continue;
+        }
+        dirty[slot_id as usize] = true;
+        let Some(chunk) = slot_coord_from_slot_id(slot_id, origin, dims) else {
+            continue;
+        };
+        for offset in MOORE_OFFSETS {
+            let neighbor = chunk + offset;
+            let Some(neighbor_slot) = slot_id_from_chunk_coord(neighbor, origin, dims) else {
+                continue;
+            };
+            dirty[neighbor_slot as usize] = true;
+        }
+    }
+    dirty
+        .iter()
+        .enumerate()
+        .filter_map(|(slot_id, &is_dirty)| is_dirty.then_some(slot_id as u32))
+        .collect()
+}
+
+fn build_chunk_meta_for_slot(
+    slot_id: u32,
+    origin: IVec2,
+    dims: UVec2,
+    slot_state: &[ChunkSlotState],
+) -> GpuChunkMeta {
+    let mut meta = GpuChunkMeta::default();
+    let Some(chunk) = slot_coord_from_slot_id(slot_id, origin, dims) else {
+        return meta;
+    };
+    meta.chunk_coord_x = chunk.x;
+    meta.chunk_coord_y = chunk.y;
+    meta.active_tile_mask = 0;
+
+    if !slot_state
+        .get(slot_id as usize)
+        .map(|slot| slot.resident)
+        .unwrap_or(false)
+    {
+        return meta;
+    }
+
+    for (i, offset) in MOORE_OFFSETS.into_iter().enumerate() {
+        let neighbor_coord = chunk + offset;
+        let Some(neighbor_slot) = slot_id_from_chunk_coord(neighbor_coord, origin, dims) else {
+            meta.neighbor_slot_id[i] = INVALID_CHUNK_SLOT_ID;
+            continue;
+        };
+        meta.neighbor_slot_id[i] = if slot_state
+            .get(neighbor_slot as usize)
+            .map(|slot| slot.resident)
+            .unwrap_or(false)
+        {
+            neighbor_slot
+        } else {
+            INVALID_CHUNK_SLOT_ID
+        };
+    }
+
+    meta
+}
+
+fn initialize_chunk_slot_state(residency: &mut MpmChunkResidencyState, particles: &[GpuParticle]) {
+    let slot_count = residency
+        .chunk_dims
+        .x
+        .saturating_mul(residency.chunk_dims.y) as usize;
+    residency.slot_state = vec![ChunkSlotState::default(); slot_count];
+    for particle in particles {
+        let chunk = chunk_coord_from_world_pos(Vec2::from_array(particle.x));
+        let Some(slot_id) =
+            slot_id_from_chunk_coord(chunk, residency.chunk_origin, residency.chunk_dims)
+        else {
+            continue;
+        };
+        let slot = &mut residency.slot_state[slot_id as usize];
+        slot.occupied_particle_count = slot.occupied_particle_count.saturating_add(1);
+    }
+
+    for slot_id in 0..slot_count as u32 {
+        if residency.slot_state[slot_id as usize].occupied_particle_count > 0 {
+            let _ = update_halo_ref_count(
+                &mut residency.slot_state,
+                slot_id,
+                residency.chunk_origin,
+                residency.chunk_dims,
+                1,
+            );
+        }
+    }
+
+    let _ = recompute_resident_flags(&mut residency.slot_state);
+
+    residency.chunk_meta_cache = (0..slot_count as u32)
+        .map(|slot_id| {
+            build_chunk_meta_for_slot(
+                slot_id,
+                residency.chunk_origin,
+                residency.chunk_dims,
+                &residency.slot_state,
+            )
+        })
+        .collect();
 }
 
 fn build_static_chunk_upload(
@@ -955,39 +1294,12 @@ fn build_static_chunk_upload(
         return None;
     }
 
-    let mut chunk_meta = vec![GpuChunkMeta::default(); resident_chunk_count as usize];
-    let neighbor_offsets = [
-        IVec2::new(-1, -1),
-        IVec2::new(0, -1),
-        IVec2::new(1, -1),
-        IVec2::new(-1, 0),
-        IVec2::new(1, 0),
-        IVec2::new(-1, 1),
-        IVec2::new(0, 1),
-        IVec2::new(1, 1),
-    ];
-    for cy in min_chunk.y..=max_chunk.y {
-        for cx in min_chunk.x..=max_chunk.x {
-            let coord = IVec2::new(cx, cy);
-            let Some(slot_id) = slot_id_from_chunk_coord(coord, min_chunk, chunk_dims) else {
-                continue;
-            };
-            let meta = &mut chunk_meta[slot_id as usize];
-            meta.chunk_coord_x = cx;
-            meta.chunk_coord_y = cy;
-            meta.active_tile_mask = 0;
-            for (i, offset) in neighbor_offsets.into_iter().enumerate() {
-                let neighbor = coord + offset;
-                meta.neighbor_slot_id[i] =
-                    slot_id_from_chunk_coord(neighbor, min_chunk, chunk_dims)
-                        .unwrap_or(INVALID_CHUNK_SLOT_ID);
-            }
-        }
-    }
-
     let chunk_node_dim_i = MPM_CHUNK_NODE_DIM as i32;
     let grid_layout = GpuGridLayout {
-        origin: IVec2::new(min_chunk.x * chunk_node_dim_i, min_chunk.y * chunk_node_dim_i),
+        origin: IVec2::new(
+            min_chunk.x * chunk_node_dim_i,
+            min_chunk.y * chunk_node_dim_i,
+        ),
         dims: UVec2::new(
             chunk_dims.x * MPM_CHUNK_NODE_DIM,
             chunk_dims.y * MPM_CHUNK_NODE_DIM,
@@ -1001,7 +1313,10 @@ fn build_static_chunk_upload(
     let chunk_dims_x = chunk_dims.x as usize;
     for y in 0..grid_layout.dims.y {
         for x in 0..grid_layout.dims.x {
-            let node = IVec2::new(grid_layout.origin.x + x as i32, grid_layout.origin.y + y as i32);
+            let node = IVec2::new(
+                grid_layout.origin.x + x as i32,
+                grid_layout.origin.y + y as i32,
+            );
             let world_pos = Vec2::new(node.x as f32 * CELL_SIZE_M, node.y as f32 * CELL_SIZE_M);
             if let Some((sdf, normal)) = terrain.sample_signed_distance_and_normal(world_pos) {
                 let x_u = x as usize;
@@ -1027,7 +1342,6 @@ fn build_static_chunk_upload(
         chunk_origin: min_chunk,
         chunk_dims,
         grid_layout,
-        chunk_meta,
         terrain_sdf,
         terrain_normal,
     })

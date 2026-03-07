@@ -56,10 +56,12 @@ impl ExtractResource for MpmGpuUploadRequest {
             upload_mover_results: source.upload_mover_results_frame,
             upload_mover_results_frame: false,
             upload_chunks: source.upload_chunks,
+            upload_chunk_diffs: source.upload_chunk_diffs,
             upload_terrain: source.upload_terrain,
             chunk_meta: source.chunk_meta.clone(),
             particles: source.particles.clone(),
             mover_results: source.mover_results.clone(),
+            chunk_meta_diffs: source.chunk_meta_diffs.clone(),
             terrain_sdf: source.terrain_sdf.clone(),
             terrain_normal: source.terrain_normal.clone(),
             last_uploaded_terrain_version: source.last_uploaded_terrain_version,
@@ -75,10 +77,12 @@ impl Clone for MpmGpuUploadRequest {
             upload_mover_results: self.upload_mover_results,
             upload_mover_results_frame: self.upload_mover_results_frame,
             upload_chunks: self.upload_chunks,
+            upload_chunk_diffs: self.upload_chunk_diffs,
             upload_terrain: self.upload_terrain,
             chunk_meta: self.chunk_meta.clone(),
             particles: self.particles.clone(),
             mover_results: self.mover_results.clone(),
+            chunk_meta_diffs: self.chunk_meta_diffs.clone(),
             terrain_sdf: self.terrain_sdf.clone(),
             terrain_normal: self.terrain_normal.clone(),
             last_uploaded_terrain_version: self.last_uploaded_terrain_version,
@@ -162,6 +166,8 @@ fn prepare_gpu_uploads(
 
     if upload.upload_chunks {
         buffers.upload_chunks(&queue, &upload.chunk_meta);
+    } else if upload.upload_chunk_diffs {
+        buffers.upload_chunk_diffs(&queue, &upload.chunk_meta_diffs);
     } else {
         buffers.active_chunk_count = params_req.params.resident_chunk_count;
     }
