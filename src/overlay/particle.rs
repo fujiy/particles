@@ -7,12 +7,13 @@ use bevy::render::render_resource::{
     BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BlendComponent,
     BlendFactor, BlendOperation, BlendState, Buffer, BufferDescriptor, BufferUsages,
     CachedRenderPipelineId, ColorTargetState, ColorWrites, FragmentState, MultisampleState,
-    PipelineCache, PrimitiveState, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages,
-    SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat, VertexState,
+    Operations, PipelineCache, PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor,
+    RenderPipelineDescriptor, ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines,
+    StoreOp, TextureFormat, VertexState,
     binding_types::{storage_buffer_read_only_sized, uniform_buffer, uniform_buffer_sized},
 };
 use bevy::render::renderer::{RenderContext, RenderDevice};
-use bevy::render::view::{Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
+use bevy::render::view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
 use std::mem::size_of;
 
 use super::ParticleOverlayState;
@@ -38,7 +39,6 @@ pub(super) struct ParticleOverlayGpuPipeline {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(super) struct ParticleOverlayPipelineKey {
     target_format: TextureFormat,
-    sample_count: u32,
 }
 
 impl SpecializedRenderPipeline for ParticleOverlayGpuPipeline {
@@ -78,7 +78,7 @@ impl SpecializedRenderPipeline for ParticleOverlayGpuPipeline {
             primitive: PrimitiveState::default(),
             depth_stencil: None,
             multisample: MultisampleState {
-                count: key.sample_count,
+                count: 1,
                 ..Default::default()
             },
             push_constant_ranges: vec![],
@@ -139,7 +139,7 @@ pub(super) fn prepare_particle_overlay_gpu_pipeline(
     pipeline: Res<ParticleOverlayGpuPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<ParticleOverlayGpuPipeline>>,
     pipeline_cache: Res<PipelineCache>,
-    views: Query<(Entity, &ViewTarget, Option<&Msaa>)>,
+    views: Query<(Entity, &ViewTarget)>,
 ) {
     if views.is_empty() {
         static NO_VIEW_WARNED: std::sync::atomic::AtomicBool =
@@ -149,13 +149,12 @@ pub(super) fn prepare_particle_overlay_gpu_pipeline(
         }
         return;
     }
-    for (entity, view_target, msaa) in &views {
+    for (entity, view_target) in &views {
         let id = pipelines.specialize(
             &pipeline_cache,
             &pipeline,
             ParticleOverlayPipelineKey {
                 target_format: view_target.main_texture_format(),
-                sample_count: msaa.map_or(1, Msaa::samples),
             },
         );
         commands
@@ -226,7 +225,15 @@ impl ViewNode for ParticleOverlayGpuNode {
 
         let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("particle_overlay_gpu_pass"),
-            color_attachments: &[Some(view_target.get_color_attachment())],
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: view_target.main_texture_view(),
+                resolve_target: None,
+                depth_slice: None,
+                ops: Operations {
+                    load: bevy::render::render_resource::LoadOp::Load,
+                    store: StoreOp::Store,
+                },
+            })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
