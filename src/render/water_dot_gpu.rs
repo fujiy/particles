@@ -3,7 +3,7 @@ use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::ecs::query::QueryItem;
 use bevy::log::warn;
 use bevy::prelude::*;
-use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::extract_resource::ExtractResourcePlugin;
 use bevy::render::graph::CameraDriverLabel;
 use bevy::render::render_graph::{
     Node, NodeRunError, RenderGraph, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode,
@@ -29,7 +29,6 @@ use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bytemuck::{Pod, Zeroable};
 
 use super::terrain_gpu::TerrainNearGpuResources;
-use crate::camera_controller::MainCamera;
 use crate::params::palette::{MaterialPalette4, PaletteColor};
 use crate::params::{ActivePaletteParams, ActiveRenderParams};
 use crate::physics::gpu_mpm::{MpmComputeLabel, gpu_resources::MpmGpuBuffers};
@@ -141,26 +140,11 @@ struct WaterDotGpuResources {
     blurred_density_sand_buf: Buffer,
 }
 
-#[derive(Resource, Clone, Copy, Debug, Default, ExtractResource)]
-struct WaterDotCameraState {
-    center_world: Vec2,
-}
-
-fn update_water_dot_camera_state(
-    mut state: ResMut<WaterDotCameraState>,
-    camera_q: Query<&Transform, With<MainCamera>>,
-) {
-    if let Ok(transform) = camera_q.single() {
-        state.center_world = transform.translation.truncate();
-    }
-}
-
 impl WaterDotGpuResources {
     fn params_for(
         &self,
         particle_count: u32,
         active_render: Option<&ActiveRenderParams>,
-        camera_center_world: Option<Vec2>,
     ) -> WaterDotParams {
         let (
             density_threshold,
@@ -188,17 +172,9 @@ impl WaterDotGpuResources {
                 DEFAULT_BLUR_RADIUS_DOTS,
                 DEFAULT_WATER_PALETTE_SEED,
             ));
-        let grid_world_size = Vec2::new(
-            self.layout.width as f32 * self.layout.dot_size_m,
-            self.layout.height as f32 * self.layout.dot_size_m,
-        );
-        let origin = camera_center_world
-            .map(|center| center - 0.5 * grid_world_size)
-            .unwrap_or(self.layout.origin);
-
         WaterDotParams {
-            origin_x: origin.x,
-            origin_y: origin.y,
+            origin_x: self.layout.origin.x,
+            origin_y: self.layout.origin.y,
             dot_size_m: self.layout.dot_size_m,
             density_threshold,
             atomic_scale,
@@ -628,14 +604,8 @@ impl Node for WaterDotPreprocessNode {
             std::sync::atomic::AtomicBool::new(false);
         let had_particles_previous_frame =
             HAD_PARTICLES_PREVIOUS_FRAME.load(std::sync::atomic::Ordering::Relaxed);
-        let camera_center_world = world
-            .get_resource::<WaterDotCameraState>()
-            .map(|state| state.center_world);
-        let params = resources.params_for(
-            particle_count,
-            world.get_resource::<ActiveRenderParams>(),
-            camera_center_world,
-        );
+        let params =
+            resources.params_for(particle_count, world.get_resource::<ActiveRenderParams>());
         world.resource::<RenderQueue>().write_buffer(
             &resources.params_buf,
             0,
@@ -954,9 +924,6 @@ pub struct WaterDotGpuPlugin;
 
 impl Plugin for WaterDotGpuPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<WaterDotCameraState>()
-            .add_systems(Update, update_water_dot_camera_state)
-            .add_plugins(ExtractResourcePlugin::<WaterDotCameraState>::default());
         app.add_plugins(ExtractResourcePlugin::<ActivePaletteParams>::default());
         app.add_plugins(ExtractResourcePlugin::<ActiveRenderParams>::default());
         let render_app = app.sub_app_mut(RenderApp);

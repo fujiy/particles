@@ -14,8 +14,7 @@ use super::buffers::{
 use super::gpu_resources::{
     MAX_RESIDENT_CHUNK_SLOTS, MPM_ACTIVE_TILES_PER_SLOT, MPM_CHUNK_NODE_DIM,
     MPM_CHUNK_NODES_PER_SLOT, MPM_NODE_SPACING_M, MPM_NODES_PER_CELL, MpmGpuControl,
-    MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest,
-    world_grid_layout,
+    MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest, world_grid_layout,
 };
 use super::phase::mpm_phase_id_for_particle;
 use super::readback::{

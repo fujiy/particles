@@ -60,6 +60,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if d > 1.0 {
         discard;
     }
-    let edge = smoothstep(1.0, 0.88, d);
-    return vec4<f32>(in.color.rgb, in.color.a * edge);
+    let aa = max(fwidth(d), 1.0e-4);
+    let inner_radius = max(1.0 - 2.5 * aa, 0.0);
+    let outer_alpha = 1.0 - smoothstep(1.0 - aa, 1.0 + aa, d);
+    let inner_alpha = smoothstep(inner_radius - aa, inner_radius + aa, d);
+    let ring_alpha = outer_alpha * inner_alpha;
+    if ring_alpha <= 1.0e-3 {
+        discard;
+    }
+    return vec4<f32>(in.color.rgb, in.color.a * ring_alpha);
 }

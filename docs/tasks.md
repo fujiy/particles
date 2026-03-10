@@ -140,6 +140,7 @@
   - 2026-03-07: SDF Overlay をGPU pass化（`sdf_overlay_gpu.wgsl`）し、`terrain_sdf_buf` を直接サンプリングする描画へ変更。`artifacts/autoverify/sdf_overlay_gpu_water_drop.png` で描画成立を確認。
   - 2026-03-07: `mpm_types.wgsl` の `node_index/node_in_bounds` を `chunk_origin/chunk_dims/chunk_node_dim` ベースへ変更し、P2G/G2P/GridUpdate を chunk slot addressing 参照へ切替。CPU側 `terrain_sdf/normal` upload も slot-major 並びに変更。`water_drop_motion` 再検証で `passed=true`, `invalid_slot_access_count=0` を確認。
   - 2026-03-10: solver 格子を `NODE_SPACING_M=0.125`, `chunk_node_dim=32` へ移行し、1 chunk = 16x16 cells = 32x32 nodes, 1 tile = 8x8 nodes, 1 chunk = 4x4 tiles の構成へ更新。`world_grid_layout` と active tile 統計を node 基準へ切替し、terrain occupancy upload は cell->2x2 half-cell 複製へ変更。`cargo test --lib` と `configs/autoverify/water_drop_motion.json` 再検証で `passed=true`, `active_tile_count=54`, `chunk_sdf_samples=36864`, `runtime_rebuild_count=0` を確認。
+  - 2026-03-10: 追加の見た目調整として、水粒子ドットの密度グリッド origin を camera-centered から固定 world origin へ戻し、パン時もドット模様がワールド座標基準で安定するよう修正。particle overlay は塗りつぶし円から `fwidth` ベースの輪郭リングへ変更し、`cargo check` / `cargo test --lib` / `configs/autoverify/overlay_particle_water_drop.json` で回帰確認とスクリーンショット検証を行う。
 
 ### [MPM-CHUNK-02] occupancy/residency event同期 + exceptional mover fallback
 
