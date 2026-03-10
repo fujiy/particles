@@ -15,14 +15,18 @@ use super::buffers::{
     GpuGridNode, GpuMoverResult, GpuMpmParams, GpuParticle, GpuStatisticsScalars,
 };
 use crate::physics::world::constants::{
-    CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
+    CELL_SIZE_M, CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
+    WORLD_MIN_CHUNK_Y,
 };
 
 const GRID_PADDING_CELLS: i32 = 8;
+pub const MPM_NODES_PER_CELL: u32 = 2;
+pub const MPM_NODE_SPACING_M: f32 = CELL_SIZE_M / MPM_NODES_PER_CELL as f32;
+const GRID_PADDING_NODES: i32 = GRID_PADDING_CELLS * MPM_NODES_PER_CELL as i32;
 pub const MAX_PARTICLES: u32 = 131_072; // 128k particles max
 pub const MAX_MOVER_RECORDS: u32 = MAX_PARTICLES;
 pub const MAX_CHUNK_EVENT_RECORDS: u32 = MAX_RESIDENT_CHUNK_SLOTS * 4;
-pub const MPM_CHUNK_NODE_DIM: u32 = CHUNK_SIZE_I32 as u32;
+pub const MPM_CHUNK_NODE_DIM: u32 = CHUNK_SIZE_I32 as u32 * MPM_NODES_PER_CELL;
 pub const MPM_CHUNK_NODES_PER_SLOT: u32 = MPM_CHUNK_NODE_DIM * MPM_CHUNK_NODE_DIM;
 pub const MPM_ACTIVE_TILE_DIM_PER_AXIS: u32 =
     (MPM_CHUNK_NODE_DIM + ACTIVE_TILE_NODE_DIM - 1) / ACTIVE_TILE_NODE_DIM;
@@ -37,13 +41,14 @@ const _: () = assert!(MPM_ACTIVE_TILES_PER_SLOT <= 32);
 
 /// Computes the canonical grid layout covering the full world extent.
 pub fn world_grid_layout() -> GpuGridLayout {
+    let chunk_node_dim_i = MPM_CHUNK_NODE_DIM as i32;
     let min_cell = IVec2::new(
-        WORLD_MIN_CHUNK_X * CHUNK_SIZE_I32 - GRID_PADDING_CELLS,
-        WORLD_MIN_CHUNK_Y * CHUNK_SIZE_I32 - GRID_PADDING_CELLS,
+        WORLD_MIN_CHUNK_X * chunk_node_dim_i - GRID_PADDING_NODES,
+        WORLD_MIN_CHUNK_Y * chunk_node_dim_i - GRID_PADDING_NODES,
     );
     let max_cell_exclusive = IVec2::new(
-        (WORLD_MAX_CHUNK_X + 1) * CHUNK_SIZE_I32 + GRID_PADDING_CELLS,
-        (WORLD_MAX_CHUNK_Y + 1) * CHUNK_SIZE_I32 + GRID_PADDING_CELLS,
+        (WORLD_MAX_CHUNK_X + 1) * chunk_node_dim_i + GRID_PADDING_NODES,
+        (WORLD_MAX_CHUNK_Y + 1) * chunk_node_dim_i + GRID_PADDING_NODES,
     );
     let dims = (max_cell_exclusive - min_cell + IVec2::ONE).max(IVec2::ONE);
     GpuGridLayout {

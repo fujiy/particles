@@ -9,15 +9,15 @@
         // スプラット・ブラー前処理パラメータ
         splat: (
             // 密度スプラットの半径 [ドット単位]. 許容: 0.5 – 10.0
-            radius_dots: 2.5,
+            radius_dots: 1.0,
             // ガウスブラーのシグマ [ドット単位]. 許容: 0.5 – 20.0
-            blur_sigma_dots: 5.0,
+            blur_sigma_dots: 2.0,
             // ブラーカーネルの半径 [ドット]. 許容: 1 – 30
             blur_radius_dots: 10,
             // 密度アトミック蓄積スケール（精度調整用）. 許容: 16.0 – 4096.0
             atomic_scale: 256.0,
             // 水面判定の密度閾値. 許容: 0.01 – 1.0
-            density_threshold: 0.50,
+            density_threshold: 1.0,
         ),
         // 水ドット側のハッシュシード
         palette_seed: 0xA53C9E4D,

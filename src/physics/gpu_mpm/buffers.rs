@@ -327,7 +327,7 @@ impl Default for GpuMpmParams {
             gy: -9.81,
             rho0: 1_000.0,
             bulk_modulus: 2.56e5,
-            h: 0.25,
+            h: 0.125,
             grid_origin_x: 0,
             grid_origin_y: 0,
             grid_width: 0,

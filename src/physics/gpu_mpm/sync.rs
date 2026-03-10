@@ -13,8 +13,9 @@ use super::buffers::{
 };
 use super::gpu_resources::{
     MAX_RESIDENT_CHUNK_SLOTS, MPM_ACTIVE_TILES_PER_SLOT, MPM_CHUNK_NODE_DIM,
-    MPM_CHUNK_NODES_PER_SLOT, MpmGpuControl, MpmGpuParamsRequest, MpmGpuRunRequest,
-    MpmGpuStepClock, MpmGpuUploadRequest, world_grid_layout,
+    MPM_CHUNK_NODES_PER_SLOT, MPM_NODE_SPACING_M, MPM_NODES_PER_CELL, MpmGpuControl,
+    MpmGpuParamsRequest, MpmGpuRunRequest, MpmGpuStepClock, MpmGpuUploadRequest,
+    world_grid_layout,
 };
 use super::phase::mpm_phase_id_for_particle;
 use super::readback::{
@@ -763,7 +764,7 @@ pub fn prepare_gpu_params(
     } else {
         world_grid_layout()
     };
-    let h = CELL_SIZE_M;
+    let h = MPM_NODE_SPACING_M;
     let p = &active_params.0;
     let soil = drucker_prager_params(
         p.soil.youngs_modulus_pa,
@@ -1532,7 +1533,7 @@ fn active_tile_mask_for_particles(
 
         let home_chunk = residency.slot_to_chunk[home_slot];
         let home_node_origin = home_chunk * cdim_i;
-        let grid_pos = Vec2::from_array(particle.x) / CELL_SIZE_M.max(1.0e-6);
+        let grid_pos = Vec2::from_array(particle.x) / MPM_NODE_SPACING_M.max(1.0e-6);
         let base = IVec2::new(
             (grid_pos.x - 0.5).floor() as i32,
             (grid_pos.y - 0.5).floor() as i32,
@@ -2087,7 +2088,11 @@ fn build_terrain_cells_for_slots(
         let chunk_cell_origin = IVec2::new(chunk.x * CHUNK_SIZE_I32, chunk.y * CHUNK_SIZE_I32);
         for local_y in 0..chunk_node_dim_u {
             for local_x in 0..chunk_node_dim_u {
-                let global_cell = chunk_cell_origin + IVec2::new(local_x as i32, local_y as i32);
+                let global_cell = chunk_cell_origin
+                    + IVec2::new(
+                        (local_x / MPM_NODES_PER_CELL as usize) as i32,
+                        (local_y / MPM_NODES_PER_CELL as usize) as i32,
+                    );
                 let solid = matches!(
                     terrain.get_cell_or_generated(global_cell),
                     TerrainCell::Solid { .. }
@@ -2554,12 +2559,12 @@ mod tests {
         };
 
         let masks = active_tile_mask_for_particles(&[particle], &residency);
-        assert_eq!(masks[0], 1 << 1);
-        assert_eq!(masks[1], 1 << 0);
+        assert_eq!(masks[0], (1 << 3) | (1 << 7));
+        assert_eq!(masks[1], (1 << 0) | (1 << 4));
 
         update_active_tile_stats(&mut residency, &[particle]);
-        assert_eq!(residency.active_tile_count, 2);
-        assert_eq!(residency.active_tile_capacity, 8);
-        assert!((residency.inactive_skip_rate - 0.75).abs() < 1.0e-6);
+        assert_eq!(residency.active_tile_count, 4);
+        assert_eq!(residency.active_tile_capacity, 32);
+        assert!((residency.inactive_skip_rate - 0.875).abs() < 1.0e-6);
     }
 }

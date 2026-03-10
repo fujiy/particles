@@ -139,6 +139,7 @@
   - 2026-03-07: Overlay UI を `Chunk/Grid Overlay` ボタン1つに統合し、詳細表示は左上HUDへ移設。WGSLを `fwidth` ベースへ更新してズームに依存しない1px線へ変更し、chunk境界に加えて内部grid線を描画することを `overlay_chunk_zoom_out.png` / `overlay_chunk_zoom_in.png` で確認。
   - 2026-03-07: SDF Overlay をGPU pass化（`sdf_overlay_gpu.wgsl`）し、`terrain_sdf_buf` を直接サンプリングする描画へ変更。`artifacts/autoverify/sdf_overlay_gpu_water_drop.png` で描画成立を確認。
   - 2026-03-07: `mpm_types.wgsl` の `node_index/node_in_bounds` を `chunk_origin/chunk_dims/chunk_node_dim` ベースへ変更し、P2G/G2P/GridUpdate を chunk slot addressing 参照へ切替。CPU側 `terrain_sdf/normal` upload も slot-major 並びに変更。`water_drop_motion` 再検証で `passed=true`, `invalid_slot_access_count=0` を確認。
+  - 2026-03-10: solver 格子を `NODE_SPACING_M=0.125`, `chunk_node_dim=32` へ移行し、1 chunk = 16x16 cells = 32x32 nodes, 1 tile = 8x8 nodes, 1 chunk = 4x4 tiles の構成へ更新。`world_grid_layout` と active tile 統計を node 基準へ切替し、terrain occupancy upload は cell->2x2 half-cell 複製へ変更。`cargo test --lib` と `configs/autoverify/water_drop_motion.json` 再検証で `passed=true`, `active_tile_count=54`, `chunk_sdf_samples=36864`, `runtime_rebuild_count=0` を確認。
 
 ### [MPM-CHUNK-02] occupancy/residency event同期 + exceptional mover fallback
 
@@ -342,5 +343,4 @@
 - chunk SDF の離散化仕様（node中心かcell中心か、normal再構成法、境界しきい値）を `design.md` へ固定する必要がある。
 - Render 側地形キャッシュ（Near/override）と MPM用 chunk SDF の更新順序を明文化し、同一フレーム整合を保証する必要がある。
 - fallback 切替閾値を `mover_count` 単体ではなく、`frontier change` と `exceptional mover` 指標ベースで再定義する必要がある。
-- `chunks.md` 目標では `CHUNK_NODE_SIZE=32`（`NODE_SPACING_M=0.125`）を前提としているが、現実装の solver 格子は `h=0.25` のため `MPM-CHUNK-01` では `chunk_node_dim=16` を採用している。`MPM-CHUNK-02` 着手前に解像度移行方針（`h` 引き下げ時の安定条件と閾値再設定）を決める必要がある。
 - `MPM-CHUNK-02` 現段は `chunk_origin/chunk_dims` に基づく固定 slot pool 上で resident on/off と diff upload を実装しており、free list を使った任意 slot 再配置（完全疎 slot addressing）は未導入。P2G/Grid/G2P を `home_chunk_slot_id + neighbor_slot_id` 参照へ完全移行する追加WUが必要。
