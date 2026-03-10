@@ -18,8 +18,9 @@ struct GpuChunkMeta {
 @group(0) @binding(2) var<storage, read> terrain_cell_solid: array<u32>;
 @group(0) @binding(3) var<storage, read_write> terrain_sdf: array<f32>;
 @group(0) @binding(4) var<storage, read_write> terrain_normal: array<vec2<f32>>;
-@group(0) @binding(5) var<storage, read> terrain_update_slot_count: array<u32>;
-@group(0) @binding(6) var<storage, read> terrain_update_slots: array<u32>;
+@group(0) @binding(5) var<storage, read_write> terrain_node_solid: array<u32>;
+@group(0) @binding(6) var<storage, read> terrain_update_slot_count: array<u32>;
+@group(0) @binding(7) var<storage, read> terrain_update_slots: array<u32>;
 
 const INVALID_SLOT: u32 = 0xffffffffu;
 const SDF_QUERY_RADIUS_CELLS: i32 = 10;
@@ -152,4 +153,5 @@ fn update_terrain_sdf_slots(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = slot_id * nodes_per_chunk + local_index;
     terrain_sdf[idx] = sdf;
     terrain_normal[idx] = normal;
+    terrain_node_solid[idx] = select(0u, 1u, sdf < 0.0);
 }

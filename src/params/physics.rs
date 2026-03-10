@@ -82,6 +82,8 @@ pub struct CouplingParams {
 pub struct RuntimeTuningParams {
     /// 境界速度補正で使う SDF 閾値（h倍率）. 許容: 0.0 – 4.0
     pub boundary_velocity_sdf_threshold_h: f32,
+    /// 境界の法線内向き速度をどれだけ除去するか. 1.0=完全投影, 0.0=無効. 許容: 0.0 – 1.0
+    pub boundary_velocity_normal_projection_scale: f32,
     /// 統計の侵入判定ε [m]. 許容: 1e-6 – 0.1
     pub stats_penetration_epsilon_m: f32,
     /// 1フレームの最大catch-up substeps. 許容: 1 – 64
@@ -161,6 +163,7 @@ impl Default for PhysicsParams {
             },
             runtime: RuntimeTuningParams {
                 boundary_velocity_sdf_threshold_h: 0.5,
+                boundary_velocity_normal_projection_scale: 1.0,
                 stats_penetration_epsilon_m: 1.0e-3,
                 max_substeps_per_frame: 8,
             },
@@ -233,6 +236,12 @@ impl PhysicsParams {
             "runtime.boundary_velocity_sdf_threshold_h",
             0.0,
             4.0
+        );
+        check!(
+            self.runtime.boundary_velocity_normal_projection_scale,
+            "runtime.boundary_velocity_normal_projection_scale",
+            0.0,
+            1.0
         );
         check!(
             self.runtime.stats_penetration_epsilon_m,

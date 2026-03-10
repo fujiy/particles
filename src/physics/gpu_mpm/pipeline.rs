@@ -231,13 +231,15 @@ impl FromWorld for MpmComputePipelines {
             zero_initialize_workgroup_memory: false,
         });
 
-        // p2g: 0=params, 1=particles(read), 2=grid_atomic(rw), 3=chunk_meta(read)
+        // p2g: 0=params, 1=particles(read), 2=grid_atomic(rw), 3=chunk_meta(read),
+        // 4=terrain_node_solid(read)
         let p2g_entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 binding_types::uniform_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
             ),
         );
@@ -285,12 +287,14 @@ impl FromWorld for MpmComputePipelines {
                 zero_initialize_workgroup_memory: false,
             });
 
-        // g2p: 0=params, 1=particles(rw), 2=grid(read), 3=chunk_meta(read)
+        // g2p: 0=params, 1=particles(rw), 2=grid(read), 3=chunk_meta(read),
+        // 4=terrain_node_solid(read)
         let g2p_entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 binding_types::uniform_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
             ),
@@ -473,13 +477,15 @@ impl FromWorld for MpmComputePipelines {
 
         // terrain_sdf_update:
         // 0=params, 1=chunk_meta(read), 2=terrain_cell_solid(read),
-        // 3=terrain_sdf(rw), 4=terrain_normal(rw), 5=update_count(read), 6=update_slots(read)
+        // 3=terrain_sdf(rw), 4=terrain_normal(rw), 5=terrain_node_solid(rw),
+        // 6=update_count(read), 7=update_slots(read)
         let terrain_sdf_update_entries = BindGroupLayoutEntries::sequential(
             ShaderStages::COMPUTE,
             (
                 binding_types::uniform_buffer_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
                 binding_types::storage_buffer_sized(false, None),
                 binding_types::storage_buffer_read_only_sized(false, None),

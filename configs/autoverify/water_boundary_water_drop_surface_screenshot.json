@@ -1,0 +1,18 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "water_drop",
+    "output_path": "artifacts/autoverify/water_boundary_water_drop_surface.png",
+    "warmup_frames": 360,
+    "max_wait_after_capture_frames": 240,
+    "camera_scale": 0.42,
+    "camera_center_x": 0.0,
+    "camera_center_y": -6.0,
+    "overlay": {
+      "chunk": true,
+      "sdf": false,
+      "physics_area": true,
+      "particle": false
+    }
+  }
+}

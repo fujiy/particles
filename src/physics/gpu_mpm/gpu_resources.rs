@@ -81,6 +81,8 @@ pub struct MpmGpuBuffers {
 
     /// Terrain normal buffer: node_count * 8 bytes (vec2<f32> per node).
     pub terrain_normal_buf: Buffer,
+    /// Terrain solid-node mask buffer: one u32(0/1) per resident node.
+    pub terrain_node_solid_buf: Buffer,
     /// Terrain solid-cell occupancy buffer: one u32(0/1) per slot-local cell/node.
     pub terrain_cell_solid_buf: Buffer,
     /// Slot-update count for terrain SDF recompute pass.
@@ -193,6 +195,12 @@ impl MpmGpuBuffers {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let terrain_node_solid_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_terrain_node_solid"),
+            size: MAX_RESIDENT_NODE_CAPACITY * size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let terrain_cell_solid_buf = device.create_buffer(&BufferDescriptor {
             label: Some("mpm_terrain_cell_solid"),
             size: MAX_RESIDENT_NODE_CAPACITY * size_of::<u32>() as u64,
@@ -302,6 +310,7 @@ impl MpmGpuBuffers {
             active_tile_dispatch_buf,
             terrain_sdf_buf,
             terrain_normal_buf,
+            terrain_node_solid_buf,
             terrain_cell_solid_buf,
             terrain_update_slot_count_buf,
             terrain_update_slot_buf,

@@ -25,13 +25,19 @@ struct GpuChunkMeta {
 @group(0) @binding(5) var<storage, read> active_tiles: array<vec2<u32>>;
 
 const MASS_EPSILON: f32 = 1e-8;
-const RECOVERY_SPEED_CAP: f32 = 1.2;
 const INVALID_SLOT: u32 = 0xffffffffu;
 const ACTIVE_TILE_NODE_DIM: u32 = 8u;
 
 // Terrain boundary: non-penetration + Coulomb stick/slip friction [Eqs.28-29, physics.md].
 // Triggers within a thin buffer zone (sdf < threshold) to preemptively block approach.
-fn apply_terrain_boundary(v: vec2<f32>, sdf: f32, normal: vec2<f32>, mu: f32, threshold: f32, dt: f32) -> vec2<f32> {
+fn apply_terrain_boundary(
+    v: vec2<f32>,
+    sdf: f32,
+    normal: vec2<f32>,
+    mu: f32,
+    threshold: f32,
+    normal_projection_scale: f32,
+) -> vec2<f32> {
     if sdf >= threshold {
         return v;
     }
@@ -49,7 +55,7 @@ fn apply_terrain_boundary(v: vec2<f32>, sdf: f32, normal: vec2<f32>, mu: f32, th
     // Eq.28: remove inward normal component (non-penetration).
     let vn = dot(out_v, cn);
     if vn < 0.0 {
-        out_v -= vn * cn;
+        out_v -= vn * cn * clamp(normal_projection_scale, 0.0, 1.0);
     }
 
     // Eq.29: Coulomb stick/slip on tangential component.
@@ -59,15 +65,8 @@ fn apply_terrain_boundary(v: vec2<f32>, sdf: f32, normal: vec2<f32>, mu: f32, th
     let stick_limit = mu * vn_post;
     if vt_mag <= stick_limit {
         out_v -= vt_vec;
-    } else if vt_mag > 1e-8 {
-        out_v -= vt_vec * (1.0 - stick_limit / vt_mag);
-    }
-
-    // Numerical recovery: if a node is already inside terrain, inject a bounded
-    // outward speed to reduce long-lived penetration.
-    if sdf < 0.0 {
-        let recovery_speed = min((-sdf) / max(dt, 1.0e-6), RECOVERY_SPEED_CAP);
-        out_v += cn * recovery_speed;
+    } else if vt_mag > 1e-8 && stick_limit > 0.0 {
+        out_v -= vt_vec * (stick_limit / vt_mag);
     }
 
     return out_v;
@@ -214,10 +213,24 @@ fn grid_update(
     let normal = terrain_normal[idx];
     let threshold = params.sdf_velocity_threshold_m;
     if mw > MASS_EPSILON {
-        vw = apply_terrain_boundary(vw, sdf, normal, params.boundary_friction_water, threshold, params.dt);
+        vw = apply_terrain_boundary(
+            vw,
+            sdf,
+            normal,
+            params.boundary_friction_water,
+            threshold,
+            params.boundary_normal_projection_scale,
+        );
     }
     if mg > MASS_EPSILON {
-        vg = apply_terrain_boundary(vg, sdf, normal, params.boundary_friction_granular, threshold, params.dt);
+        vg = apply_terrain_boundary(
+            vg,
+            sdf,
+            normal,
+            params.boundary_friction_granular,
+            threshold,
+            params.boundary_normal_projection_scale,
+        );
     }
 
     // Water-granular momentum exchange [Eqs.39-44, physics.md].

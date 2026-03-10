@@ -208,6 +208,7 @@ impl Node for MpmComputeNode {
                     buffers.terrain_cell_solid_buf.as_entire_binding(),
                     buffers.terrain_sdf_buf.as_entire_binding(),
                     buffers.terrain_normal_buf.as_entire_binding(),
+                    buffers.terrain_node_solid_buf.as_entire_binding(),
                     buffers.terrain_update_slot_count_buf.as_entire_binding(),
                     buffers.terrain_update_slot_buf.as_entire_binding(),
                 )),
@@ -429,6 +430,7 @@ impl Node for MpmComputeNode {
                     buffers.particle_buf.as_entire_binding(),
                     buffers.grid_buf.as_entire_binding(),
                     buffers.chunk_meta_buf.as_entire_binding(),
+                    buffers.terrain_node_solid_buf.as_entire_binding(),
                 )),
             );
             let grid_update_bg = device.create_bind_group(
@@ -451,6 +453,7 @@ impl Node for MpmComputeNode {
                     buffers.particle_buf.as_entire_binding(),
                     buffers.grid_buf.as_entire_binding(),
                     buffers.chunk_meta_buf.as_entire_binding(),
+                    buffers.terrain_node_solid_buf.as_entire_binding(),
                 )),
             );
             let extract_movers_bg = device.create_bind_group(

@@ -30,6 +30,7 @@ struct GpuChunkMeta {
 //   [water_px, water_py, water_mass, water_pad, granular_px, granular_py, granular_mass, granular_pad]
 @group(0) @binding(2) var<storage, read_write> grid_atomic: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read> chunk_meta: array<GpuChunkMeta>;
+@group(0) @binding(4) var<storage, read> terrain_node_solid: array<u32>;
 
 const GRID_NODE_STRIDE_U32: u32 = 8u;
 
@@ -77,6 +78,10 @@ fn neighbor_index_from_delta(dx: i32, dy: i32) -> u32 {
 fn node_index_from_slot_local(slot_id: u32, local_x: u32, local_y: u32, params: MpmParams) -> u32 {
     let nodes_per_chunk = params.chunk_node_dim * params.chunk_node_dim;
     return slot_id * nodes_per_chunk + local_y * params.chunk_node_dim + local_x;
+}
+
+fn node_is_solid(node_idx: u32) -> bool {
+    return terrain_node_solid[node_idx] != 0u;
 }
 
 fn elastic_params_for_phase(phase_id: u32, params: MpmParams) -> ElasticParams {
@@ -178,7 +183,8 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
         i32(floor(grid_pos.y - 0.5)),
     );
 
-    // Scatter to 3x3 stencil
+    var fluid_weight_sum = 0.0;
+    var fluid_grad_sum = vec2<f32>(0.0, 0.0);
     for (var oy: i32 = 0; oy < 3; oy++) {
         for (var ox: i32 = 0; ox < 3; ox++) {
             let node = base + vec2<i32>(ox, oy);
@@ -224,8 +230,69 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
             let wy_dw = bspline_w_dw(rel.y);
             let w = wx_dw.x * wy_dw.x;
             if w <= 0.0 { continue; }
-
+            if node_is_solid(nidx) {
+                continue;
+            }
             let grad = vec2<f32>(wx_dw.y * wy_dw.x, wx_dw.x * wy_dw.y) * inv_h;
+            fluid_weight_sum += w;
+            fluid_grad_sum += grad;
+        }
+    }
+    if fluid_weight_sum <= 1.0e-8 {
+        return;
+    }
+
+    // Scatter to reweighted fluid-side 3x3 stencil.
+    for (var oy: i32 = 0; oy < 3; oy++) {
+        for (var ox: i32 = 0; ox < 3; ox++) {
+            let node = base + vec2<i32>(ox, oy);
+            let local = node - home_node_origin;
+            var delta_chunk_x = 0;
+            var delta_chunk_y = 0;
+            if local.x < 0 {
+                delta_chunk_x = -1;
+            } else if local.x >= cdim_i {
+                delta_chunk_x = 1;
+            }
+            if local.y < 0 {
+                delta_chunk_y = -1;
+            } else if local.y >= cdim_i {
+                delta_chunk_y = 1;
+            }
+            if abs(delta_chunk_x) > 1 || abs(delta_chunk_y) > 1 {
+                continue;
+            }
+
+            var slot_id = home_slot;
+            if delta_chunk_x != 0 || delta_chunk_y != 0 {
+                let neighbor_idx = neighbor_index_from_delta(delta_chunk_x, delta_chunk_y);
+                if neighbor_idx == INVALID_SLOT {
+                    continue;
+                }
+                let neighbor_slot = home_chunk.neighbor_slot_id[neighbor_idx];
+                if neighbor_slot == INVALID_SLOT {
+                    continue;
+                }
+                slot_id = neighbor_slot;
+            }
+
+            let local_x = local.x - delta_chunk_x * cdim_i;
+            let local_y = local.y - delta_chunk_y * cdim_i;
+            if local_x < 0 || local_y < 0 || local_x >= cdim_i || local_y >= cdim_i {
+                continue;
+            }
+            let nidx = node_index_from_slot_local(slot_id, u32(local_x), u32(local_y), params);
+
+            let rel = grid_pos - vec2<f32>(f32(node.x), f32(node.y));
+            let wx_dw = bspline_w_dw(rel.x);
+            let wy_dw = bspline_w_dw(rel.y);
+            let w_raw = wx_dw.x * wy_dw.x;
+            if w_raw <= 0.0 || node_is_solid(nidx) { continue; }
+            let w = w_raw / fluid_weight_sum;
+            let grad_raw = vec2<f32>(wx_dw.y * wy_dw.x, wx_dw.x * wy_dw.y) * inv_h;
+            let grad =
+                (grad_raw * fluid_weight_sum - w_raw * fluid_grad_sum)
+                / max(fluid_weight_sum * fluid_weight_sum, 1.0e-8);
 
             // Affine momentum: mp * (vp + C * (xi - xp))
             let dx = vec2<f32>(f32(node.x), f32(node.y)) * h - xp;

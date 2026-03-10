@@ -124,6 +124,7 @@ pub(super) struct ChunkPhysicsOverlayGpuPipeline {
     pub source_sampler: Sampler,
     pub fallback_params_buf: Buffer,
     pub fallback_chunk_meta_buf: Buffer,
+    pub fallback_terrain_node_solid_buf: Buffer,
     pub fallback_overlay_colors_buf: Buffer,
 }
 
@@ -251,6 +252,7 @@ pub(super) fn init_chunk_physics_overlay_gpu_pipeline(
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
                 storage_buffer_read_only_sized(false, None),
+                storage_buffer_read_only_sized(false, None),
                 uniform_buffer_sized(
                     false,
                     core::num::NonZeroU64::new(size_of::<GpuChunkOverlayColors>() as u64),
@@ -281,6 +283,12 @@ pub(super) fn init_chunk_physics_overlay_gpu_pipeline(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let fallback_terrain_node_solid_buf = render_device.create_buffer(&BufferDescriptor {
+        label: Some("chunk_physics_overlay_fallback_terrain_node_solid"),
+        size: size_of::<u32>() as u64,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     let fallback_overlay_colors_buf = render_device.create_buffer(&BufferDescriptor {
         label: Some("chunk_physics_overlay_fallback_colors"),
         size: size_of::<GpuChunkOverlayColors>() as u64,
@@ -294,6 +302,7 @@ pub(super) fn init_chunk_physics_overlay_gpu_pipeline(
         source_sampler: source_sampler.clone(),
         fallback_params_buf,
         fallback_chunk_meta_buf,
+        fallback_terrain_node_solid_buf,
         fallback_overlay_colors_buf,
     });
     commands.insert_resource(ChunkPhysicsOverlayCopyPipeline {
@@ -322,6 +331,11 @@ pub(super) fn prepare_chunk_physics_overlay_gpu_pipeline(
         &pipeline.fallback_overlay_colors_buf,
         0,
         bytemuck::bytes_of(&overlay_colors),
+    );
+    queue.write_buffer(
+        &pipeline.fallback_terrain_node_solid_buf,
+        0,
+        bytemuck::bytes_of(&0u32),
     );
 
     for (entity, view_target) in &views {
@@ -411,17 +425,21 @@ impl ViewNode for ChunkPhysicsOverlayGpuNode {
             render_pass.draw(0..3, 0..1);
         }
 
-        let (params_binding, chunk_meta_binding, chunk_count) =
+        let (params_binding, chunk_meta_binding, terrain_node_solid_binding, chunk_count) =
             if let Some(buffers) = world.get_resource::<MpmGpuBuffers>() {
                 (
                     buffers.params_buf.as_entire_binding(),
                     buffers.chunk_meta_buf.as_entire_binding(),
+                    buffers.terrain_node_solid_buf.as_entire_binding(),
                     buffers.active_chunk_count,
                 )
             } else {
                 (
                     overlay_pipeline.fallback_params_buf.as_entire_binding(),
                     overlay_pipeline.fallback_chunk_meta_buf.as_entire_binding(),
+                    overlay_pipeline
+                        .fallback_terrain_node_solid_buf
+                        .as_entire_binding(),
                     0,
                 )
             };
@@ -445,6 +463,7 @@ impl ViewNode for ChunkPhysicsOverlayGpuNode {
                 post_process.source,
                 &overlay_pipeline.source_sampler,
                 chunk_meta_binding,
+                terrain_node_solid_binding,
                 overlay_colors_binding,
             )),
         );

@@ -272,6 +272,37 @@
 
 ## Done (Recent)
 
+### [MPM-PHYS-WATER-BOUNDARY-01] 静的地形の壁面境界修正（solid node除外 + 粒子フェイルセーフ）
+
+- Status: `Done`
+- 背景:
+  - 現行の静的地形境界は、壁内 node を含む stencil と SDF 近傍の速度回復に依存しており、壁際水粒子が早期反発・不自然な剪断・横加速を示す。
+  - `water_drop` でも静止近傍で壁際盛り上がりや自由表面段差の残留が観測されており、通常系の壁接触を node 外向き回復で扱う設計を見直す必要があった。
+- スコープ:
+  - 静的セル地形について、MPM node を `solid/fluid` の 2 値で分類し、P2G/G2P/APIC/境界近傍内部力を fluid-side stencil 再正規化へ切り替える。
+  - 境界 node の接触は法線速度射影 + クーロン摩擦で扱い、壁内 node への一律 recovery 速度注入を通常系から外す。
+  - 異常系フェイルセーフとして、移流後に SDF で侵入粒子を射影・速度補正する粒子レベル補正を追加する。
+  - 将来の剛体連成向け設計指針として、連続境界量（cut fraction / face fraction / SDF）への一般化と、接触インパルスの対称更新による運動量保存要件を整理する。
+- Subtasks:
+  - [x] `physics.md` 方針に沿って、static terrain 用の `solid node mask + stencil reweight` の transfer 設計を WGSL/Rust レイアウトへ落とす。
+  - [x] 壁近傍で `solid node` を transfer から除外し、P2G/G2P/APIC が一貫した重み再正規化を使うよう実装する。
+  - [x] `grid_update` の静的地形境界から常時 recovery 速度注入を外し、boundary node の法線射影 + 摩擦のみへ更新する。
+  - [x] 移流後の粒子 SDF フェイルセーフ（位置射影 + 法線内向き速度除去）を実装する。
+  - [x] 壁際単セル / 1セル離隔 / `water_drop` 静止面の検証artifactを追加し、壁沿い落下・壁際盛り上がり・自由表面段差の改善を確認する。
+  - [x] Design note として、剛体 2-way coupling 時に連続境界量と反作用インパルス対称更新が必要になる点を `tasks.md` 上でフォローアップ管理する。
+- 完了条件:
+  - [x] 壁際単セルテストで、水粒子が不自然な横反発や剪断なく壁沿いに落下する。
+  - [x] 壁から 1 セル離した粒子配置で、通常系の wall-induced side push が発生しない。
+  - [x] `water_drop` の静止近傍で壁際盛り上がりと表面段差が改善し、既存の侵入率・完走条件を維持する。
+- 進捗（要約）:
+  - 2026-03-09: GPU terrain SDF 更新パスに `terrain_node_solid` を追加し、P2G/G2P/APIC transfer を fluid-side stencil 再正規化へ更新。`mpm_grid_update` から static terrain 向け recovery 速度注入を削除し、G2P 最終段に粒子 SDF フェイルセーフ（位置射影 + 法線内向き速度除去）を追加。
+  - 2026-03-09: Chunk/Grid overlay が `terrain_node_solid` を参照するよう更新し、solid node の grid 線を描かない表示へ変更。`artifacts/autoverify/water_boundary_wall_single_cell.png`, `artifacts/autoverify/water_boundary_wall_offset_one_cell.png`, `artifacts/autoverify/water_boundary_water_drop_surface.png` で壁際ケースと静止面を確認。
+  - 2026-03-09: 回帰確認として `configs/autoverify/water_drop_motion.json` を再実行し、`artifacts/autoverify/water_drop_motion.json` で `passed=true`, `terrain_penetration_ratio=0.03326`, `runtime_rebuild_count=0` を確認。
+  - 2026-03-09: 壁近傍 APIC の不整合に対して、P2G 内部力を `∇ŵ`（fluid-side 再正規化勾配）へ更新し、G2P は truncated support の一次・二次モーメントを使う centered APIC 復元へ変更。`vp=Σŵv_i` の一次モーメントずれは `mean_dx` 補正で打ち消し、欠けた support では covariance 最小固有値から局所的に APIC を減衰させるよう更新。再検証で `artifacts/autoverify/water_drop_motion.json` は `passed=true`, `terrain_penetration_ratio=0.03361`, `max_speed_mps=6.60567`, `runtime_rebuild_count=0` を確認。
+  - 2026-03-10: `mpm_grid_update` の terrain 境界 Coulomb 投影に実装バグを修正。従来は `mu=0` でも slip 分岐で `out_v -= vt_vec` となり boundary node の接線速度を丸ごと 0 にしていたため、壁際粒子が stencil 経由で偽の減速を拾っていた。修正後は slip 時の減衰量を `stick_limit / |v_t|` のみ差し引く形へ更新し、`cargo check` / `cargo test --lib` / `configs/autoverify/water_drop_motion.json` 再実行で `passed=true`, `terrain_penetration_ratio=0.03361`, `runtime_rebuild_count=0` を確認。
+  - 2026-03-10: 水の接地後リバウンド調整用に `runtime.boundary_velocity_normal_projection_scale` を追加。node-level 非貫通で内向き法線速度をどの程度除去するかを `physics.ron` から 0.0–1.0 で調整可能にし、既定値 1.0 で `cargo check` / `cargo test --lib` / `configs/autoverify/water_drop_motion.json` を再確認して `passed=true`, `terrain_penetration_ratio=0.02258`, `runtime_rebuild_count=0` を確認。
+  - 2026-03-09: Design follow-up を本 Work Unit 上で明示。剛体 2-way coupling へ拡張する際は、2 値 `solid node mask` のままでは接触が粗くなるため、連続境界量（cut fraction / face fraction / SDF）と、node 射影/粒子フェイルセーフで除去した法線インパルスの反作用を剛体側へ対称更新する設計が必要。
+
 - `DESIGN-CHUNK-PLAN-01` / `Done` / `chunks.md` 準拠で `design.md` 更新、`tasks.md` コンパクション、chunk実装WU分解を完了 / `docs/tasks_archive/2026-03-07-before-chunk-structuring.md`
 - `PARAM-01` / `Done` / パラメータ資産化と hot reload 基盤を実装 / `docs/tasks_archive/2026-03-07-before-chunk-structuring.md`
 - `MPM-PHYS-WATER-01` / `Done` / `physics.md` 改訂に合わせた水物性GPU実装を反映 / `docs/tasks_archive/2026-03-07-before-chunk-structuring.md`

@@ -75,10 +75,10 @@ struct MpmParams {
     c_max_norm: f32,
     // terrain boundary params
     sdf_velocity_threshold_m: f32,
+    boundary_normal_projection_scale: f32,
     // Coulomb friction coefficient μ_b per material [Eq.29, physics.md]
     boundary_friction_water: f32,
     boundary_friction_granular: f32,
-    pad_friction: u32,
     // Drucker-Prager parameters (soil)
     dp_lambda_soil: f32,
     dp_mu_soil: f32,

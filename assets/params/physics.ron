@@ -11,7 +11,7 @@
         // 基準密度 ρ₀ [kg/m³]. 許容: 100.0 – 10000.0
         rho0: 1000.0,
         // 音速 c₀ [m/s]. bulk_modulus = ρ₀·c₀² で計算. 許容: 1.0 – 1000.0
-        sound_speed_mps: 32.0,
+        sound_speed_mps: 16.0,
     ),
 
     // 変形勾配クランプ
@@ -27,7 +27,7 @@
     // APIC ↔ PIC ブレンド [Eq.32, physics.md]
     apic: (
         // 水. 1.0 = 完全 APIC, 0.0 = 完全 PIC. 許容: 0.0 – 1.0
-        water: 0.99,
+        water: 1.0,
         // 粉体. 許容: 0.0 – 1.0
         granular: 0.5,
     ),
@@ -87,6 +87,8 @@
     runtime: (
         // 境界速度補正で使う SDF 閾値（h倍率）. 許容: 0.0 – 4.0
         boundary_velocity_sdf_threshold_h: 0.5,
+        // 境界の法線内向き速度をどれだけ除去するか. 1.0 = 完全投影, 0.0 = 無効. 許容: 0.0 – 1.0
+        boundary_velocity_normal_projection_scale: 1.0,
         // 統計の侵入判定ε [m]. 許容: 1e-6 – 0.1
         stats_penetration_epsilon_m: 0.001,
         // 1フレームの最大catch-up substeps. 許容: 1 – 64

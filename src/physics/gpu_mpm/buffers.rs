@@ -193,11 +193,12 @@ pub struct GpuMpmParams {
     pub j_max: f32,
     pub c_max_norm: f32,
     pub sdf_velocity_threshold_m: f32,
+    /// Boundary non-penetration projection scale. 1.0=full projection, 0.0=disabled.
+    pub boundary_normal_projection_scale: f32,
     /// Coulomb friction coefficient μ_b for water at terrain boundary.
     pub boundary_friction_water: f32,
     /// Coulomb friction coefficient μ_b for granular at terrain boundary.
     pub boundary_friction_granular: f32,
-    pub _pad_friction: u32,
     pub dp_lambda_soil: f32,
     pub dp_mu_soil: f32,
     pub dp_alpha_soil: f32,
@@ -336,9 +337,9 @@ impl Default for GpuMpmParams {
             j_max: 1.4,
             c_max_norm: 80.0,
             sdf_velocity_threshold_m: 0.01,
+            boundary_normal_projection_scale: 1.0,
             boundary_friction_water: 0.3,
             boundary_friction_granular: 0.6,
-            _pad_friction: 0,
             dp_lambda_soil: 2.0e4,
             dp_mu_soil: 1.2e4,
             dp_alpha_soil: 0.2,

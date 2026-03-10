@@ -18,8 +18,11 @@ struct GpuChunkMeta {
 @group(0) @binding(1) var<storage, read_write> particles: array<GpuParticle>;
 @group(0) @binding(2) var<storage, read> grid: array<GpuGridNode>;
 @group(0) @binding(3) var<storage, read> chunk_meta: array<GpuChunkMeta>;
+@group(0) @binding(4) var<storage, read> terrain_node_solid: array<u32>;
 
 const MASS_EPSILON: f32 = 1e-8;
+const APIC_MOMENT_EPS: f32 = 1.0e-10;
+const APIC_FULL_SUPPORT_SECOND_MOMENT: f32 = 0.25;
 const SVD_SIGMA_MIN: f32 = 1.0e-5;
 const DP_NORM_EPS: f32 = 1.0e-8;
 const V_VOL_CLAMP: f32 = 6.0;
@@ -68,6 +71,58 @@ fn neighbor_index_from_delta(dx: i32, dy: i32) -> u32 {
 fn node_index_from_slot_local(slot_id: u32, local_x: u32, local_y: u32, params: MpmParams) -> u32 {
     let nodes_per_chunk = params.chunk_node_dim * params.chunk_node_dim;
     return slot_id * nodes_per_chunk + local_y * params.chunk_node_dim + local_x;
+}
+
+fn node_index_from_global(
+    home_slot: u32,
+    home_chunk: GpuChunkMeta,
+    home_node_origin: vec2<i32>,
+    node: vec2<i32>,
+    params: MpmParams,
+) -> u32 {
+    let cdim_i = i32(params.chunk_node_dim);
+    if cdim_i <= 0 {
+        return INVALID_SLOT;
+    }
+    let local = node - home_node_origin;
+    var delta_chunk_x = 0;
+    var delta_chunk_y = 0;
+    if local.x < 0 {
+        delta_chunk_x = -1;
+    } else if local.x >= cdim_i {
+        delta_chunk_x = 1;
+    }
+    if local.y < 0 {
+        delta_chunk_y = -1;
+    } else if local.y >= cdim_i {
+        delta_chunk_y = 1;
+    }
+    if abs(delta_chunk_x) > 1 || abs(delta_chunk_y) > 1 {
+        return INVALID_SLOT;
+    }
+
+    var slot_id = home_slot;
+    if delta_chunk_x != 0 || delta_chunk_y != 0 {
+        let neighbor_idx = neighbor_index_from_delta(delta_chunk_x, delta_chunk_y);
+        if neighbor_idx == INVALID_SLOT {
+            return INVALID_SLOT;
+        }
+        let neighbor_slot = home_chunk.neighbor_slot_id[neighbor_idx];
+        if neighbor_slot == INVALID_SLOT {
+            return INVALID_SLOT;
+        }
+        slot_id = neighbor_slot;
+    }
+    let local_x = local.x - delta_chunk_x * cdim_i;
+    let local_y = local.y - delta_chunk_y * cdim_i;
+    if local_x < 0 || local_y < 0 || local_x >= cdim_i || local_y >= cdim_i {
+        return INVALID_SLOT;
+    }
+    return node_index_from_slot_local(slot_id, u32(local_x), u32(local_y), params);
+}
+
+fn node_is_solid(node_idx: u32) -> bool {
+    return node_idx == INVALID_SLOT || terrain_node_solid[node_idx] != 0u;
 }
 
 fn finite_f32(x: f32) -> bool {
@@ -264,9 +319,14 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     var v_vol = p.v_vol;
 
     var vp = vec2<f32>(0.0, 0.0);
-    // New C matrix (velocity gradient * 4/h^2 in MLS-MPM)
+    // New C matrix reconstructed from the truncated fluid-side moment matrix.
     var c00 = 0.0; var c01 = 0.0;
     var c10 = 0.0; var c11 = 0.0;
+    var numer00 = 0.0; var numer01 = 0.0;
+    var numer10 = 0.0; var numer11 = 0.0;
+    var moment00 = 0.0; var moment01 = 0.0;
+    var moment11 = 0.0;
+    var mean_dx = vec2<f32>(0.0, 0.0);
     // Water fill fraction φ_p [Eq.9, physics.md]: gathered from grid water_mass.
     var phi_p = 0.0;
 
@@ -276,90 +336,105 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
         i32(floor(grid_pos.y - 0.5)),
     );
 
+    var fluid_weight_sum = 0.0;
     for (var oy: i32 = 0; oy < 3; oy++) {
         for (var ox: i32 = 0; ox < 3; ox++) {
             let node = base + vec2<i32>(ox, oy);
-            let local = node - home_node_origin;
-            var delta_chunk_x = 0;
-            var delta_chunk_y = 0;
-            if local.x < 0 {
-                delta_chunk_x = -1;
-            } else if local.x >= cdim_i {
-                delta_chunk_x = 1;
-            }
-            if local.y < 0 {
-                delta_chunk_y = -1;
-            } else if local.y >= cdim_i {
-                delta_chunk_y = 1;
-            }
-            if abs(delta_chunk_x) > 1 || abs(delta_chunk_y) > 1 {
+            let nidx = node_index_from_global(home_slot, home_chunk, home_node_origin, node, params);
+            if node_is_solid(nidx) {
                 continue;
             }
-
-            var slot_id = home_slot;
-            if delta_chunk_x != 0 || delta_chunk_y != 0 {
-                let neighbor_idx = neighbor_index_from_delta(delta_chunk_x, delta_chunk_y);
-                if neighbor_idx == INVALID_SLOT {
-                    continue;
-                }
-                let neighbor_slot = home_chunk.neighbor_slot_id[neighbor_idx];
-                if neighbor_slot == INVALID_SLOT {
-                    continue;
-                }
-                slot_id = neighbor_slot;
-            }
-            let local_x = local.x - delta_chunk_x * cdim_i;
-            let local_y = local.y - delta_chunk_y * cdim_i;
-            if local_x < 0 || local_y < 0 || local_x >= cdim_i || local_y >= cdim_i {
-                continue;
-            }
-            let nidx = node_index_from_slot_local(slot_id, u32(local_x), u32(local_y), params);
-            var mi = 0.0;
-            var vi = vec2<f32>(0.0, 0.0);
-            if granular {
-                mi = grid[nidx].granular_mass;
-                if mi >= MASS_EPSILON {
-                    vi = vec2<f32>(
-                        grid[nidx].granular_px / mi,
-                        grid[nidx].granular_py / mi,
-                    );
-                }
-            } else {
-                mi = grid[nidx].water_mass;
-                if mi >= MASS_EPSILON {
-                    vi = vec2<f32>(
-                        grid[nidx].water_px / mi,
-                        grid[nidx].water_py / mi,
-                    );
-                }
-            }
-            if mi < MASS_EPSILON {
-                continue;
-            }
-
             let rel = grid_pos - vec2<f32>(f32(node.x), f32(node.y));
             let wx_dw = bspline_w_dw(rel.x);
             let wy_dw = bspline_w_dw(rel.y);
             let w = wx_dw.x * wy_dw.x;
             if w <= 0.0 { continue; }
+            fluid_weight_sum += w;
+        }
+    }
+    if fluid_weight_sum > 1.0e-8 {
+        for (var oy: i32 = 0; oy < 3; oy++) {
+            for (var ox: i32 = 0; ox < 3; ox++) {
+                let node = base + vec2<i32>(ox, oy);
+                let nidx = node_index_from_global(home_slot, home_chunk, home_node_origin, node, params);
+                if node_is_solid(nidx) {
+                    continue;
+                }
+                let rel = grid_pos - vec2<f32>(f32(node.x), f32(node.y));
+                let wx_dw = bspline_w_dw(rel.x);
+                let wy_dw = bspline_w_dw(rel.y);
+                let w_raw = wx_dw.x * wy_dw.x;
+                if w_raw <= 0.0 { continue; }
+                let w = w_raw / fluid_weight_sum;
 
-            vp += w * vi;
+                var mi = 0.0;
+                var vi = vec2<f32>(0.0, 0.0);
+                if granular {
+                    mi = grid[nidx].granular_mass;
+                    if mi >= MASS_EPSILON {
+                        vi = vec2<f32>(
+                            grid[nidx].granular_px / mi,
+                            grid[nidx].granular_py / mi,
+                        );
+                    }
+                } else {
+                    mi = grid[nidx].water_mass;
+                    if mi >= MASS_EPSILON {
+                        vi = vec2<f32>(
+                            grid[nidx].water_px / mi,
+                            grid[nidx].water_py / mi,
+                        );
+                    }
+                }
 
-            // APIC: C += w * v_i ⊗ (x_i - x_p) * (4 / h^2)
-            let xi = vec2<f32>(f32(node.x), f32(node.y)) * h;
-            let dx = xi - xp;
-            let scale = w * 4.0 * inv_h * inv_h;
-            c00 += scale * vi.x * dx.x;
-            c01 += scale * vi.x * dx.y;
-            c10 += scale * vi.y * dx.x;
-            c11 += scale * vi.y * dx.y;
+                vp += w * vi;
 
-            // Water fill fraction φ_p = Σ w_ip * (m_i^w / (ρ_0 * h^d))  [Eqs.8-9, physics.md]
-            if phase_is_water {
-                let node_phi = grid[nidx].water_mass / (params.rho_ref * h * h);
-                phi_p += w * node_phi;
+                // Boundary-aware APIC/MLS: track the truncated-support first and second moments.
+                let xi = vec2<f32>(f32(node.x), f32(node.y)) * h;
+                let dx = xi - xp;
+                mean_dx += w * dx;
+                numer00 += w * vi.x * dx.x;
+                numer01 += w * vi.x * dx.y;
+                numer10 += w * vi.y * dx.x;
+                numer11 += w * vi.y * dx.y;
+                moment00 += w * dx.x * dx.x;
+                moment01 += w * dx.x * dx.y;
+                moment11 += w * dx.y * dx.y;
+
+                // Water fill fraction φ_p = Σ \tilde{w}_ip * (m_i^w / (ρ_0 * h^d))  [Eqs.8-9, 28, physics.md]
+                if phase_is_water {
+                    let node_phi = grid[nidx].water_mass / (params.rho_ref * h * h);
+                    phi_p += w * node_phi;
+                }
             }
         }
+    }
+
+    numer00 -= vp.x * mean_dx.x;
+    numer01 -= vp.x * mean_dx.y;
+    numer10 -= vp.y * mean_dx.x;
+    numer11 -= vp.y * mean_dx.y;
+    moment00 -= mean_dx.x * mean_dx.x;
+    moment01 -= mean_dx.x * mean_dx.y;
+    moment11 -= mean_dx.y * mean_dx.y;
+
+    let moment_trace = moment00 + moment11;
+    let moment_disc = sqrt(max((moment00 - moment11) * (moment00 - moment11) + 4.0 * moment01 * moment01, 0.0));
+    let moment_min_eig = max(0.5 * (moment_trace - moment_disc), 0.0);
+    let ideal_moment = APIC_FULL_SUPPORT_SECOND_MOMENT * h * h;
+    let apic_support_ratio = clamp(moment_min_eig / max(ideal_moment, 1.0e-8), 0.0, 1.0);
+    let apic_support_scale = apic_support_ratio * apic_support_ratio;
+    let moment_det = moment00 * moment11 - moment01 * moment01;
+    let moment_eps = max(APIC_MOMENT_EPS, APIC_MOMENT_EPS * h * h * h * h);
+    if moment_det > moment_eps {
+        let inv00 = moment11 / moment_det;
+        let inv01 = -moment01 / moment_det;
+        let inv11 = moment00 / moment_det;
+
+        c00 = numer00 * inv00 + numer01 * inv01;
+        c10 = numer00 * inv01 + numer01 * inv11;
+        c01 = numer10 * inv00 + numer11 * inv01;
+        c11 = numer10 * inv01 + numer11 * inv11;
     }
 
     // Clamp C norm
@@ -379,16 +454,22 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     var c_xfer00 = c00; var c_xfer01 = c01;
     var c_xfer10 = c10; var c_xfer11 = c11;
     if granular {
-        let alpha_apic_granular = params.alpha_apic_granular;
+        let alpha_apic_granular = params.alpha_apic_granular * apic_support_scale;
         c_xfer00 *= alpha_apic_granular; c_xfer01 *= alpha_apic_granular;
         c_xfer10 *= alpha_apic_granular; c_xfer11 *= alpha_apic_granular;
     } else {
-        let alpha_apic_water = params.alpha_apic_water;
+        let alpha_apic_water = params.alpha_apic_water * apic_support_scale;
         c_def00 *= alpha_apic_water; c_def01 *= alpha_apic_water;
         c_def10 *= alpha_apic_water; c_def11 *= alpha_apic_water;
         c_xfer00 = c_def00; c_xfer01 = c_def01;
         c_xfer10 = c_def10; c_xfer11 = c_def11;
     }
+
+    // Correct the gathered mean velocity back to x_p so PIC/APIC stays consistent on truncated stencils.
+    vp -= vec2<f32>(
+        c_xfer00 * mean_dx.x + c_xfer10 * mean_dx.y,
+        c_xfer01 * mean_dx.x + c_xfer11 * mean_dx.y,
+    );
 
     // Update F: F_new = (I + dt * C) * F_old
     let f00 = p.f_a; let f01 = p.f_b;
