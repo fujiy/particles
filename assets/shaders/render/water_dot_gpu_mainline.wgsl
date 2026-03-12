@@ -27,33 +27,6 @@ struct WaterDotPalette {
     grass: array<vec4<f32>, 4>,
 }
 
-struct TerrainComposeParams {
-    cell_size_m: f32,
-    dot_size_m: f32,
-    back_min_screen_resolution_divisor: f32,
-    back_scale_multiplier: f32,
-    front_mpp_cells_per_px: f32,
-    back_atmosphere_tint: f32,
-    far_origin_x: i32,
-    far_origin_y: i32,
-    back_origin_x: i32,
-    back_origin_y: i32,
-    near_origin_x: i32,
-    near_origin_y: i32,
-    palette_seed: u32,
-    dots_per_cell: u32,
-    ring_offset_x: i32,
-    ring_offset_y: i32,
-    near_enabled: u32,
-    far_downsample: u32,
-    back_downsample: u32,
-    _pad1: u32,
-    sky_color_r: f32,
-    sky_color_g: f32,
-    sky_color_b: f32,
-    _pad2: f32,
-}
-
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<uniform> params: WaterDotParams;
 @group(0) @binding(2) var<storage, read> blurred_density_water: array<f32>;
@@ -62,11 +35,6 @@ struct TerrainComposeParams {
 @group(0) @binding(5) var<storage, read> blurred_density_sand: array<f32>;
 @group(0) @binding(6) var<storage, read> blurred_density_grass: array<f32>;
 @group(0) @binding(7) var<uniform> palette: WaterDotPalette;
-@group(0) @binding(8) var<uniform> terrain_params: TerrainComposeParams;
-@group(0) @binding(9) var near_base_tex: texture_2d<u32>;
-@group(0) @binding(10) var near_override_tex: texture_2d<u32>;
-
-const NEAR_OVERRIDE_EMPTY_SENTINEL: u32 = 65535u;
 
 struct VertexOut {
     @builtin(position)
@@ -90,30 +58,6 @@ fn dot_index(x: i32, y: i32) -> u32 {
 
 fn in_bounds(x: i32, y: i32) -> bool {
     return x >= 0 && y >= 0 && u32(x) < params.width && u32(y) < params.height;
-}
-
-fn positive_mod(x: i32, m: i32) -> i32 {
-    let r = x % m;
-    return select(r + m, r, r >= 0);
-}
-
-fn terrain_occludes(world_cell: vec2<i32>) -> bool {
-    if terrain_params.near_enabled == 0u {
-        return false;
-    }
-    let near_size = vec2<i32>(textureDimensions(near_base_tex));
-    let near_logical = world_cell - vec2<i32>(terrain_params.near_origin_x, terrain_params.near_origin_y);
-    if near_logical.x < 0 || near_logical.y < 0 || near_logical.x >= near_size.x || near_logical.y >= near_size.y {
-        return false;
-    }
-    let tc = vec2<i32>(
-        positive_mod(near_logical.x + terrain_params.ring_offset_x, near_size.x),
-        positive_mod(near_logical.y + terrain_params.ring_offset_y, near_size.y),
-    );
-    let near_override = textureLoad(near_override_tex, tc, 0).r;
-    let near_base = textureLoad(near_base_tex, tc, 0).r;
-    let near_material = select(near_base, near_override, near_override != NEAR_OVERRIDE_EMPTY_SENTINEL);
-    return near_material != 0u;
 }
 
 fn sample_density_water(dot_cell: vec2<i32>) -> f32 {
@@ -247,15 +191,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     if !in_bounds(dot_cell.x, dot_cell.y) {
         discard;
     }
-    let world_cell = vec2<i32>(
-        i32(floor(in.world_xy.x / terrain_params.cell_size_m)),
-        i32(floor(in.world_xy.y / terrain_params.cell_size_m)),
-    );
 
     // Sample density per dot-cell (nearest) so edge decision is dot-stable.
-    if terrain_occludes(world_cell) {
-        discard;
-    }
     let water_density = sample_density_water(dot_cell);
     let stone_density = sample_density_stone(dot_cell);
     let soil_density = sample_density_soil(dot_cell);

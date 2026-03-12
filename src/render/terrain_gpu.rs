@@ -1,9 +1,12 @@
-/// GPU-resident terrain Near-cache pipeline.
+/// GPU-resident terrain cache pipeline and dot-layer composition.
 ///
 /// Architecture:
 ///   Main graph:   `TerrainNearUpdateLabel` (compute) → writes R16Uint material-ID texture
 ///                 `TerrainFarUpdateLabel`  (compute) → aggregates Near into RGBA8Uint Far cache
-///   Core2d graph: `TerrainComposeLabel`    (fragment ViewNode) → reads texture → screen
+///   Core2d graph: `TerrainBackComposeLabel`  → renders background dots into BackDotLayer
+///                 `WaterDotGpuLabel`         → renders particles into MainDotLayer
+///                 `TerrainFrontComposeLabel` → renders terrain dots into MainDotLayer
+///                 `DotLayerComposeLabel`     → composites Back/Main layers to the view target
 ///
 /// Data flow:
 ///   CPU TerrainWorld → `TerrainNearUpdateRequest` (main world, dirty cells on pan/edit)
@@ -12,7 +15,8 @@
 ///     → `TerrainNearUpdateNode` (compute, dispatches only when dirty)
 ///     → `near_texture` (R16Uint, GPU-resident, persistent between frames)
 ///     → `TerrainFarUpdateNode`  (compute, full refresh on Near updates)
-///     → `TerrainComposeNode` (fragment ViewNode, always reads cached texture)
+///     → `TerrainBackComposeNode` / `TerrainFrontComposeNode` (fragment ViewNode)
+///     → `DotLayerComposeNode` (fragment ViewNode)
 ///     → `clear_terrain_cache_dirty` (Cleanup) → dirty = false until next terrain change
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::AtomicBool;
@@ -30,7 +34,7 @@ use bevy::render::render_graph::{
     ViewNodeRunner,
 };
 use bevy::render::render_resource::binding_types::{
-    storage_buffer_read_only_sized, storage_buffer_sized, texture_2d, texture_storage_2d,
+    sampler, storage_buffer_read_only_sized, storage_buffer_sized, texture_2d, texture_storage_2d,
     uniform_buffer, uniform_buffer_sized,
 };
 use bevy::render::render_resource::{
@@ -38,10 +42,12 @@ use bevy::render::render_resource::{
     BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, BufferDescriptor,
     BufferUsages, CachedComputePipelineId, CachedPipelineState, CachedRenderPipelineId,
     ColorTargetState, ColorWrites, ComputePassDescriptor, ComputePipelineDescriptor, Extent3d,
-    FragmentState, MultisampleState, PipelineCache, PrimitiveState, RenderPassDescriptor,
-    RenderPipelineDescriptor, ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines,
-    StorageTextureAccess, Texture, TextureDescriptor, TextureDimension, TextureFormat,
-    TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor, VertexState,
+    FilterMode, FragmentState, LoadOp, MultisampleState, Operations, PipelineCache, PrimitiveState,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, Sampler,
+    SamplerBindingType, SamplerDescriptor, ShaderStages, SpecializedRenderPipeline,
+    SpecializedRenderPipelines, StorageTextureAccess, StoreOp, Texture, TextureDescriptor,
+    TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureView,
+    TextureViewDescriptor, VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::view::{Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
@@ -60,6 +66,7 @@ use crate::physics::state::SimUpdateSet;
 use crate::physics::world::constants::CELL_SIZE_M;
 use crate::physics::world::terrain::{CHUNK_SIZE, CHUNK_SIZE_I32, TerrainCell, TerrainWorld};
 
+use super::water_dot_gpu::WaterDotLayoutRequest;
 use super::{TerrainRenderDiagnostics, water_dot_gpu::WaterDotGpuLabel};
 
 const TERRAIN_NEAR_UPDATE_SHADER_PATH: &str = "shaders/render/terrain_near_update.wgsl";
@@ -68,7 +75,9 @@ const TERRAIN_FAR_UPDATE_SHADER_PATH: &str = "shaders/render/terrain_far_update.
 const TERRAIN_GEN_SHADER_PATH: &str = "shaders/render/terrain_gen.wgsl";
 const TERRAIN_CHUNK_GENERATE_SHADER_PATH: &str = "shaders/render/terrain_chunk_generate.wgsl";
 const TERRAIN_COMPOSE_SHADER_PATH: &str = "shaders/render/terrain_compose.wgsl";
+const DOT_LAYER_COMPOSE_SHADER_PATH: &str = "shaders/render/dot_layer_compose.wgsl";
 const TERRAIN_DOTS_PER_CELL: u32 = 8;
+pub(crate) const DOT_LAYER_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba16Float;
 const NEAR_UPDATE_WORKGROUP: u32 = 64;
 const OVERRIDE_APPLY_WORKGROUP: u32 = 64;
 const CHUNK_GENERATE_WORKGROUP: u32 = 64;
@@ -613,7 +622,13 @@ struct TerrainOverrideApplyLabel;
 struct TerrainBackUpdateLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct TerrainComposeLabel;
+struct TerrainBackComposeLabel;
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+struct TerrainFrontComposeLabel;
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+struct DotLayerComposeLabel;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 struct TerrainChunkGenerateLabel;
@@ -790,7 +805,9 @@ fn palette4_to_linear_rows(palette: &MaterialPalette4) -> [[f32; 4]; 4] {
     })
 }
 
-fn terrain_palette_uniform_from_active(active: Option<&ActivePaletteParams>) -> TerrainPaletteParams {
+fn terrain_palette_uniform_from_active(
+    active: Option<&ActivePaletteParams>,
+) -> TerrainPaletteParams {
     let fallback;
     let source = if let Some(active) = active {
         &active.0
@@ -829,6 +846,16 @@ struct TerrainBackGpuCache {
     _back_texture: Texture,
     back_texture_view: TextureView,
     extent_cells: UVec2,
+}
+
+#[derive(Resource)]
+pub(crate) struct TerrainDotLayerGpuResources {
+    _back_texture: Texture,
+    pub(crate) back_texture_view: TextureView,
+    _main_texture: Texture,
+    pub(crate) main_texture_view: TextureView,
+    pub(crate) sampler: Sampler,
+    extent_px: UVec2,
 }
 
 #[derive(Resource)]
@@ -880,6 +907,52 @@ struct TerrainChunkGenerateGpuResources {
     params_buf: Buffer,
     generated_buf: Buffer,
     readback_buf: Buffer,
+}
+
+fn make_dot_layer_texture(
+    render_device: &RenderDevice,
+    label: &'static str,
+    extent: UVec2,
+) -> Texture {
+    render_device.create_texture(&TextureDescriptor {
+        label: Some(label),
+        size: Extent3d {
+            width: extent.x.max(1),
+            height: extent.y.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: DOT_LAYER_TEXTURE_FORMAT,
+        usage: TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    })
+}
+
+fn make_dot_layer_resources(
+    render_device: &RenderDevice,
+    extent: UVec2,
+) -> TerrainDotLayerGpuResources {
+    let back_texture = make_dot_layer_texture(render_device, "terrain_back_dot_layer", extent);
+    let back_texture_view = back_texture.create_view(&TextureViewDescriptor::default());
+    let main_texture = make_dot_layer_texture(render_device, "terrain_main_dot_layer", extent);
+    let main_texture_view = main_texture.create_view(&TextureViewDescriptor::default());
+    let sampler = render_device.create_sampler(&SamplerDescriptor {
+        label: Some("terrain_dot_layer_sampler"),
+        mag_filter: FilterMode::Nearest,
+        min_filter: FilterMode::Nearest,
+        mipmap_filter: FilterMode::Nearest,
+        ..Default::default()
+    });
+    TerrainDotLayerGpuResources {
+        _back_texture: back_texture,
+        back_texture_view,
+        _main_texture: main_texture,
+        main_texture_view,
+        sampler,
+        extent_px: extent.max(UVec2::ONE),
+    }
 }
 
 /// Set `true` when override data needs to be dispatched via compute; cleared in Cleanup.
@@ -1508,25 +1581,129 @@ impl Node for TerrainBackUpdateNode {
     }
 }
 
-// ── Fragment (TerrainCompose) pipeline & node ─────────────────────────────────
+// ── Dot-layer fragment pipelines & nodes ─────────────────────────────────────
 
 #[derive(Resource)]
-struct TerrainComposePipeline {
+struct TerrainBackComposePipeline {
+    bind_group_layout: BindGroupLayoutDescriptor,
+    shader: Handle<Shader>,
+}
+
+#[derive(Resource)]
+struct TerrainFrontComposePipeline {
+    bind_group_layout: BindGroupLayoutDescriptor,
+    shader: Handle<Shader>,
+}
+
+#[derive(Resource)]
+struct DotLayerComposePipeline {
     bind_group_layout: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-struct TerrainComposePipelineKey {
+struct TerrainDotPipelineKey {
     target_format: TextureFormat,
     sample_count: u32,
 }
 
-impl SpecializedRenderPipeline for TerrainComposePipeline {
-    type Key = TerrainComposePipelineKey;
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct DotLayerComposePipelineKey {
+    target_format: TextureFormat,
+    sample_count: u32,
+}
+
+fn alpha_blend_state() -> BlendState {
+    BlendState {
+        color: BlendComponent {
+            src_factor: BlendFactor::SrcAlpha,
+            dst_factor: BlendFactor::OneMinusSrcAlpha,
+            operation: BlendOperation::Add,
+        },
+        alpha: BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::OneMinusSrcAlpha,
+            operation: BlendOperation::Add,
+        },
+    }
+}
+
+impl SpecializedRenderPipeline for TerrainBackComposePipeline {
+    type Key = TerrainDotPipelineKey;
+
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
         RenderPipelineDescriptor {
-            label: Some("terrain_compose_pipeline".into()),
+            label: Some("terrain_back_compose_pipeline".into()),
+            layout: vec![self.bind_group_layout.clone()],
+            vertex: VertexState {
+                shader: self.shader.clone(),
+                entry_point: Some("vs_main".into()),
+                shader_defs: vec![],
+                buffers: vec![],
+            },
+            fragment: Some(FragmentState {
+                shader: self.shader.clone(),
+                entry_point: Some("fs_back_main".into()),
+                shader_defs: vec![],
+                targets: vec![Some(ColorTargetState {
+                    format: key.target_format,
+                    blend: Some(alpha_blend_state()),
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState {
+                count: key.sample_count,
+                ..Default::default()
+            },
+            push_constant_ranges: vec![],
+            zero_initialize_workgroup_memory: true,
+        }
+    }
+}
+
+impl SpecializedRenderPipeline for TerrainFrontComposePipeline {
+    type Key = TerrainDotPipelineKey;
+
+    fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        RenderPipelineDescriptor {
+            label: Some("terrain_front_compose_pipeline".into()),
+            layout: vec![self.bind_group_layout.clone()],
+            vertex: VertexState {
+                shader: self.shader.clone(),
+                entry_point: Some("vs_main".into()),
+                shader_defs: vec![],
+                buffers: vec![],
+            },
+            fragment: Some(FragmentState {
+                shader: self.shader.clone(),
+                entry_point: Some("fs_front_main".into()),
+                shader_defs: vec![],
+                targets: vec![Some(ColorTargetState {
+                    format: key.target_format,
+                    blend: Some(alpha_blend_state()),
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState {
+                count: key.sample_count,
+                ..Default::default()
+            },
+            push_constant_ranges: vec![],
+            zero_initialize_workgroup_memory: true,
+        }
+    }
+}
+
+impl SpecializedRenderPipeline for DotLayerComposePipeline {
+    type Key = DotLayerComposePipelineKey;
+
+    fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
+        RenderPipelineDescriptor {
+            label: Some("dot_layer_compose_pipeline".into()),
             layout: vec![self.bind_group_layout.clone()],
             vertex: VertexState {
                 shader: self.shader.clone(),
@@ -1540,18 +1717,7 @@ impl SpecializedRenderPipeline for TerrainComposePipeline {
                 shader_defs: vec![],
                 targets: vec![Some(ColorTargetState {
                     format: key.target_format,
-                    blend: Some(BlendState {
-                        color: BlendComponent {
-                            src_factor: BlendFactor::SrcAlpha,
-                            dst_factor: BlendFactor::OneMinusSrcAlpha,
-                            operation: BlendOperation::Add,
-                        },
-                        alpha: BlendComponent {
-                            src_factor: BlendFactor::One,
-                            dst_factor: BlendFactor::OneMinusSrcAlpha,
-                            operation: BlendOperation::Add,
-                        },
-                    }),
+                    blend: Some(alpha_blend_state()),
                     write_mask: ColorWrites::ALL,
                 })],
             }),
@@ -1568,29 +1734,65 @@ impl SpecializedRenderPipeline for TerrainComposePipeline {
 }
 
 #[derive(Component)]
-struct ViewTerrainComposePipeline {
+struct ViewTerrainBackComposePipeline {
     id: CachedRenderPipelineId,
 }
 
-#[derive(Default)]
-struct TerrainComposeNode;
+#[derive(Component)]
+struct ViewTerrainFrontComposePipeline {
+    id: CachedRenderPipelineId,
+}
 
-impl ViewNode for TerrainComposeNode {
+#[derive(Component)]
+struct ViewDotLayerComposePipeline {
+    id: CachedRenderPipelineId,
+}
+
+fn create_terrain_compose_bind_group(
+    render_context: &mut RenderContext,
+    world: &World,
+    resources: &TerrainNearGpuResources,
+) -> Option<bevy::render::render_resource::BindGroup> {
+    let pipeline_cache = world.resource::<PipelineCache>();
+    let view_uniforms = world.resource::<ViewUniforms>();
+    let view_binding = view_uniforms.uniforms.binding()?;
+    let pipeline = world.resource::<TerrainBackComposePipeline>();
+    Some(render_context.render_device().create_bind_group(
+        "terrain_dot_layer_bind_group",
+        &pipeline_cache.get_bind_group_layout(&pipeline.bind_group_layout),
+        &BindGroupEntries::sequential((
+            view_binding,
+            resources.compose_params_buf.as_entire_binding(),
+            resources.compose_palette_buf.as_entire_binding(),
+            BindingResource::TextureView(&resources.near_cache.near_texture_view),
+            BindingResource::TextureView(&resources.override_cache.near_texture_view),
+            BindingResource::TextureView(&resources.far_cache.far_texture_view),
+            BindingResource::TextureView(&resources.back_cache.back_texture_view),
+        )),
+    ))
+}
+
+#[derive(Default)]
+struct TerrainBackComposeNode;
+
+impl ViewNode for TerrainBackComposeNode {
     type ViewQuery = (
-        &'static ViewTarget,
         &'static ViewUniformOffset,
-        &'static ViewTerrainComposePipeline,
+        &'static ViewTerrainBackComposePipeline,
     );
 
     fn run(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (view_target, view_uniform_offset, view_pipeline): QueryItem<Self::ViewQuery>,
+        (view_uniform_offset, view_pipeline): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
-        let _profile_span = cpu_profile_span("terrain", "compose_node").entered();
+        let _profile_span = cpu_profile_span("terrain", "back_compose_node").entered();
         let Some(resources) = world.get_resource::<TerrainNearGpuResources>() else {
+            return Ok(());
+        };
+        let Some(dot_layers) = world.get_resource::<TerrainDotLayerGpuResources>() else {
             return Ok(());
         };
         let pipeline_cache = world.resource::<PipelineCache>();
@@ -1598,38 +1800,32 @@ impl ViewNode for TerrainComposeNode {
             static WARNED: std::sync::atomic::AtomicBool =
                 std::sync::atomic::AtomicBool::new(false);
             if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                warn!("terrain_gpu: compose pipeline not ready");
+                warn!("terrain_gpu: back compose pipeline not ready");
             }
             return Ok(());
         };
-        let view_uniforms = world.resource::<ViewUniforms>();
-        let Some(view_binding) = view_uniforms.uniforms.binding() else {
+        let Some(bind_group) = create_terrain_compose_bind_group(render_context, world, resources)
+        else {
             return Ok(());
         };
-        let compose_pipeline = world.resource::<TerrainComposePipeline>();
-        let bind_group = render_context.render_device().create_bind_group(
-            "terrain_compose_bg",
-            &pipeline_cache.get_bind_group_layout(&compose_pipeline.bind_group_layout),
-            &BindGroupEntries::sequential((
-                view_binding,
-                resources.compose_params_buf.as_entire_binding(),
-                resources.compose_palette_buf.as_entire_binding(),
-                BindingResource::TextureView(&resources.near_cache.near_texture_view),
-                BindingResource::TextureView(&resources.override_cache.near_texture_view),
-                BindingResource::TextureView(&resources.far_cache.far_texture_view),
-                BindingResource::TextureView(&resources.back_cache.back_texture_view),
-            )),
-        );
 
         let profile_query = begin_gpu_pass_query(
             world,
             "terrain",
-            "compose",
+            "back_compose",
             render_context.command_encoder(),
         );
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
-            label: Some("terrain_compose_pass"),
-            color_attachments: &[Some(view_target.get_color_attachment())],
+            label: Some("terrain_back_compose_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &dot_layers.back_texture_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: Operations {
+                    load: LoadOp::Clear(LinearRgba::NONE.into()),
+                    store: StoreOp::Store,
+                },
+            })],
             depth_stencil_attachment: None,
             timestamp_writes: profile_query
                 .as_ref()
@@ -1638,6 +1834,140 @@ impl ViewNode for TerrainComposeNode {
         });
         pass.set_render_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[view_uniform_offset.offset]);
+        pass.draw(0..6, 0..1);
+        drop(pass);
+        end_gpu_pass_query(world, render_context.command_encoder(), profile_query);
+        resolve_gpu_profiler_queries(world, render_context.command_encoder());
+
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct TerrainFrontComposeNode;
+
+impl ViewNode for TerrainFrontComposeNode {
+    type ViewQuery = (
+        &'static ViewUniformOffset,
+        &'static ViewTerrainFrontComposePipeline,
+    );
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (view_uniform_offset, view_pipeline): QueryItem<Self::ViewQuery>,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("terrain", "front_compose_node").entered();
+        let Some(resources) = world.get_resource::<TerrainNearGpuResources>() else {
+            return Ok(());
+        };
+        let Some(dot_layers) = world.get_resource::<TerrainDotLayerGpuResources>() else {
+            return Ok(());
+        };
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(pipeline) = pipeline_cache.get_render_pipeline(view_pipeline.id) else {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                warn!("terrain_gpu: front compose pipeline not ready");
+            }
+            return Ok(());
+        };
+        let Some(bind_group) = create_terrain_compose_bind_group(render_context, world, resources)
+        else {
+            return Ok(());
+        };
+
+        let profile_query = begin_gpu_pass_query(
+            world,
+            "terrain",
+            "front_compose",
+            render_context.command_encoder(),
+        );
+        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("terrain_front_compose_pass"),
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &dot_layers.main_texture_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: Operations {
+                    load: LoadOp::Load,
+                    store: StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.render_pass_timestamp_writes()),
+            occlusion_query_set: None,
+        });
+        pass.set_render_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[view_uniform_offset.offset]);
+        pass.draw(0..6, 0..1);
+        drop(pass);
+        end_gpu_pass_query(world, render_context.command_encoder(), profile_query);
+        resolve_gpu_profiler_queries(world, render_context.command_encoder());
+
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct DotLayerComposeNode;
+
+impl ViewNode for DotLayerComposeNode {
+    type ViewQuery = (&'static ViewTarget, &'static ViewDotLayerComposePipeline);
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        (view_target, view_pipeline): QueryItem<Self::ViewQuery>,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("terrain", "dot_layer_compose_node").entered();
+        let Some(dot_layers) = world.get_resource::<TerrainDotLayerGpuResources>() else {
+            return Ok(());
+        };
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let Some(pipeline) = pipeline_cache.get_render_pipeline(view_pipeline.id) else {
+            static WARNED: std::sync::atomic::AtomicBool =
+                std::sync::atomic::AtomicBool::new(false);
+            if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                warn!("terrain_gpu: dot layer compose pipeline not ready");
+            }
+            return Ok(());
+        };
+        let compose_pipeline = world.resource::<DotLayerComposePipeline>();
+        let bind_group = render_context.render_device().create_bind_group(
+            "dot_layer_compose_bind_group",
+            &pipeline_cache.get_bind_group_layout(&compose_pipeline.bind_group_layout),
+            &BindGroupEntries::sequential((
+                BindingResource::TextureView(&dot_layers.back_texture_view),
+                BindingResource::TextureView(&dot_layers.main_texture_view),
+                &dot_layers.sampler,
+            )),
+        );
+
+        let profile_query = begin_gpu_pass_query(
+            world,
+            "terrain",
+            "final_compose",
+            render_context.command_encoder(),
+        );
+        let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
+            label: Some("dot_layer_compose_pass"),
+            color_attachments: &[Some(view_target.get_color_attachment())],
+            depth_stencil_attachment: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.render_pass_timestamp_writes()),
+            occlusion_query_set: None,
+        });
+        pass.set_render_pipeline(pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
         pass.draw(0..6, 0..1);
         drop(pass);
         end_gpu_pass_query(world, render_context.command_encoder(), profile_query);
@@ -2641,6 +2971,7 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
         generated_buf: chunk_generated_buf,
         readback_buf: chunk_readback_buf,
     });
+    commands.insert_resource(make_dot_layer_resources(&render_device, UVec2::ONE));
     commands.insert_resource(TerrainChunkGenerateDirty(false));
     commands.insert_resource(TerrainChunkReadbackState::default());
 }
@@ -2795,9 +3126,9 @@ fn init_terrain_chunk_generate_pipeline(
     });
 }
 
-fn init_terrain_compose_pipeline(mut commands: Commands, asset_server: Res<AssetServer>) {
+fn init_terrain_dot_layer_pipelines(mut commands: Commands, asset_server: Res<AssetServer>) {
     let bind_group_layout = BindGroupLayoutDescriptor::new(
-        "terrain_compose_layout",
+        "terrain_dot_layer_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::VERTEX_FRAGMENT,
             (
@@ -2817,18 +3148,56 @@ fn init_terrain_compose_pipeline(mut commands: Commands, asset_server: Res<Asset
             ),
         ),
     );
-    commands.insert_resource(TerrainComposePipeline {
+    let shader = asset_server.load(TERRAIN_COMPOSE_SHADER_PATH);
+    commands.insert_resource(TerrainBackComposePipeline {
+        bind_group_layout: bind_group_layout.clone(),
+        shader: shader.clone(),
+    });
+    commands.insert_resource(TerrainFrontComposePipeline {
         bind_group_layout,
-        shader: asset_server.load(TERRAIN_COMPOSE_SHADER_PATH),
+        shader,
+    });
+
+    let compose_bind_group_layout = BindGroupLayoutDescriptor::new(
+        "dot_layer_compose_layout",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::FRAGMENT,
+            (
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+            ),
+        ),
+    );
+    commands.insert_resource(DotLayerComposePipeline {
+        bind_group_layout: compose_bind_group_layout,
+        shader: asset_server.load(DOT_LAYER_COMPOSE_SHADER_PATH),
     });
 }
 
-fn link_terrain_and_water_graph(mut graph: ResMut<RenderGraph>) {
-    // Add Core2d edge: TerrainCompose → WaterDotGpu.
-    // Water pass performs terrain-occlusion discard so terrain remains visually in front.
+fn link_dot_layer_graph(mut graph: ResMut<RenderGraph>) {
     if let Some(core2d) = graph.get_sub_graph_mut(Core2d) {
-        let _ = core2d.try_add_node_edge(TerrainComposeLabel, WaterDotGpuLabel);
+        let _ = core2d.try_add_node_edge(TerrainBackComposeLabel, WaterDotGpuLabel);
+        let _ = core2d.try_add_node_edge(WaterDotGpuLabel, TerrainFrontComposeLabel);
+        let _ = core2d.try_add_node_edge(TerrainFrontComposeLabel, DotLayerComposeLabel);
     }
+}
+
+fn prepare_terrain_dot_layer_targets(
+    mut commands: Commands,
+    render_device: Res<RenderDevice>,
+    layout_request: Option<Res<WaterDotLayoutRequest>>,
+    resources: Option<Res<TerrainDotLayerGpuResources>>,
+) {
+    let desired_extent = layout_request
+        .map(|request| request.extent_px())
+        .unwrap_or(UVec2::ONE);
+    if let Some(resources) = resources {
+        if resources.extent_px == desired_extent {
+            return;
+        }
+    }
+    commands.insert_resource(make_dot_layer_resources(&render_device, desired_extent));
 }
 
 // ── Render prepare / cleanup systems ─────────────────────────────────────────
@@ -3237,35 +3606,71 @@ fn readback_generated_chunks(
     inner.mapped_meta = Some(meta);
 }
 
-fn prepare_terrain_compose_pipeline(
+fn prepare_terrain_dot_layer_pipelines(
     mut commands: Commands,
-    pipeline: Res<TerrainComposePipeline>,
-    mut pipelines: ResMut<SpecializedRenderPipelines<TerrainComposePipeline>>,
+    back_pipeline: Res<TerrainBackComposePipeline>,
+    front_pipeline: Res<TerrainFrontComposePipeline>,
+    compose_pipeline: Res<DotLayerComposePipeline>,
+    mut back_pipelines: ResMut<SpecializedRenderPipelines<TerrainBackComposePipeline>>,
+    mut front_pipelines: ResMut<SpecializedRenderPipelines<TerrainFrontComposePipeline>>,
+    mut compose_pipelines: ResMut<SpecializedRenderPipelines<DotLayerComposePipeline>>,
     pipeline_cache: Res<PipelineCache>,
     views: Query<(Entity, &ViewTarget, Option<&Msaa>)>,
 ) {
+    let back_id = back_pipelines.specialize(
+        &pipeline_cache,
+        &back_pipeline,
+        TerrainDotPipelineKey {
+            target_format: DOT_LAYER_TEXTURE_FORMAT,
+            sample_count: 1,
+        },
+    );
+    let front_id = front_pipelines.specialize(
+        &pipeline_cache,
+        &front_pipeline,
+        TerrainDotPipelineKey {
+            target_format: DOT_LAYER_TEXTURE_FORMAT,
+            sample_count: 1,
+        },
+    );
+    static BACK_ERR_WARNED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static FRONT_ERR_WARNED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if let CachedPipelineState::Err(e) = pipeline_cache.get_render_pipeline_state(back_id) {
+        if !BACK_ERR_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            warn!("terrain_gpu: back compose pipeline error: {e}");
+        }
+    }
+    if let CachedPipelineState::Err(e) = pipeline_cache.get_render_pipeline_state(front_id) {
+        if !FRONT_ERR_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            warn!("terrain_gpu: front compose pipeline error: {e}");
+        }
+    }
     for (entity, view_target, msaa) in &views {
-        let id = pipelines.specialize(
+        let compose_id = compose_pipelines.specialize(
             &pipeline_cache,
-            &pipeline,
-            TerrainComposePipelineKey {
+            &compose_pipeline,
+            DotLayerComposePipelineKey {
                 target_format: view_target.main_texture_format(),
                 sample_count: msaa.map_or(1, Msaa::samples),
             },
         );
-        match pipeline_cache.get_render_pipeline_state(id) {
+        match pipeline_cache.get_render_pipeline_state(compose_id) {
             CachedPipelineState::Err(e) => {
                 static COMPOSE_ERR_WARNED: std::sync::atomic::AtomicBool =
                     std::sync::atomic::AtomicBool::new(false);
                 if !COMPOSE_ERR_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    warn!("terrain_gpu: compose pipeline error: {e}");
+                    warn!("terrain_gpu: dot layer compose pipeline error: {e}");
                 }
             }
             _ => {}
         }
-        commands
-            .entity(entity)
-            .insert(ViewTerrainComposePipeline { id });
+        commands.entity(entity).insert((
+            ViewTerrainBackComposePipeline { id: back_id },
+            ViewTerrainFrontComposePipeline { id: front_id },
+            ViewDotLayerComposePipeline { id: compose_id },
+        ));
     }
 }
 
@@ -3316,7 +3721,9 @@ impl Plugin for TerrainGpuPlugin {
         let render_app = app.sub_app_mut(RenderApp);
         render_app
             .insert_resource(chunk_readback_for_render)
-            .init_resource::<SpecializedRenderPipelines<TerrainComposePipeline>>()
+            .init_resource::<SpecializedRenderPipelines<TerrainBackComposePipeline>>()
+            .init_resource::<SpecializedRenderPipelines<TerrainFrontComposePipeline>>()
+            .init_resource::<SpecializedRenderPipelines<DotLayerComposePipeline>>()
             .add_systems(
                 RenderStartup,
                 (
@@ -3325,16 +3732,20 @@ impl Plugin for TerrainGpuPlugin {
                     init_terrain_override_apply_pipeline,
                     init_terrain_chunk_generate_pipeline,
                     init_terrain_far_update_pipeline,
-                    init_terrain_compose_pipeline,
-                    link_terrain_and_water_graph,
+                    init_terrain_dot_layer_pipelines,
+                    link_dot_layer_graph,
                 ),
+            )
+            .add_systems(
+                Render,
+                prepare_terrain_dot_layer_targets.in_set(RenderSystems::PrepareResources),
             )
             .add_systems(
                 Render,
                 (
                     prepare_terrain_near_uploads,
                     prepare_terrain_chunk_generate_uploads,
-                    prepare_terrain_compose_pipeline,
+                    prepare_terrain_dot_layer_pipelines,
                 )
                     .in_set(RenderSystems::Prepare),
             )
@@ -3344,16 +3755,24 @@ impl Plugin for TerrainGpuPlugin {
                     .chain()
                     .in_set(RenderSystems::Cleanup),
             )
-            // TerrainComposeLabel: ViewNode in Core2d graph.
-            .add_render_graph_node::<ViewNodeRunner<TerrainComposeNode>>(
+            .add_render_graph_node::<ViewNodeRunner<TerrainBackComposeNode>>(
                 Core2d,
-                TerrainComposeLabel,
+                TerrainBackComposeLabel,
+            )
+            .add_render_graph_node::<ViewNodeRunner<TerrainFrontComposeNode>>(
+                Core2d,
+                TerrainFrontComposeLabel,
+            )
+            .add_render_graph_node::<ViewNodeRunner<DotLayerComposeNode>>(
+                Core2d,
+                DotLayerComposeLabel,
             )
             .add_render_graph_edges(
                 Core2d,
                 (
                     Node2d::StartMainPass,
-                    TerrainComposeLabel,
+                    TerrainBackComposeLabel,
+                    DotLayerComposeLabel,
                     Node2d::MainTransparentPass,
                 ),
             );

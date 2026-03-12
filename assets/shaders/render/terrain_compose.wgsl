@@ -438,20 +438,12 @@ fn terrain_near_color(
     return vec4<f32>(soil_color(fill_palette_index(dot.x, dot.y, seed)), alpha);
 }
 
-// ── Fragment ──────────────────────────────────────────────────────────────────
-
-@fragment
-fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    // World position → global cell coordinate (world_xy / cell_size_m, floored).
-    let cell_f = in.world_xy / params.cell_size_m;
-    let world_cell = vec2<i32>(i32(floor(cell_f.x)), i32(floor(cell_f.y)));
-
-    // Dot coordinates for palette variation (8×8 sub-cell grid, global indexing).
-    let dot_f = in.world_xy / params.dot_size_m;
-    let dot = vec2<i32>(i32(floor(dot_f.x)), i32(floor(dot_f.y)));
-
-    // Continuous cell-space coordinate (not quantized to integer cell centers).
-    // This avoids visible cell-step jitter in distant layers while keeping dot pattern stable.
+fn terrain_background_layer(
+    world_xy: vec2<f32>,
+    world_cell: vec2<i32>,
+    dot: vec2<i32>,
+    cell_f: vec2<f32>,
+) -> vec4<f32> {
     let world_cell_coord = cell_f;
     let near_contains_cell = near_contains_world_cell(world_cell);
     var far_layer = select(
@@ -480,15 +472,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let scale_excess =
         params.back_scale_multiplier
             / max(params.back_min_screen_resolution_divisor * front_mpp_cells_per_px, 1.0e-6);
-    // Asymptotically approaches Far (1.0) toward zoom-out; never hard-clamps at 1.
     let back_scale = 1.0 + max(scale_excess, 0.0);
-    // Derive camera pivot from the same view matrix used for world_xy, so Back
-    // scale/pan stays frame-coherent with zoom and avoids 1-frame drift.
     let camera_world = view.world_from_clip * vec4<f32>(0.0, 0.0, 0.0, 1.0);
     let camera_cell = (camera_world.xy / max(camera_world.w, 1.0e-6)) / params.cell_size_m;
     let back_world_cell_coord = camera_cell + (world_cell_coord - camera_cell) * back_scale;
-    // Back dot phase uses sub-cell indexing to avoid 1-cell stepwise motion during pan.
-    // At high zoom this still stays <= Near-sized dots because Back itself is scaled down.
     let back_dots_per_cell = f32(max(params.dots_per_cell, 1u));
     let back_dot = vec2<i32>(
         i32(floor(back_world_cell_coord.x * back_dots_per_cell)),
@@ -499,7 +486,6 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         back_tex,
         vec2<i32>(params.back_origin_x, params.back_origin_y),
         params.back_downsample,
-        // Keep Back texel magnification capped to ~1 dot (2 px) while preserving Far-like behavior.
         back_world_cell_coord,
         back_dot,
         params.palette_seed,
@@ -511,44 +497,64 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         srgb_to_linear(params.sky_color_b / 255.0),
     );
     var color = sky_color;
-    // Air-perspective tint for distant backdrop.
     let back_tinted = layer_over(back_layer.rgb, sky_color, params.back_atmosphere_tint);
     color = layer_over(color, back_tinted, back_layer.a);
     color = layer_over(color, far_layer.rgb, far_layer.a);
-
-    // Near overlays Far when enabled.
-    if params.near_enabled != 0u {
-        let near_logical = world_cell - vec2<i32>(params.near_origin_x, params.near_origin_y);
-        let near_size = vec2<i32>(textureDimensions(near_base_tex));
-        if near_logical.x >= 0 && near_logical.y >= 0
-            && near_logical.x < near_size.x && near_logical.y < near_size.y {
-            let tc = vec2<i32>(
-                positive_mod(near_logical.x + params.ring_offset_x, near_size.x),
-                positive_mod(near_logical.y + params.ring_offset_y, near_size.y),
-            );
-            let near_override = textureLoad(near_override_tex, tc, 0).r;
-            let near_material = select(
-                textureLoad(near_base_tex, tc, 0).r,
-                near_override,
-                near_override != NEAR_OVERRIDE_EMPTY_SENTINEL,
-            );
-            let has_override = near_override != NEAR_OVERRIDE_EMPTY_SENTINEL;
-            // Priority:
-            // 1) override exists: authoritative for solid; empty keeps Back/Far visible.
-            // 2) no override: draw base Near only when solid; empty keeps Back/Far.
-            if has_override {
-                if near_material != 0u {
-                    let near_layer =
-                        terrain_near_color(near_material, world_cell, dot, params.palette_seed);
-                    color = layer_over(color, near_layer.rgb, near_layer.a);
-                }
-            } else if near_material != 0u {
-                let near_layer =
-                    terrain_near_color(near_material, world_cell, dot, params.palette_seed);
-                color = layer_over(color, near_layer.rgb, near_layer.a);
-            }
-        }
-    }
-
     return vec4<f32>(color, 1.0);
+}
+
+fn terrain_front_layer(
+    world_cell: vec2<i32>,
+    dot: vec2<i32>,
+) -> vec4<f32> {
+    if params.near_enabled == 0u {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let near_logical = world_cell - vec2<i32>(params.near_origin_x, params.near_origin_y);
+    let near_size = vec2<i32>(textureDimensions(near_base_tex));
+    if near_logical.x < 0 || near_logical.y < 0
+        || near_logical.x >= near_size.x || near_logical.y >= near_size.y {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    let tc = vec2<i32>(
+        positive_mod(near_logical.x + params.ring_offset_x, near_size.x),
+        positive_mod(near_logical.y + params.ring_offset_y, near_size.y),
+    );
+    let near_override = textureLoad(near_override_tex, tc, 0).r;
+    let near_material = select(
+        textureLoad(near_base_tex, tc, 0).r,
+        near_override,
+        near_override != NEAR_OVERRIDE_EMPTY_SENTINEL,
+    );
+    let has_override = near_override != NEAR_OVERRIDE_EMPTY_SENTINEL;
+    if has_override {
+        if near_material != 0u {
+            return terrain_near_color(near_material, world_cell, dot, params.palette_seed);
+        }
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    if near_material != 0u {
+        return terrain_near_color(near_material, world_cell, dot, params.palette_seed);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
+// ── Fragment ──────────────────────────────────────────────────────────────────
+
+@fragment
+fn fs_back_main(in: VertexOut) -> @location(0) vec4<f32> {
+    let cell_f = in.world_xy / params.cell_size_m;
+    let world_cell = vec2<i32>(i32(floor(cell_f.x)), i32(floor(cell_f.y)));
+    let dot_f = in.world_xy / params.dot_size_m;
+    let dot = vec2<i32>(i32(floor(dot_f.x)), i32(floor(dot_f.y)));
+    return terrain_background_layer(in.world_xy, world_cell, dot, cell_f);
+}
+
+@fragment
+fn fs_front_main(in: VertexOut) -> @location(0) vec4<f32> {
+    let cell_f = in.world_xy / params.cell_size_m;
+    let world_cell = vec2<i32>(i32(floor(cell_f.x)), i32(floor(cell_f.y)));
+    let dot_f = in.world_xy / params.dot_size_m;
+    let dot = vec2<i32>(i32(floor(dot_f.x)), i32(floor(dot_f.y)));
+    return terrain_front_layer(world_cell, dot);
 }

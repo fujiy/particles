@@ -10,26 +10,25 @@ use bevy::render::render_graph::{
     ViewNodeRunner,
 };
 use bevy::render::render_resource::binding_types::{
-    storage_buffer_read_only_sized, storage_buffer_sized, texture_2d, uniform_buffer,
-    uniform_buffer_sized,
+    storage_buffer_read_only_sized, storage_buffer_sized, uniform_buffer, uniform_buffer_sized,
 };
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayout, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntries, BindingResource, BlendComponent, BlendFactor, BlendOperation,
-    BlendState, Buffer, BufferDescriptor, BufferUsages, CachedComputePipelineId,
-    CachedPipelineState, CachedRenderPipelineId, ColorTargetState, ColorWrites,
-    ComputePassDescriptor, ComputePipelineDescriptor, FragmentState, MultisampleState,
-    PipelineCache, PrimitiveState, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages,
-    SpecializedRenderPipeline, SpecializedRenderPipelines, TextureFormat, TextureSampleType,
+    BindGroupLayoutEntries, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer,
+    BufferDescriptor, BufferUsages, CachedComputePipelineId, CachedPipelineState,
+    CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor,
+    ComputePipelineDescriptor, FragmentState, LoadOp, MultisampleState, Operations, PipelineCache,
+    PrimitiveState, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
+    ShaderStages, SpecializedRenderPipeline, SpecializedRenderPipelines, StoreOp, TextureFormat,
     VertexState,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
-use bevy::render::view::{Msaa, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
+use bevy::render::view::{ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 use bevy::window::PrimaryWindow;
 use bytemuck::{Pod, Zeroable};
 
-use super::terrain_gpu::TerrainNearGpuResources;
+use super::terrain_gpu::{DOT_LAYER_TEXTURE_FORMAT, TerrainDotLayerGpuResources};
 use crate::camera_controller::MainCamera;
 use crate::params::palette::{MaterialPalette4, PaletteColor};
 use crate::params::{ActivePaletteParams, ActiveRenderParams};
@@ -168,8 +167,14 @@ fn dot_grid_layout() -> DotGridLayout {
 }
 
 #[derive(Resource, Clone)]
-struct WaterDotLayoutRequest {
+pub(crate) struct WaterDotLayoutRequest {
     layout: DotGridLayout,
+}
+
+impl WaterDotLayoutRequest {
+    pub(crate) fn extent_px(&self) -> UVec2 {
+        UVec2::new(self.layout.width.max(1), self.layout.height.max(1))
+    }
 }
 
 impl Default for WaterDotLayoutRequest {
@@ -786,9 +791,6 @@ fn init_water_dot_gpu_render_pipeline(mut commands: Commands, asset_server: Res<
                 storage_buffer_read_only_sized(false, None),
                 storage_buffer_read_only_sized(false, None),
                 uniform_buffer_sized(false, core::num::NonZeroU64::new(320)),
-                uniform_buffer_sized(false, None),
-                texture_2d(TextureSampleType::Uint),
-                texture_2d(TextureSampleType::Uint),
             ),
         ),
     );
@@ -804,15 +806,15 @@ fn prepare_water_dot_gpu_pipeline(
     pipeline: Res<WaterDotGpuPipeline>,
     mut pipelines: ResMut<SpecializedRenderPipelines<WaterDotGpuPipeline>>,
     pipeline_cache: Res<PipelineCache>,
-    views: Query<(Entity, &ViewTarget, Option<&Msaa>)>,
+    views: Query<Entity, With<ViewTarget>>,
 ) {
-    for (entity, view_target, msaa) in &views {
+    for entity in &views {
         let id = pipelines.specialize(
             &pipeline_cache,
             &pipeline,
             WaterDotPipelineKey {
-                target_format: view_target.main_texture_format(),
-                sample_count: msaa.map_or(1, Msaa::samples),
+                target_format: DOT_LAYER_TEXTURE_FORMAT,
+                sample_count: 1,
             },
         );
         commands
@@ -1264,24 +1266,20 @@ impl Node for WaterDotPreprocessNode {
 }
 
 impl ViewNode for WaterDotGpuNode {
-    type ViewQuery = (
-        &'static ViewTarget,
-        &'static ViewUniformOffset,
-        &'static ViewWaterDotGpuPipeline,
-    );
+    type ViewQuery = (&'static ViewUniformOffset, &'static ViewWaterDotGpuPipeline);
 
     fn run(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext,
-        (view_target, view_uniform_offset, view_pipeline): QueryItem<Self::ViewQuery>,
+        (view_uniform_offset, view_pipeline): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
         let _profile_span = cpu_profile_span("water", "render_node").entered();
         let Some(resources) = world.get_resource::<WaterDotGpuResources>() else {
             return Ok(());
         };
-        let Some(terrain_resources) = world.get_resource::<TerrainNearGpuResources>() else {
+        let Some(dot_layers) = world.get_resource::<TerrainDotLayerGpuResources>() else {
             return Ok(());
         };
 
@@ -1318,21 +1316,22 @@ impl ViewNode for WaterDotGpuNode {
                 resources.blurred_density_sand_buf.as_entire_binding(),
                 resources.blurred_density_grass_buf.as_entire_binding(),
                 resources.palette_buf.as_entire_binding(),
-                terrain_resources.compose_params_buf.as_entire_binding(),
-                BindingResource::TextureView(&terrain_resources.near_cache.near_texture_view),
-                BindingResource::TextureView(&terrain_resources.override_cache.near_texture_view),
             )),
         );
 
-        let profile_query = begin_gpu_pass_query(
-            world,
-            "water",
-            "render",
-            render_context.command_encoder(),
-        );
+        let profile_query =
+            begin_gpu_pass_query(world, "water", "render", render_context.command_encoder());
         let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("water_dot_gpu_pass"),
-            color_attachments: &[Some(view_target.get_color_attachment())],
+            color_attachments: &[Some(RenderPassColorAttachment {
+                view: &dot_layers.main_texture_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: Operations {
+                    load: LoadOp::Clear(LinearRgba::NONE.into()),
+                    store: StoreOp::Store,
+                },
+            })],
             depth_stencil_attachment: None,
             timestamp_writes: profile_query
                 .as_ref()

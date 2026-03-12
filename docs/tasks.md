@@ -336,7 +336,7 @@
 
 ### [REND-DOTLAYER-01] ドット絵描画レイヤー整理（Back/Main/Final Compose）
 
-- Status: `Planned`
+- Status: `Done`
 - 背景:
   - 現行の `TerrainCompose` は地形描画に加えて空・Back・Far を含む最終色合成まで担っており、pass 名と責務が一致していない。
   - 粒子描画は terrain cache を直接参照してセル単位で discard しているため、terrain 側のドット単位欠け表現と責務が分離していない。
@@ -348,13 +348,13 @@
   - `FinalCompose` で `BackDotLayer` と `MainDotLayer` を合成し、実画面への拡大はこの最終段へ集約する。
   - pixel perfect の最終調整は後続とし、まずは責務分離と今後の拡張しやすさを優先する。
 - Subtasks:
-  - [ ] 現行 render graph の pass 役割を棚卸しし、`TerrainCompose` / `WaterDotGpu` / Back/Far 更新の責務境界を `docs/tasks.md` 上で明文化する。
-  - [ ] 低解像度 `BackDotLayer` render target と生成 pass を追加し、空・Back・Far 補完をこのレイヤーへ移す。
-  - [ ] 低解像度 RGBA の `MainDotLayer` render target を追加し、粒子描画を最終画面ではなく main layer へ出力する。
-  - [ ] terrain 前景 pass を追加し、欠けた dot では alpha を残して粒子が見える構成へ移行する。
-  - [ ] 粒子 shader から terrain cache 参照によるセル単位 discard を外し、レイヤー順で前後関係を決める構成へ整理する。
-  - [ ] `FinalCompose` pass を追加し、`BackDotLayer + MainDotLayer (+ 将来の object layer)` を合成して画面へ出す。
-  - [ ] screenshot artifact で「terrain 欠けから粒子が見える」「Near 読み込み中だけ Far が補完される」「grass/soil edge 表現が維持される」を確認する。
+  - [x] 現行 render graph の pass 役割を棚卸しし、`TerrainCompose` / `WaterDotGpu` / Back/Far 更新の責務境界を `docs/tasks.md` 上で明文化する。
+  - [x] 低解像度 `BackDotLayer` render target と生成 pass を追加し、空・Back・Far 補完をこのレイヤーへ移す。
+  - [x] 低解像度 RGBA の `MainDotLayer` render target を追加し、粒子描画を最終画面ではなく main layer へ出力する。
+  - [x] terrain 前景 pass を追加し、欠けた dot では alpha を残して粒子が見える構成へ移行する。
+  - [x] 粒子 shader から terrain cache 参照によるセル単位 discard を外し、レイヤー順で前後関係を決める構成へ整理する。
+  - [x] `FinalCompose` pass を追加し、`BackDotLayer + MainDotLayer (+ 将来の object layer)` を合成して画面へ出す。
+  - [x] screenshot artifact で「terrain 欠けから粒子が見える」「Near 読み込み中だけ Far が補完される」「grass/soil edge 表現が維持される」を確認する。
 - 完了条件:
   - 背景と前景が別 render target / pass に分離され、各 pass 名が実際の責務と一致している。
   - 粒子は terrain cache を直接参照せず、前景レイヤー上の描画順だけで terrain と重なる。
@@ -362,6 +362,10 @@
   - 最終合成段が `Back/Main` のみを知る構成になり、将来のオブジェクトレイヤー追加が render graph の局所変更で済む。
 - Progress:
   - 2026-03-12: user 要望に基づき Work Unit を追加。pixel perfect 調整は保留とし、まずは低解像度ドット絵レイヤーの責務分離、`particles -> terrain` の前景順序、`Back/Main/Final Compose` への再編を進める方針を確定。
+  - 2026-03-12: `TerrainCompose` の責務を分割し、Core2d graph を `TerrainBackCompose -> WaterDotGpu -> TerrainFrontCompose -> DotLayerCompose` へ再編した。`TerrainBackCompose` は空/Back/Far のみ、`TerrainFrontCompose` は Near terrain のみ、`DotLayerCompose` は offscreen `BackDotLayer` / `MainDotLayer` の最終合成だけを担当する構成に変更した。
+  - 2026-03-12: `TerrainDotLayerGpuResources` を追加し、`WaterDotLayoutRequest` の extent を使う低解像度 `BackDotLayer` / `MainDotLayer` を render world で管理するよう更新した。粒子 pass は `MainDotLayer` を transparent clear して描画し、terrain 前景 pass は同じ target へ alpha blend で後描きする。
+  - 2026-03-12: `water_dot_gpu_mainline.wgsl` から terrain cache 参照とセル単位 discard を削除し、前後関係を pass 順序で決定する構成へ整理した。terrain 欠け dot は alpha 0 のまま残るため、先に描いた粒子がそのまま可視になる。
+  - 2026-03-12: `cargo check` / `cargo test --lib`（51件 pass）を実行。runtime screenshot として `configs/autoverify/terrain_dot_layer_hole_water_drop.json` を追加し、`/Users/yuuki.fj/Develop/particles/artifacts/autoverify/terrain_dot_layer_hole_water_drop.png` で terrain 欠け上に粒子が残る構成を確認した。あわせて既存 `configs/autoverify/terrain_edit_delete_far_back_visible.json` を再実行し、`/Users/yuuki.fj/Develop/particles/artifacts/autoverify/terrain_edit_delete_far_back_visible.png` で Near 領域外の Far/Back 補完が維持されることを確認した。
 
 ### [PARAM-HEX-01] RONカラー記法をhex形式へ拡張
 
