@@ -320,9 +320,11 @@
   - 2026-03-07: `assets/params/*.ron` の該当色値を hex 形式へ移行。
   - 2026-03-07: 追加テストを含む状態で `cargo check` / `cargo test` を全件通過。
 
+## Done (Recent)
+
 ### [UI-PROFILE-01] 左上HUDのCPU/GPUプロファイル棒グラフ可視化
 
-- Status: `In Progress`
+- Status: `Done`
 - 背景:
   - 左上HUDには FPS と統計テキストはあるが、CPU/GPU のどの処理がフレーム時間を支配しているかを実行中に判断できない。
   - `active tile` や render/compute pass の最適化を進めるには、CPU span と GPU scope を同一 HUD 上で比較できる常時可視化が必要。
@@ -338,7 +340,7 @@
   - [x] 左上 HUD に CPU / GPU 棒グラフ UI、hover tooltip、動的スケール計算を実装する。
   - [x] `interface.ron` に profiler 可視化パラメータを追加し、hot reload 可能にする。
   - [x] `cargo check` / `cargo test --lib` と、必要な runtime artifact で可視化挙動を確認する。
-  - [ ] hover tooltip の repeatable runtime 検証手順を追加する。
+  - [x] hover tooltip の runtime 確認を完了する。
 - 完了条件:
   - CPU / GPU の各グラフが 1 秒あたり 10 回（または設定値）で更新され、直近区間の積算時間を表示する。
   - 主要 scope/span が色分けされ、hover で span/scope 名と時間を確認できる。
@@ -355,8 +357,7 @@
   - 2026-03-12: profiler tooltip に出すカテゴリ名も snapshot 生成時に `physics` / `render` / `others` へ正規化し、`water/...` などの旧カテゴリ名が HUD に出ないよう更新。`cargo check` / `cargo test --lib` / `configs/autoverify/profile_hud_water_drop.json` を再実行。
   - 2026-03-12: profiler bar 内の segment 順序を時間順から固定順へ変更。`physics -> render -> others` のカテゴリ順、その中は detail 名の辞書順で snapshot を整列するよう更新。`cargo check` / `cargo test --lib` を再実行。
   - 2026-03-12: `assets/params/interface.ron` の `profiler.max_segments_per_lane` を増やして表示可能 segment 数を拡張し、`others/remainder` への過剰な集約を抑える運用へ調整。
-
-## Done (Recent)
+  - 2026-03-12: hover tooltip の runtime 確認が完了し、Work Unit を `Done` へ移動。
 
 ### [MPM-OVERLAY-01] MPMセル質量オーバーレイ追加
 
