@@ -4,12 +4,13 @@
 // which are then executed in the render-world extract/prepare phase.
 
 use bevy::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::buffers::{
     self, CHUNK_EVENT_KIND_FRONTIER_REQUEST, CHUNK_EVENT_KIND_NEWLY_EMPTY,
     CHUNK_EVENT_KIND_NEWLY_OCCUPIED, CHUNK_EVENT_KIND_SLOT_SNAPSHOT, GpuChunkMeta, GpuGridLayout,
-    GpuMoverResult, GpuMpmParams, GpuParticle, GpuStatisticsScalars, INVALID_CHUNK_SLOT_ID,
+    GpuMoverResult, GpuMpmParams, GpuParticle, GpuStatisticsScalars, GpuWorldEditAddOp,
+    INVALID_CHUNK_SLOT_ID,
 };
 use super::gpu_resources::{
     MAX_RESIDENT_CHUNK_SLOTS, MPM_ACTIVE_TILES_PER_SLOT, MPM_CHUNK_NODE_DIM,
@@ -18,8 +19,8 @@ use super::gpu_resources::{
 };
 use super::phase::mpm_phase_id_for_particle;
 use super::readback::{
-    GpuChunkEventReadbackResult, GpuMoverApplyAck, GpuMoverReadbackResult, GpuReadbackResult,
-    GpuStatisticsReadbackResult,
+    GpuChunkEventReadbackResult, GpuMoverApplyAck, GpuMoverReadbackResult, GpuParticleReadbackPayload,
+    GpuReadbackResult, GpuStatisticsReadbackResult,
 };
 use crate::params::ActivePhysicsParams;
 use crate::physics::material::{ParticleMaterial, particle_properties};
@@ -29,6 +30,8 @@ use crate::physics::world::terrain::{
     TerrainCell, TerrainWorld, cell_to_world_center, world_to_cell,
 };
 use crate::render::TerrainGeneratedChunkCache;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 const CHUNK_HALO_RADIUS: i32 = 1;
 const ACTIVE_TILE_NODE_DIM_I32: i32 = 8;
@@ -56,9 +59,158 @@ pub enum MpmSyncSet {
     PrepareUpload,
 }
 
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct MpmParticleReadbackStatus {
+    pub particle_count: u32,
+    pub particle_revision: u64,
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+pub struct MpmFullParticleReadbackRequest {
+    pub requested: bool,
+    pub min_particle_revision: u64,
+}
+
+impl MpmFullParticleReadbackRequest {
+    pub fn request(&mut self, min_particle_revision: u64) {
+        self.requested = true;
+        self.min_particle_revision = self.min_particle_revision.max(min_particle_revision);
+    }
+
+    fn clear_if_satisfied(&mut self, particle_revision: u64) {
+        if self.requested && particle_revision >= self.min_particle_revision {
+            self.requested = false;
+            self.min_particle_revision = 0;
+        }
+    }
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+pub struct MpmFullParticleReadbackCache {
+    pub payload: Option<GpuParticleReadbackPayload>,
+}
+
+impl MpmFullParticleReadbackCache {
+    fn payload_for_revision(&self, min_particle_revision: u64) -> Option<&GpuParticleReadbackPayload> {
+        self.payload
+            .as_ref()
+            .filter(|payload| payload.particle_revision >= min_particle_revision)
+    }
+
+    fn invalidate_before(&mut self, particle_revision: u64) {
+        if self
+            .payload
+            .as_ref()
+            .map(|payload| payload.particle_revision < particle_revision)
+            .unwrap_or(false)
+        {
+            self.payload = None;
+        }
+    }
+}
+
 #[derive(Resource, Debug, Default)]
-pub struct MpmReadbackSnapshot {
-    pub particles: Vec<GpuParticle>,
+pub struct DeferredGpuWorldEditRequests {
+    pub requests: Vec<GpuWorldEditRequest>,
+}
+
+#[derive(Resource, Clone, Default)]
+pub struct GpuWorldEditAddApplyAck {
+    inner: Arc<AtomicU64>,
+}
+
+impl GpuWorldEditAddApplyAck {
+    pub fn signal_revision(&self, particle_revision: u64) {
+        let mut current = self.inner.load(Ordering::Acquire);
+        while particle_revision > current {
+            match self.inner.compare_exchange(
+                current,
+                particle_revision,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    pub fn value(&self) -> u64 {
+        self.inner.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PendingGpuParticleAddOp {
+    pub cell: IVec2,
+    pub material: ParticleMaterial,
+    pub count_per_cell: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingGpuParticleAddBatch {
+    pub particle_revision: u64,
+    pub added_particle_count: u32,
+    pub expected_total_particle_count: u32,
+    pub ops: Vec<PendingGpuParticleAddOp>,
+}
+
+#[derive(Resource, Debug, Default)]
+pub struct PendingGpuParticleAdds {
+    batches: VecDeque<PendingGpuParticleAddBatch>,
+}
+
+impl PendingGpuParticleAdds {
+    pub fn clear(&mut self) {
+        self.batches.clear();
+    }
+
+    pub fn latest_revision(&self) -> u64 {
+        self.batches
+            .back()
+            .map(|batch| batch.particle_revision)
+            .unwrap_or(0)
+    }
+
+    pub fn total_added_particles(&self) -> u32 {
+        self.batches
+            .iter()
+            .fold(0u32, |sum, batch| sum.saturating_add(batch.added_particle_count))
+    }
+
+    fn push_batch(&mut self, batch: PendingGpuParticleAddBatch) {
+        self.batches.push_back(batch);
+    }
+
+    fn drop_acked_batches(&mut self, particle_revision: u64) {
+        while self
+            .batches
+            .front()
+            .map(|batch| batch.particle_revision <= particle_revision)
+            .unwrap_or(false)
+        {
+            self.batches.pop_front();
+        }
+    }
+
+    fn oldest_batch(&self) -> Option<&PendingGpuParticleAddBatch> {
+        self.batches.front()
+    }
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+pub struct MpmGpuWorldEditAddQueueRequest {
+    pub particle_revision: u64,
+    pub base_particle_count: u32,
+    pub added_particle_count: u32,
+    pub ops: Vec<GpuWorldEditAddOp>,
+}
+
+#[derive(Resource, Debug, Default, Clone)]
+pub struct MpmGpuWorldEditRemoveQueueRequest {
+    pub particle_revision: u64,
+    pub removed_particle_count: u32,
+    pub remove_particle_ids: Vec<u32>,
 }
 
 #[derive(Resource, Debug, Clone)]
@@ -385,82 +537,196 @@ pub struct GpuWorldEditRequest {
 pub fn apply_world_edit_requests(
     control: Res<MpmGpuControl>,
     active_params: Res<ActivePhysicsParams>,
+    mut terrain: ResMut<TerrainWorld>,
+    mut generated_chunk_cache: Option<ResMut<TerrainGeneratedChunkCache>>,
     mut edit_requests: MessageReader<GpuWorldEditRequest>,
+    mut deferred_requests: ResMut<DeferredGpuWorldEditRequests>,
     mut upload: ResMut<MpmGpuUploadRequest>,
-    mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
+    mut readback_status: ResMut<MpmParticleReadbackStatus>,
+    mut full_readback_request: ResMut<MpmFullParticleReadbackRequest>,
+    mut full_readback_cache: ResMut<MpmFullParticleReadbackCache>,
+    mut residency: ResMut<MpmChunkResidencyState>,
+    mut pending_gpu_adds: ResMut<PendingGpuParticleAdds>,
+    mut add_queue: ResMut<MpmGpuWorldEditAddQueueRequest>,
+    mut remove_queue: ResMut<MpmGpuWorldEditRemoveQueueRequest>,
 ) {
+    for request in edit_requests.read() {
+        deferred_requests.requests.push(request.clone());
+    }
+
+    add_queue.ops.clear();
+    add_queue.base_particle_count = 0;
+    add_queue.added_particle_count = 0;
+    add_queue.particle_revision = 0;
+    remove_queue.remove_particle_ids.clear();
+    remove_queue.removed_particle_count = 0;
+    remove_queue.particle_revision = 0;
+
     if control.init_only {
-        let _ = edit_requests.read().count();
+        deferred_requests.requests.clear();
+        return;
+    }
+    let rho0 = active_params.0.water.rho0.max(1.0e-6);
+    if deferred_requests.requests.is_empty() {
+        queue_oldest_pending_gpu_add(&residency, &pending_gpu_adds, rho0, &mut add_queue);
+        return;
+    }
+    let has_adds = deferred_requests
+        .requests
+        .iter()
+        .any(|request| matches!(request.command, GpuWorldEditCommand::AddParticles { .. }));
+    let has_removes = deferred_requests
+        .requests
+        .iter()
+        .any(|request| matches!(request.command, GpuWorldEditCommand::RemoveParticles { .. }));
+
+    if has_removes {
+        let min_particle_revision = readback_status
+            .particle_revision
+            .max(pending_gpu_adds.latest_revision());
+        let Some(payload) = full_readback_cache
+            .payload_for_revision(min_particle_revision)
+            .cloned()
+        else {
+            full_readback_request.request(min_particle_revision);
+            return;
+        };
+
+        let remove_particle_ids =
+            collect_remove_particle_ids(&payload.particles, &deferred_requests.requests);
+        if remove_particle_ids.is_empty() {
+            if !has_adds {
+                deferred_requests.requests.clear();
+                queue_oldest_pending_gpu_add(&residency, &pending_gpu_adds, rho0, &mut add_queue);
+                return;
+            }
+        } else {
+            let removed_particle_count = remove_particle_ids.len() as u32;
+            let particle_revision =
+                next_particle_revision(&upload, &readback_status, &pending_gpu_adds);
+            upload.particle_revision = particle_revision;
+            readback_status.particle_count = readback_status
+                .particle_count
+                .saturating_sub(removed_particle_count);
+            readback_status.particle_revision = particle_revision;
+            full_readback_cache.invalidate_before(particle_revision);
+            remove_queue.particle_revision = particle_revision;
+            remove_queue.removed_particle_count = removed_particle_count;
+            remove_queue.remove_particle_ids = remove_particle_ids;
+            if !has_adds {
+                deferred_requests.requests.clear();
+                queue_oldest_pending_gpu_add(&residency, &pending_gpu_adds, rho0, &mut add_queue);
+                return;
+            }
+        }
+    }
+
+    if !has_adds {
+        deferred_requests.requests.clear();
+        queue_oldest_pending_gpu_add(&residency, &pending_gpu_adds, rho0, &mut add_queue);
         return;
     }
 
-    let rho0 = active_params.0.water.rho0.max(1.0e-6);
-    let mut saw_request = false;
-    let mut changed = false;
-
-    for request in edit_requests.read() {
-        saw_request = true;
-        if request.cells.is_empty() {
+    let mut queued_gpu_add_ops: Vec<PendingGpuParticleAddOp> = Vec::new();
+    let mut queued_gpu_add_particles = 0u32;
+    let mut requested_add_cells = Vec::new();
+    for request in &deferred_requests.requests {
+        let GpuWorldEditCommand::AddParticles {
+            material,
+            count_per_cell,
+        } = &request.command
+        else {
+            continue;
+        };
+        if *count_per_cell == 0 || mpm_phase_id_for_particle(*material).is_none() {
             continue;
         }
-        if !readback_snapshot.particles.is_empty() {
-            upload.particles = readback_snapshot.particles.clone();
-        } else if upload.particles.is_empty() {
-            upload.particles = readback_snapshot.particles.clone();
-        }
-        match &request.command {
-            GpuWorldEditCommand::AddParticles {
-                material,
-                count_per_cell,
-            } => {
-                if *count_per_cell == 0 || mpm_phase_id_for_particle(*material).is_none() {
-                    continue;
-                }
-                let before = upload.particles.len();
-                for &cell in &request.cells {
-                    append_particles_in_cell(
-                        &mut upload.particles,
-                        cell,
-                        *material,
-                        *count_per_cell,
-                        rho0,
-                    );
-                }
-                changed |= upload.particles.len() != before;
-            }
-            GpuWorldEditCommand::RemoveParticles { max_count } => {
-                if *max_count == 0 || upload.particles.is_empty() {
-                    continue;
-                }
-                let removed_mpm_indices = remove_gpu_particles_in_cells(
-                    &mut upload.particles,
-                    &request.cells,
-                    *max_count as usize,
-                );
-                if removed_mpm_indices.is_empty() {
-                    continue;
-                }
-                changed = true;
-            }
+        for &cell in &request.cells {
+            requested_add_cells.push(cell);
+            queued_gpu_add_ops.push(PendingGpuParticleAddOp {
+                cell,
+                material: *material,
+                count_per_cell: *count_per_cell,
+            });
+            queued_gpu_add_particles = queued_gpu_add_particles.saturating_add(*count_per_cell);
         }
     }
+    if queued_gpu_add_ops.is_empty() {
+        deferred_requests.requests.clear();
+        if remove_queue.removed_particle_count > 0 {
+            queue_oldest_pending_gpu_add(&residency, &pending_gpu_adds, rho0, &mut add_queue);
+            return;
+        }
+        queue_oldest_pending_gpu_add(&residency, &pending_gpu_adds, rho0, &mut add_queue);
+        return;
+    }
+    if !ensure_gpu_add_slots_for_cells(
+        &mut terrain,
+        generated_chunk_cache.as_mut().map(|cache| &mut **cache),
+        &mut upload,
+        &mut full_readback_request,
+        &mut full_readback_cache,
+        &mut readback_status,
+        &mut pending_gpu_adds,
+        &mut deferred_requests.requests,
+        &mut residency,
+        &requested_add_cells,
+        rho0,
+    ) {
+        return;
+    }
+    deferred_requests.requests.clear();
 
-    if !saw_request {
+    let particle_revision = next_particle_revision(&upload, &readback_status, &pending_gpu_adds);
+    let mut gpu_ops = Vec::with_capacity(queued_gpu_add_ops.len());
+    let mut particle_offset = 0u32;
+    for op in &queued_gpu_add_ops {
+        let Some((slot_id, local_cell)) = gpu_add_slot_for_cell(&residency, op.cell) else {
+            continue;
+        };
+        let Some(phase_id) = mpm_phase_id_for_particle(op.material) else {
+            continue;
+        };
+        let props = particle_properties(op.material);
+        gpu_ops.push(GpuWorldEditAddOp {
+            slot_id,
+            local_cell_x: local_cell.x as u32,
+            local_cell_y: local_cell.y as u32,
+            count_per_cell: op.count_per_cell,
+            particle_offset,
+            phase_id: phase_id as u32,
+            mass: props.mass,
+            v0: props.mass.max(0.0) / rho0,
+        });
+        particle_offset = particle_offset.saturating_add(op.count_per_cell);
+    }
+    if gpu_ops.is_empty() {
+        queue_oldest_pending_gpu_add(&residency, &pending_gpu_adds, rho0, &mut add_queue);
         return;
     }
 
-    if !changed {
-        return;
-    }
-
-    readback_snapshot.particles = upload.particles.clone();
-    upload.upload_particles = true;
+    let expected_total_particle_count = readback_status
+        .particle_count
+        .saturating_add(queued_gpu_add_particles);
+    pending_gpu_adds.push_batch(PendingGpuParticleAddBatch {
+        particle_revision,
+        added_particle_count: queued_gpu_add_particles,
+        expected_total_particle_count,
+        ops: queued_gpu_add_ops,
+    });
+    upload.particle_revision = particle_revision;
+    readback_status.particle_count = readback_status
+        .particle_count
+        .saturating_add(queued_gpu_add_particles);
+    readback_status.particle_revision = particle_revision;
+    full_readback_cache.invalidate_before(particle_revision);
+    queue_oldest_pending_gpu_add(&residency, &pending_gpu_adds, rho0, &mut add_queue);
 }
 
 /// System: keep GPU MPM run-state aligned to global simulation mode.
 pub fn prepare_particle_upload(
     control: Res<MpmGpuControl>,
-    readback_snapshot: Res<MpmReadbackSnapshot>,
+    readback_status: Res<MpmParticleReadbackStatus>,
     mut upload: ResMut<MpmGpuUploadRequest>,
     mut sim_state: ResMut<SimulationState>,
 ) {
@@ -492,7 +758,7 @@ pub fn prepare_particle_upload(
     let has_particles = if upload.upload_particles_frame {
         !upload.particles.is_empty()
     } else {
-        !upload.particles.is_empty() || !readback_snapshot.particles.is_empty()
+        readback_status.particle_count > 0
     };
     // Pure GPU mode: no CPU fallback; active when MPM is enabled and particles exist.
     sim_state.gpu_mpm_active = sim_state.mpm_enabled && has_particles;
@@ -506,18 +772,20 @@ pub fn prepare_terrain_upload(
     sim_state: Res<SimulationState>,
     mut terrain: ResMut<TerrainWorld>,
     mut generated_chunk_cache: Option<ResMut<TerrainGeneratedChunkCache>>,
-    readback_snapshot: Res<MpmReadbackSnapshot>,
+    readback_status: Res<MpmParticleReadbackStatus>,
+    mut full_readback_request: ResMut<MpmFullParticleReadbackRequest>,
+    full_readback_cache: Res<MpmFullParticleReadbackCache>,
     mut residency: ResMut<MpmChunkResidencyState>,
     mut upload: ResMut<MpmGpuUploadRequest>,
 ) {
-    // Default: no chunk/terrain upload this frame unless explicitly requested below.
-    upload.upload_chunks = false;
-    upload.upload_chunk_diffs = false;
+    if !upload.upload_chunk_diffs {
+        upload.chunk_meta_diffs.clear();
+    }
+    if !upload.upload_terrain_cell_slot_diffs {
+        upload.terrain_slot_ids.clear();
+        upload.terrain_cell_solid_slot_diffs.clear();
+    }
     upload.upload_terrain = false;
-    upload.upload_terrain_cell_slot_diffs = false;
-    upload.chunk_meta_diffs.clear();
-    upload.terrain_slot_ids.clear();
-    upload.terrain_cell_solid_slot_diffs.clear();
 
     if control.init_only {
         upload.chunk_meta.clear();
@@ -583,31 +851,35 @@ pub fn prepare_terrain_upload(
         bevy::log::warn!(
             "[gpu_mpm] runtime rebuild start: particles_upload={} particles_readback={} reason_new_chunk_oob={} reason_invalid_old_slot={} wait_frames={}",
             upload.particles.len(),
-            readback_snapshot.particles.len(),
+            readback_status.particle_count,
             residency.runtime_rebuild_reason_new_chunk_oob,
             residency.runtime_rebuild_reason_invalid_old_slot,
             residency.runtime_rebuild_waiting_readback_count
         );
     }
 
-    let particle_source = if upload.upload_particles_frame && !upload.particles.is_empty() {
+    let rebuild_particles: Vec<GpuParticle>;
+    let particle_source: &[GpuParticle] = if upload.upload_particles_frame && !upload.particles.is_empty() {
         upload.particles.as_slice()
+    } else if residency.rebuild_requested {
+        let min_particle_revision = readback_status.particle_revision;
+        let Some(payload) = full_readback_cache.payload_for_revision(min_particle_revision) else {
+            full_readback_request.request(min_particle_revision);
+            residency.runtime_rebuild_waiting_readback_count = residency
+                .runtime_rebuild_waiting_readback_count
+                .saturating_add(1);
+            if residency.runtime_rebuild_waiting_readback_count == 1 {
+                bevy::log::warn!(
+                    "[gpu_mpm] runtime rebuild pending: waiting for on-demand GPU particle readback"
+                );
+            }
+            return;
+        };
+        rebuild_particles = payload.particles.clone();
+        rebuild_particles.as_slice()
     } else {
-        readback_snapshot.particles.as_slice()
-    };
-    if residency.rebuild_requested && !upload.upload_particles_frame && particle_source.is_empty() {
-        // Rebuild requested from runtime movers, but fresh GPU readback has not arrived yet.
-        // Keep current residency and retry next frame to avoid stale-particle rollback.
-        residency.runtime_rebuild_waiting_readback_count = residency
-            .runtime_rebuild_waiting_readback_count
-            .saturating_add(1);
-        if residency.runtime_rebuild_waiting_readback_count == 1 {
-            bevy::log::warn!(
-                "[gpu_mpm] runtime rebuild pending: waiting for GPU particle readback"
-            );
-        }
         return;
-    }
+    };
     let Some(build) = build_static_chunk_upload(&terrain, particle_source) else {
         upload.chunk_meta.clear();
         upload.terrain_sdf.clear();
@@ -745,12 +1017,21 @@ pub fn prepare_terrain_upload(
     residency.rebuild_requested = false;
 }
 
+/// Latch one-shot non-particle upload flags for render extraction, then clear the main-world bits.
+pub fn prepare_aux_upload_frames(mut upload: ResMut<MpmGpuUploadRequest>) {
+    upload.upload_chunks_frame = std::mem::take(&mut upload.upload_chunks);
+    upload.upload_chunk_diffs_frame = std::mem::take(&mut upload.upload_chunk_diffs);
+    upload.upload_terrain_frame = std::mem::take(&mut upload.upload_terrain);
+    upload.upload_terrain_cell_slot_diffs_frame =
+        std::mem::take(&mut upload.upload_terrain_cell_slot_diffs);
+}
+
 /// System: update MpmGpuParamsRequest from simulation state and PhysicsParams asset.
 pub fn prepare_gpu_params(
     control: Res<MpmGpuControl>,
     active_params: Res<ActivePhysicsParams>,
     upload: Res<MpmGpuUploadRequest>,
-    readback_snapshot: Res<MpmReadbackSnapshot>,
+    readback_status: Res<MpmParticleReadbackStatus>,
     residency: Res<MpmChunkResidencyState>,
     stats_status: Res<MpmStatisticsStatus>,
     mut params_req: ResMut<MpmGpuParamsRequest>,
@@ -780,10 +1061,10 @@ pub fn prepare_gpu_params(
         p.sand.hardening,
     );
     let boundary_threshold_m = h * p.runtime.boundary_velocity_sdf_threshold_h;
-    let particle_count = if upload.upload_particles_frame || !upload.particles.is_empty() {
+    let particle_count = if upload.upload_particles_frame {
         upload.particles.len()
     } else {
-        readback_snapshot.particles.len()
+        readback_status.particle_count as usize
     };
 
     params_req.params = GpuMpmParams {
@@ -909,66 +1190,520 @@ pub fn prepare_gpu_run_state(
     }
 }
 
-/// Diagnostics counter for GPU readback frames.
-static GPU_READBACK_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// System: apply GPU readback results to snapshot cache.
+/// System: apply on-demand GPU readback results to cache.
 pub fn apply_gpu_readback(
     control: Res<MpmGpuControl>,
     readback_result: Res<GpuReadbackResult>,
-    sim_state: Res<SimulationState>,
-    upload: Res<MpmGpuUploadRequest>,
-    mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
-    mut residency: ResMut<MpmChunkResidencyState>,
+    mut request: ResMut<MpmFullParticleReadbackRequest>,
+    mut cache: ResMut<MpmFullParticleReadbackCache>,
 ) {
     if !control.readback_enabled {
         return;
     }
-    let Some(particles) = readback_result.take() else {
+    let Some(payload) = readback_result.take() else {
         return;
     };
-    if !sim_state.gpu_mpm_active && upload.particles.is_empty() {
+    if !request.requested {
         return;
     }
-    readback_snapshot.particles = particles.clone();
+    if payload.particle_revision < request.min_particle_revision {
+        return;
+    }
+    cache.payload = Some(payload.clone());
+    request.clear_if_satisfied(payload.particle_revision);
+}
 
-    if residency.initialized {
-        let mut invalid_particles = 0u64;
-        for particle in &particles {
-            let chunk = chunk_coord_from_world_pos(Vec2::from_array(particle.x));
-            if !residency.chunk_to_slot.contains_key(&chunk) {
-                invalid_particles = invalid_particles.saturating_add(1);
-            }
+pub fn consume_world_edit_add_ack(
+    control: Res<MpmGpuControl>,
+    add_apply_ack: Res<GpuWorldEditAddApplyAck>,
+    mut pending_gpu_adds: ResMut<PendingGpuParticleAdds>,
+) {
+    if control.init_only {
+        return;
+    }
+    let acked_revision = add_apply_ack.value();
+    if acked_revision == 0 {
+        return;
+    }
+    pending_gpu_adds.drop_acked_batches(acked_revision);
+}
+
+fn gpu_add_slot_for_cell(
+    residency: &MpmChunkResidencyState,
+    cell: IVec2,
+) -> Option<(u32, IVec2)> {
+    if !residency.initialized {
+        return None;
+    }
+    let chunk = IVec2::new(
+        cell.x.div_euclid(CHUNK_SIZE_I32),
+        cell.y.div_euclid(CHUNK_SIZE_I32),
+    );
+    let slot_id = residency.chunk_to_slot.get(&chunk).copied()?;
+    let slot_idx = slot_id as usize;
+    if !residency
+        .slot_allocated
+        .get(slot_idx)
+        .copied()
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let local_cell = IVec2::new(
+        cell.x.rem_euclid(CHUNK_SIZE_I32),
+        cell.y.rem_euclid(CHUNK_SIZE_I32),
+    );
+    Some((slot_id, local_cell))
+}
+
+fn build_gpu_add_queue_from_batch(
+    residency: &MpmChunkResidencyState,
+    batch: &PendingGpuParticleAddBatch,
+    rho0: f32,
+) -> Option<MpmGpuWorldEditAddQueueRequest> {
+    let mut ops = Vec::with_capacity(batch.ops.len());
+    let mut particle_offset = 0u32;
+    for op in &batch.ops {
+        let Some((slot_id, local_cell)) = gpu_add_slot_for_cell(residency, op.cell) else {
+            continue;
+        };
+        let Some(phase_id) = mpm_phase_id_for_particle(op.material) else {
+            continue;
+        };
+        let props = particle_properties(op.material);
+        ops.push(GpuWorldEditAddOp {
+            slot_id,
+            local_cell_x: local_cell.x as u32,
+            local_cell_y: local_cell.y as u32,
+            count_per_cell: op.count_per_cell,
+            particle_offset,
+            phase_id: phase_id as u32,
+            mass: props.mass,
+            v0: props.mass.max(0.0) / rho0.max(1.0e-6),
+        });
+        particle_offset = particle_offset.saturating_add(op.count_per_cell);
+    }
+    if ops.is_empty() {
+        return None;
+    }
+    Some(MpmGpuWorldEditAddQueueRequest {
+        particle_revision: batch.particle_revision,
+        base_particle_count: batch
+            .expected_total_particle_count
+            .saturating_sub(batch.added_particle_count),
+        added_particle_count: batch.added_particle_count,
+        ops,
+    })
+}
+
+fn queue_oldest_pending_gpu_add(
+    residency: &MpmChunkResidencyState,
+    pending_gpu_adds: &PendingGpuParticleAdds,
+    rho0: f32,
+    add_queue: &mut MpmGpuWorldEditAddQueueRequest,
+) {
+    if let Some(batch) = pending_gpu_adds.oldest_batch() {
+        if let Some(request) = build_gpu_add_queue_from_batch(residency, batch, rho0) {
+            *add_queue = request;
         }
-        residency.invalid_slot_access_count = residency
-            .invalid_slot_access_count
-            .saturating_add(invalid_particles);
-        update_active_tile_stats(&mut residency, &particles);
+    }
+}
+
+fn collect_remove_particle_ids(
+    particles: &[GpuParticle],
+    requests: &[GpuWorldEditRequest],
+) -> Vec<u32> {
+    let mut removed = Vec::new();
+    let mut keep = vec![true; particles.len()];
+    for request in requests {
+        let GpuWorldEditCommand::RemoveParticles { max_count } = request.command else {
+            continue;
+        };
+        if max_count == 0 || request.cells.is_empty() {
+            continue;
+        }
+        let target_cells: HashSet<IVec2> = request.cells.iter().copied().collect();
+        let max_count = max_count as usize;
+        let mut removed_this_request = 0usize;
+        for (particle_id, particle) in particles.iter().enumerate() {
+            if removed_this_request >= max_count {
+                break;
+            }
+            if !keep[particle_id] {
+                continue;
+            }
+            let cell = world_to_cell(Vec2::from_array(particle.x));
+            if !target_cells.contains(&cell) {
+                continue;
+            }
+            keep[particle_id] = false;
+            removed.push(particle_id as u32);
+            removed_this_request += 1;
+        }
+    }
+    removed.sort_unstable();
+    removed
+}
+
+fn ensure_gpu_add_slots_for_cells(
+    terrain: &mut TerrainWorld,
+    mut generated_chunk_cache: Option<&mut TerrainGeneratedChunkCache>,
+    upload: &mut MpmGpuUploadRequest,
+    full_readback_request: &mut MpmFullParticleReadbackRequest,
+    full_readback_cache: &mut MpmFullParticleReadbackCache,
+    readback_status: &mut MpmParticleReadbackStatus,
+    pending_gpu_adds: &mut PendingGpuParticleAdds,
+    deferred_requests: &mut Vec<GpuWorldEditRequest>,
+    residency: &mut MpmChunkResidencyState,
+    cells: &[IVec2],
+    rho0: f32,
+) -> bool {
+    if cells.is_empty() {
+        return true;
     }
 
-    let frame = GPU_READBACK_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let n = particles.len();
-    // Periodic NaN / divergence check (every 60 readback frames).
-    if frame % 60 == 0 {
-        let mut nan_count = 0u32;
-        let mut max_speed: f32 = 0.0;
-        for i in 0..n {
-            let p = &particles[i];
-            if p.x[0].is_nan() || p.x[1].is_nan() || p.v[0].is_nan() || p.v[1].is_nan() {
-                nan_count += 1;
+    let residency_was_uninitialized = !residency.initialized;
+    if !residency.initialized {
+        if upload.upload_particles && !upload.particles.is_empty() {
+            let mut changed = false;
+            for request in deferred_requests.iter() {
+                let GpuWorldEditCommand::AddParticles {
+                    material,
+                    count_per_cell,
+                } = request.command
+                else {
+                    continue;
+                };
+                if count_per_cell == 0 || mpm_phase_id_for_particle(material).is_none() {
+                    continue;
+                }
+                let before = upload.particles.len();
+                for &cell in &request.cells {
+                    append_particles_in_cell(
+                        &mut upload.particles,
+                        cell,
+                        material,
+                        count_per_cell,
+                        rho0,
+                    );
+                }
+                changed |= upload.particles.len() != before;
             }
-            let speed_sq = p.v[0] * p.v[0] + p.v[1] * p.v[1];
-            if speed_sq > max_speed {
-                max_speed = speed_sq;
+            if changed {
+                upload.particle_revision =
+                    next_particle_revision(upload, readback_status, pending_gpu_adds);
+                readback_status.particle_count = upload.particles.len() as u32;
+                readback_status.particle_revision = upload.particle_revision;
+                full_readback_cache.payload = Some(GpuParticleReadbackPayload {
+                    particles: upload.particles.clone(),
+                    particle_revision: upload.particle_revision,
+                });
+                pending_gpu_adds.clear();
+                full_readback_request.requested = false;
+                full_readback_request.min_particle_revision = 0;
+            }
+            return false;
+        }
+
+        if readback_status.particle_count > 0 {
+            let min_particle_revision = readback_status
+                .particle_revision
+                .max(pending_gpu_adds.latest_revision());
+            let Some(payload) = full_readback_cache
+                .payload_for_revision(min_particle_revision)
+                .cloned()
+            else {
+                full_readback_request.request(min_particle_revision);
+                return false;
+            };
+            if !bootstrap_residency_from_particles(
+                terrain,
+                generated_chunk_cache.as_deref_mut(),
+                residency,
+                upload,
+                &payload.particles,
+            ) {
+                return false;
             }
         }
-        let max_speed = max_speed.sqrt();
-        if nan_count > 0 {
-            bevy::log::error!("[gpu_mpm] frame={frame} NaN detected in {nan_count}/{n} particles");
+    }
+
+    let mut needed_chunks = HashSet::<IVec2>::default();
+    let mut target_chunks = Vec::new();
+    for &cell in cells {
+        let chunk = IVec2::new(
+            cell.x.div_euclid(CHUNK_SIZE_I32),
+            cell.y.div_euclid(CHUNK_SIZE_I32),
+        );
+        target_chunks.push(chunk);
+        let chunk_already_allocated = residency.initialized && residency.chunk_to_slot.contains_key(&chunk);
+        if chunk_already_allocated {
+            needed_chunks.insert(chunk);
         } else {
-            bevy::log::info!("[gpu_mpm] frame={frame} n={n} max_speed={max_speed:.2} m/s — OK");
+            for oy in -CHUNK_HALO_RADIUS..=CHUNK_HALO_RADIUS {
+                for ox in -CHUNK_HALO_RADIUS..=CHUNK_HALO_RADIUS {
+                    needed_chunks.insert(chunk + IVec2::new(ox, oy));
+                }
+            }
         }
     }
+    let mut needed_chunks = needed_chunks.into_iter().collect::<Vec<_>>();
+    needed_chunks.sort_by_key(|chunk| (chunk.y, chunk.x));
+
+    let mut allocated_new_slots = residency_was_uninitialized;
+    let seed_slots = if !residency.initialized {
+        if !initialize_slot_pool(residency, &needed_chunks) {
+            return false;
+        }
+        residency.initialized = true;
+        initialize_chunk_slot_state(residency, &[]);
+        let _ = stage_pending_add_target_residency(residency, &target_chunks);
+        let slot_count = residency.slot_to_chunk.len();
+        residency.chunk_meta_cache = (0..slot_count as u32)
+            .map(|slot_id| {
+                build_chunk_meta_for_slot(
+                    slot_id,
+                    &residency.slot_to_chunk,
+                    &residency.chunk_to_slot,
+                    &residency.slot_state,
+                    &residency.slot_allocated,
+                )
+            })
+            .collect();
+        let slot_span = residency.resident_chunk_count as usize;
+        upload.chunk_meta = residency.chunk_meta_cache[..slot_span].to_vec();
+        upload.upload_chunks = !upload.chunk_meta.is_empty();
+        upload.chunk_meta_diffs.clear();
+        upload.upload_chunk_diffs = false;
+        target_chunks
+            .iter()
+            .filter_map(|&chunk| slot_id_from_chunk_coord(chunk, &residency.chunk_to_slot))
+            .collect::<Vec<_>>()
+    } else {
+        let mut dirty_slots = HashSet::<u32>::default();
+        for chunk in needed_chunks {
+            let existed = residency.chunk_to_slot.contains_key(&chunk);
+            let Some(slot_id) = allocate_chunk_slot(residency, chunk) else {
+                return false;
+            };
+            allocated_new_slots |= !existed;
+            dirty_slots.insert(slot_id);
+            for offset in MOORE_OFFSETS {
+                if let Some(neighbor_slot) = slot_id_from_chunk_coord(chunk + offset, &residency.chunk_to_slot)
+                {
+                    dirty_slots.insert(neighbor_slot);
+                }
+            }
+        }
+        let seed_slots = target_chunks
+            .iter()
+            .filter_map(|&chunk| slot_id_from_chunk_coord(chunk, &residency.chunk_to_slot))
+            .collect::<Vec<_>>();
+        let mut refresh_slots = dirty_slots.into_iter().collect::<Vec<_>>();
+        refresh_slots.extend(stage_pending_add_target_residency(residency, &target_chunks));
+        refresh_slots.sort_unstable();
+        refresh_slots.dedup();
+        enqueue_chunk_meta_refresh_for_slots(residency, upload, &refresh_slots);
+        seed_slots
+    };
+
+    let update_slots = collect_slots_with_neighbors(residency, &seed_slots);
+    let ready_slots = ensure_chunks_available_for_slots(
+        terrain,
+        generated_chunk_cache,
+        residency,
+        &update_slots,
+    );
+    enqueue_terrain_slot_updates(residency, terrain, &ready_slots, upload);
+    residency.chunk_sdf_samples = residency
+        .resident_chunk_count
+        .saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
+    residency.active_tile_capacity = residency
+        .resident_chunk_count
+        .saturating_mul(MPM_ACTIVE_TILES_PER_SLOT);
+    !allocated_new_slots
+}
+
+fn enqueue_chunk_meta_refresh_for_slots(
+    residency: &mut MpmChunkResidencyState,
+    upload: &mut MpmGpuUploadRequest,
+    slot_ids: &[u32],
+) {
+    if slot_ids.is_empty() {
+        return;
+    }
+    let mut dirty_slots = slot_ids.to_vec();
+    dirty_slots.sort_unstable();
+    dirty_slots.dedup();
+    let mut new_diffs = Vec::new();
+    for slot_id in dirty_slots {
+        let slot_idx = slot_id as usize;
+        if !residency
+            .slot_allocated
+            .get(slot_idx)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let meta = build_chunk_meta_for_slot(
+            slot_id,
+            &residency.slot_to_chunk,
+            &residency.chunk_to_slot,
+            &residency.slot_state,
+            &residency.slot_allocated,
+        );
+        if residency.chunk_meta_cache.get(slot_idx).copied() != Some(meta) {
+            if slot_idx < residency.chunk_meta_cache.len() {
+                residency.chunk_meta_cache[slot_idx] = meta;
+            }
+            new_diffs.push((slot_id, meta));
+        }
+    }
+    stage_chunk_meta_uploads(upload, residency, new_diffs);
+}
+
+fn stage_chunk_meta_uploads(
+    upload: &mut MpmGpuUploadRequest,
+    residency: &MpmChunkResidencyState,
+    new_diffs: Vec<(u32, GpuChunkMeta)>,
+) {
+    let slot_span = residency.resident_chunk_count as usize;
+    if upload.upload_chunks {
+        upload.chunk_meta = residency.chunk_meta_cache[..slot_span].to_vec();
+        upload.upload_chunk_diffs = false;
+        upload.chunk_meta_diffs.clear();
+        return;
+    }
+
+    if !new_diffs.is_empty() {
+        upload.chunk_meta_diffs.extend(new_diffs);
+        upload.chunk_meta_diffs.sort_by_key(|(slot_id, _)| *slot_id);
+        upload.chunk_meta_diffs.dedup_by(|a, b| {
+            if a.0 == b.0 {
+                *a = *b;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    if !upload.chunk_meta_diffs.is_empty()
+        && upload.chunk_meta_diffs.len() >= slot_span.saturating_div(2).max(1)
+    {
+        upload.chunk_meta = residency.chunk_meta_cache[..slot_span].to_vec();
+        upload.upload_chunks = true;
+        upload.upload_chunk_diffs = false;
+        upload.chunk_meta_diffs.clear();
+    } else {
+        upload.upload_chunk_diffs = !upload.chunk_meta_diffs.is_empty();
+    }
+}
+
+fn next_particle_revision(
+    upload: &MpmGpuUploadRequest,
+    readback_status: &MpmParticleReadbackStatus,
+    pending_gpu_adds: &PendingGpuParticleAdds,
+) -> u64 {
+    upload
+        .particle_revision
+        .max(readback_status.particle_revision)
+        .max(pending_gpu_adds.latest_revision())
+        .saturating_add(1)
+}
+
+fn bootstrap_residency_from_particles(
+    terrain: &mut TerrainWorld,
+    mut generated_chunk_cache: Option<&mut TerrainGeneratedChunkCache>,
+    residency: &mut MpmChunkResidencyState,
+    upload: &mut MpmGpuUploadRequest,
+    particles: &[GpuParticle],
+) -> bool {
+    let Some(build) = build_static_chunk_upload(terrain, particles) else {
+        return false;
+    };
+
+    residency.initialized = true;
+    residency.chunk_origin = build.chunk_origin;
+    residency.chunk_dims = build.chunk_dims;
+    residency.grid_layout = build.grid_layout;
+    if !initialize_slot_pool(residency, &build.resident_chunks) {
+        bevy::log::warn!(
+            "[gpu_mpm] failed to initialize chunk slot pool for world edit bootstrap: requested={} limit={}",
+            build.resident_chunks.len(),
+            MAX_RESIDENT_CHUNK_SLOTS
+        );
+        residency.initialized = false;
+        return false;
+    }
+
+    let mut rebuilt_particles = particles.to_vec();
+    let unresolved = assign_home_slot_ids(&mut rebuilt_particles, &residency.chunk_to_slot);
+    if unresolved > 0 {
+        bevy::log::warn!(
+            "[gpu_mpm] unresolved home slots during world edit residency bootstrap: {}",
+            unresolved
+        );
+    }
+    upload.mover_results = rebuilt_particles
+        .iter()
+        .enumerate()
+        .map(|(pid, particle)| GpuMoverResult {
+            particle_id: pid as u32,
+            new_home_slot_id: particle.home_chunk_slot_id,
+            _pad_a: 0,
+            _pad_b: 0,
+        })
+        .collect();
+    upload.upload_mover_results = !upload.mover_results.is_empty();
+    upload.upload_mover_results_frame = false;
+    residency.pending_mover_apply = upload.upload_mover_results;
+    residency.pending_mover_readback = false;
+
+    initialize_chunk_slot_state(residency, &rebuilt_particles);
+    update_active_tile_stats(residency, &rebuilt_particles);
+    let slot_span = residency.resident_chunk_count as usize;
+    upload.chunk_meta = residency.chunk_meta_cache[..slot_span].to_vec();
+    upload.upload_chunks = !upload.chunk_meta.is_empty();
+    upload.upload_chunk_diffs = false;
+    upload.chunk_meta_diffs.clear();
+
+    let full_slots = collect_allocated_slots(residency);
+    let full_slots_ready = ensure_chunks_available_for_slots(
+        terrain,
+        generated_chunk_cache.as_mut().map(|cache| &mut **cache),
+        residency,
+        &full_slots,
+    );
+    if full_slots_ready.len() < full_slots.len() {
+        bevy::log::debug!(
+            "[gpu_mpm] world edit bootstrap pending generated chunks: ready={} requested={}",
+            full_slots_ready.len(),
+            full_slots.len()
+        );
+    }
+    upload.terrain_slot_ids.clear();
+    upload.terrain_cell_solid_slot_diffs.clear();
+    upload.upload_terrain_cell_slot_diffs = false;
+    enqueue_terrain_slot_updates(residency, terrain, &full_slots_ready, upload);
+    upload.last_uploaded_terrain_version = Some(terrain.terrain_version());
+    residency.active_resident_chunk_count = residency
+        .slot_state
+        .iter()
+        .enumerate()
+        .filter(|(idx, slot)| {
+            residency.slot_allocated.get(*idx).copied().unwrap_or(false) && slot.resident
+        })
+        .count() as u32;
+    residency.active_tile_capacity = residency
+        .resident_chunk_count
+        .saturating_mul(MPM_ACTIVE_TILES_PER_SLOT);
+    residency.chunk_sdf_samples = residency
+        .resident_chunk_count
+        .saturating_mul(MPM_CHUNK_NODES_PER_SLOT);
+    residency.invalid_slot_access_count = 0;
+    true
 }
 
 pub fn apply_statistics_readback(
@@ -1146,8 +1881,7 @@ pub fn apply_chunk_event_readback(
         })
         .count() as u32;
 
-    upload.chunk_meta_diffs.clear();
-    upload.upload_chunk_diffs = false;
+    let mut new_chunk_meta_diffs = Vec::new();
     for (slot_id, is_dirty) in dirty.into_iter().enumerate() {
         if !is_dirty {
             continue;
@@ -1161,22 +1895,10 @@ pub fn apply_chunk_event_readback(
         );
         if residency.chunk_meta_cache[slot_id] != meta {
             residency.chunk_meta_cache[slot_id] = meta;
-            upload.chunk_meta_diffs.push((slot_id as u32, meta));
+            new_chunk_meta_diffs.push((slot_id as u32, meta));
         }
     }
-
-    let slot_capacity = residency.resident_chunk_count.max(1);
-    if !upload.chunk_meta_diffs.is_empty()
-        && upload.chunk_meta_diffs.len() as u32 >= slot_capacity / 2
-    {
-        let slot_span = residency.resident_chunk_count as usize;
-        upload.chunk_meta = residency.chunk_meta_cache[..slot_span].to_vec();
-        upload.upload_chunks = true;
-        upload.upload_chunk_diffs = false;
-        upload.chunk_meta_diffs.clear();
-    } else {
-        upload.upload_chunk_diffs = !upload.chunk_meta_diffs.is_empty();
-    }
+    stage_chunk_meta_uploads(&mut upload, &residency, new_chunk_meta_diffs);
 
     if frontier_requests > 0 {
         bevy::log::debug!(
@@ -1290,8 +2012,7 @@ pub fn apply_mover_readback(
 
     if residency.resident_chunk_count != slot_span_before {
         let mut dirty = vec![true; residency.slot_state.len()];
-        upload.chunk_meta_diffs.clear();
-        upload.upload_chunk_diffs = false;
+        let mut new_chunk_meta_diffs = Vec::new();
         if let Ok(allocated) = ensure_halo_slots_for_occupied(&mut residency, &mut dirty) {
             newly_allocated_slots.extend(allocated);
         }
@@ -1329,19 +2050,10 @@ pub fn apply_mover_readback(
             );
             if residency.chunk_meta_cache[slot_id] != meta {
                 residency.chunk_meta_cache[slot_id] = meta;
-                upload.chunk_meta_diffs.push((slot_id as u32, meta));
+                new_chunk_meta_diffs.push((slot_id as u32, meta));
             }
         }
-        upload.upload_chunk_diffs = !upload.chunk_meta_diffs.is_empty();
-        if upload.upload_chunk_diffs {
-            let slot_span = residency.resident_chunk_count as usize;
-            if upload.chunk_meta_diffs.len() >= slot_span / 2 {
-                upload.chunk_meta = residency.chunk_meta_cache[..slot_span].to_vec();
-                upload.upload_chunks = true;
-                upload.upload_chunk_diffs = false;
-                upload.chunk_meta_diffs.clear();
-            }
-        }
+        stage_chunk_meta_uploads(&mut upload, &residency, new_chunk_meta_diffs);
         let mut terrain_refresh_seed_slots = newly_allocated_slots;
         terrain_refresh_seed_slots.extend_from_slice(&newly_resident_slots);
         terrain_refresh_seed_slots.sort_unstable();
@@ -1418,48 +2130,6 @@ fn append_particles_in_cell(
 
 fn particle_grid_axis(count: u32) -> u32 {
     (count as f32).sqrt().ceil() as u32
-}
-
-fn remove_gpu_particles_in_cells(
-    upload_particles: &mut Vec<GpuParticle>,
-    cells: &[IVec2],
-    max_count: usize,
-) -> Vec<usize> {
-    let target_cells: HashSet<IVec2> = cells.iter().copied().collect();
-    if target_cells.is_empty() {
-        return Vec::new();
-    }
-    let mut removed_mpm_indices = Vec::new();
-    let mut keep = vec![true; upload_particles.len()];
-    for (i, particle) in upload_particles.iter().enumerate() {
-        if removed_mpm_indices.len() >= max_count {
-            break;
-        }
-        let cell = world_to_cell(Vec2::from_array(particle.x));
-        if target_cells.contains(&cell) {
-            keep[i] = false;
-            removed_mpm_indices.push(i);
-        }
-    }
-    if removed_mpm_indices.is_empty() {
-        return removed_mpm_indices;
-    }
-    compact_vec_by_keep(upload_particles, &keep);
-    removed_mpm_indices
-}
-
-fn compact_vec_by_keep<T: Copy>(data: &mut Vec<T>, keep: &[bool]) {
-    let mut write = 0usize;
-    for read in 0..data.len() {
-        if !keep[read] {
-            continue;
-        }
-        if write != read {
-            data[write] = data[read];
-        }
-        write += 1;
-    }
-    data.truncate(write);
 }
 
 #[derive(Debug)]
@@ -1657,6 +2327,61 @@ fn rebuild_halo_ref_counts(
     missing_neighbors
 }
 
+fn stage_pending_add_target_residency(
+    residency: &mut MpmChunkResidencyState,
+    target_chunks: &[IVec2],
+) -> Vec<u32> {
+    if target_chunks.is_empty() || residency.slot_state.is_empty() {
+        return Vec::new();
+    }
+
+    let mut dirty_slots = HashSet::<u32>::default();
+    for &chunk in target_chunks {
+        let Some(slot_id) = slot_id_from_chunk_coord(chunk, &residency.chunk_to_slot) else {
+            continue;
+        };
+        let slot_idx = slot_id as usize;
+        let Some(slot) = residency.slot_state.get_mut(slot_idx) else {
+            continue;
+        };
+        if slot.occupied_particle_count == 0 {
+            // Pending GPU add means this chunk will become occupied this frame.
+            slot.occupied_particle_count = 1;
+        }
+        dirty_slots.insert(slot_id);
+    }
+
+    let slot_to_chunk = residency.slot_to_chunk.clone();
+    let chunk_to_slot = residency.chunk_to_slot.clone();
+    let slot_allocated = residency.slot_allocated.clone();
+    let _ = rebuild_halo_ref_counts(
+        &mut residency.slot_state,
+        &slot_to_chunk,
+        &slot_allocated,
+        &chunk_to_slot,
+    );
+    let changed_resident_slots = recompute_resident_flags(&mut residency.slot_state);
+    dirty_slots.extend(changed_resident_slots.iter().copied());
+    dirty_slots.extend(collect_neighbor_dirty_slots(
+        &changed_resident_slots,
+        &residency.slot_to_chunk,
+        &residency.chunk_to_slot,
+    ));
+
+    residency.active_resident_chunk_count = residency
+        .slot_state
+        .iter()
+        .enumerate()
+        .filter(|(idx, slot)| {
+            residency.slot_allocated.get(*idx).copied().unwrap_or(false) && slot.resident
+        })
+        .count() as u32;
+
+    let mut ordered = dirty_slots.into_iter().collect::<Vec<_>>();
+    ordered.sort_unstable();
+    ordered
+}
+
 fn recompute_resident_flags(slot_state: &mut [ChunkSlotState]) -> Vec<u32> {
     let mut changed = Vec::new();
     for (slot_id, slot) in slot_state.iter_mut().enumerate() {
@@ -1733,12 +2458,7 @@ fn build_chunk_meta_for_slot(
                 .unwrap_or(false),
     );
 
-    if !is_allocated
-        || !slot_state
-            .get(slot_id as usize)
-            .map(|slot| slot.resident)
-            .unwrap_or(false)
-    {
+    if !is_allocated {
         return meta;
     }
 
@@ -2280,7 +3000,9 @@ mod tests {
     use crate::physics::gpu_mpm::buffers::GpuParticle;
     use crate::physics::gpu_mpm::gpu_resources::MpmGpuUploadRequest;
     use crate::physics::gpu_mpm::phase::MPM_PHASE_ID_WATER;
-    use crate::physics::gpu_mpm::readback::{GpuReadbackResult, GpuStatisticsReadbackResult};
+    use crate::physics::gpu_mpm::readback::{
+        GpuParticleReadbackPayload, GpuReadbackResult, GpuStatisticsReadbackResult,
+    };
     use crate::physics::material::ParticleMaterial;
     use crate::physics::state::SimulationState;
     use bevy::ecs::message::Messages;
@@ -2289,16 +3011,50 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(MpmGpuControl::default())
             .insert_resource(ActivePhysicsParams::default())
+            .insert_resource(TerrainWorld::default())
             .insert_resource(MpmGpuUploadRequest::default())
-            .insert_resource(MpmReadbackSnapshot::default())
+            .insert_resource(MpmParticleReadbackStatus::default())
+            .insert_resource(MpmFullParticleReadbackRequest::default())
+            .insert_resource(MpmFullParticleReadbackCache {
+                payload: Some(GpuParticleReadbackPayload {
+                    particles: Vec::new(),
+                    particle_revision: 0,
+                }),
+            })
+            .insert_resource(DeferredGpuWorldEditRequests::default())
+            .insert_resource(MpmChunkResidencyState::default())
+            .insert_resource(PendingGpuParticleAdds::default())
+            .insert_resource(MpmGpuWorldEditAddQueueRequest::default())
+            .insert_resource(MpmGpuWorldEditRemoveQueueRequest::default())
             .add_message::<GpuWorldEditRequest>()
             .add_systems(Update, apply_world_edit_requests);
         app
     }
 
     #[test]
-    fn world_edit_add_particles_updates_upload_and_snapshot() {
+    fn world_edit_add_particles_bootstraps_residency_from_full_readback_without_full_upload() {
         let mut app = setup_edit_app();
+        let existing_particle = GpuParticle::from_cpu(
+            cell_to_world_center(IVec2::new(-1, 0)),
+            Vec2::ZERO,
+            1.0,
+            1.0,
+            Mat2::IDENTITY,
+            Mat2::ZERO,
+            0.0,
+            MPM_PHASE_ID_WATER,
+        );
+        {
+            let world = app.world_mut();
+            world.resource_mut::<MpmParticleReadbackStatus>().particle_count = 1;
+            world.resource_mut::<MpmParticleReadbackStatus>().particle_revision = 1;
+            world.resource_mut::<MpmFullParticleReadbackCache>().payload = Some(
+                GpuParticleReadbackPayload {
+                    particles: vec![existing_particle],
+                    particle_revision: 1,
+                },
+            );
+        }
         let cells = vec![IVec2::new(0, 0), IVec2::new(1, 0)];
         app.world_mut()
             .resource_mut::<Messages<GpuWorldEditRequest>>()
@@ -2313,14 +3069,156 @@ mod tests {
         app.update();
 
         let upload = app.world().resource::<MpmGpuUploadRequest>();
-        let snapshot = app.world().resource::<MpmReadbackSnapshot>();
+        assert!(upload.particles.is_empty());
+        assert!(!upload.upload_particles);
+        assert!(upload.upload_mover_results);
+        assert!(upload.upload_chunks);
+        assert!(app
+            .world()
+            .resource::<MpmGpuWorldEditAddQueueRequest>()
+            .ops
+            .is_empty());
 
-        assert_eq!(upload.particles.len(), 8);
-        assert_eq!(snapshot.particles.len(), 8);
-        assert!(upload.upload_particles);
-        for p in &upload.particles {
-            let cell = world_to_cell(Vec2::from_array(p.x));
-            assert!(cells.contains(&cell));
+        app.update();
+
+        let upload = app.world().resource::<MpmGpuUploadRequest>();
+        let status = app.world().resource::<MpmParticleReadbackStatus>();
+        let cache = app.world().resource::<MpmFullParticleReadbackCache>();
+        let residency = app.world().resource::<MpmChunkResidencyState>();
+        let add_queue = app.world().resource::<MpmGpuWorldEditAddQueueRequest>();
+
+        assert_eq!(upload.mover_results.len(), 1);
+        assert!(cache.payload.is_none());
+        assert_eq!(upload.particle_revision, 2);
+        assert_eq!(status.particle_count, 9);
+        assert_eq!(status.particle_revision, 2);
+        assert!(residency.initialized);
+        assert_eq!(add_queue.added_particle_count, 8);
+        assert_eq!(add_queue.ops.len(), 2);
+    }
+
+    #[test]
+    fn world_edit_add_particles_queues_gpu_ops_when_chunk_slots_are_resident() {
+        let mut app = setup_edit_app();
+        let cells = vec![IVec2::new(0, 0), IVec2::new(CHUNK_SIZE_I32, 0)];
+        app.world_mut()
+            .insert_resource(MpmChunkResidencyState {
+                initialized: true,
+                chunk_to_slot: HashMap::from([(IVec2::ZERO, 0), (IVec2::new(1, 0), 1)]),
+                slot_to_chunk: vec![IVec2::ZERO, IVec2::new(1, 0)],
+                slot_allocated: vec![true, true],
+                slot_state: vec![ChunkSlotState::default(), ChunkSlotState::default()],
+                ..Default::default()
+            });
+        app.world_mut()
+            .resource_mut::<Messages<GpuWorldEditRequest>>()
+            .write(GpuWorldEditRequest {
+                cells: cells.clone(),
+                command: GpuWorldEditCommand::AddParticles {
+                    material: ParticleMaterial::WaterLiquid,
+                    count_per_cell: 4,
+                },
+            });
+
+        app.update();
+
+        let upload = app.world().resource::<MpmGpuUploadRequest>();
+        let status = app.world().resource::<MpmParticleReadbackStatus>();
+        let cache = app.world().resource::<MpmFullParticleReadbackCache>();
+        let pending = app.world().resource::<PendingGpuParticleAdds>();
+        let add_queue = app.world().resource::<MpmGpuWorldEditAddQueueRequest>();
+
+        assert!(upload.particles.is_empty());
+        assert!(!upload.upload_particles);
+        assert!(cache.payload.is_none());
+        assert_eq!(upload.particle_revision, 1);
+        assert_eq!(status.particle_count, 8);
+        assert_eq!(status.particle_revision, 1);
+        assert_eq!(pending.latest_revision(), 1);
+        assert_eq!(pending.total_added_particles(), 8);
+        assert_eq!(add_queue.particle_revision, 1);
+        assert_eq!(add_queue.added_particle_count, 8);
+        assert_eq!(add_queue.ops.len(), 2);
+        assert_eq!(add_queue.ops[0].slot_id, 0);
+        assert_eq!(add_queue.ops[1].slot_id, 1);
+        assert_eq!(add_queue.ops[0].count_per_cell, 4);
+        assert_eq!(add_queue.ops[1].count_per_cell, 4);
+    }
+
+    #[test]
+    fn world_edit_add_particles_allocates_missing_chunk_slots_without_full_upload() {
+        let mut app = setup_edit_app();
+        app.world_mut()
+            .resource_mut::<TerrainWorld>()
+            .set_generation_enabled(false);
+        app.world_mut()
+            .resource_mut::<Messages<GpuWorldEditRequest>>()
+            .write(GpuWorldEditRequest {
+                cells: vec![IVec2::new(CHUNK_SIZE_I32 * 2, 0)],
+                command: GpuWorldEditCommand::AddParticles {
+                    material: ParticleMaterial::WaterLiquid,
+                    count_per_cell: 4,
+                },
+            });
+
+        app.update();
+
+        let upload = app.world().resource::<MpmGpuUploadRequest>();
+        let residency = app.world().resource::<MpmChunkResidencyState>();
+
+        assert!(!upload.upload_particles);
+        assert!(upload.upload_chunks || upload.upload_chunk_diffs);
+        assert!(residency.initialized);
+        assert!(app
+            .world()
+            .resource::<MpmGpuWorldEditAddQueueRequest>()
+            .ops
+            .is_empty());
+
+        app.update();
+
+        let add_queue = app.world().resource::<MpmGpuWorldEditAddQueueRequest>();
+        assert_eq!(add_queue.added_particle_count, 4);
+        assert_eq!(add_queue.ops.len(), 1);
+    }
+
+    #[test]
+    fn world_edit_add_particles_marks_target_halo_slots_resident_before_gpu_apply() {
+        let mut app = setup_edit_app();
+        app.world_mut()
+            .resource_mut::<TerrainWorld>()
+            .set_generation_enabled(false);
+        let target_cell = IVec2::new(CHUNK_SIZE_I32 * 4, CHUNK_SIZE_I32 * 3);
+        let target_chunk = IVec2::new(
+            target_cell.x.div_euclid(CHUNK_SIZE_I32),
+            target_cell.y.div_euclid(CHUNK_SIZE_I32),
+        );
+        app.world_mut()
+            .resource_mut::<Messages<GpuWorldEditRequest>>()
+            .write(GpuWorldEditRequest {
+                cells: vec![target_cell],
+                command: GpuWorldEditCommand::AddParticles {
+                    material: ParticleMaterial::WaterLiquid,
+                    count_per_cell: 4,
+                },
+            });
+
+        app.update();
+
+        let residency = app.world().resource::<MpmChunkResidencyState>();
+        for oy in -CHUNK_HALO_RADIUS..=CHUNK_HALO_RADIUS {
+            for ox in -CHUNK_HALO_RADIUS..=CHUNK_HALO_RADIUS {
+                let chunk = target_chunk + IVec2::new(ox, oy);
+                let slot_id = residency
+                    .chunk_to_slot
+                    .get(&chunk)
+                    .copied()
+                    .expect("halo chunk should be allocated");
+                assert!(
+                    residency.slot_state[slot_id as usize].resident,
+                    "chunk {chunk:?} should be resident before GPU add apply"
+                );
+            }
         }
     }
 
@@ -2328,17 +3226,30 @@ mod tests {
     fn world_edit_remove_particles_respects_max_count() {
         let mut app = setup_edit_app();
         let target = IVec2::new(2, 3);
-
-        app.world_mut()
-            .resource_mut::<Messages<GpuWorldEditRequest>>()
-            .write(GpuWorldEditRequest {
-                cells: vec![target],
-                command: GpuWorldEditCommand::AddParticles {
-                    material: ParticleMaterial::WaterLiquid,
-                    count_per_cell: 9,
+        let mut particles = Vec::new();
+        for i in 0..9 {
+            particles.push(GpuParticle::from_cpu(
+                cell_to_world_center(target) + Vec2::new(i as f32 * 0.001, 0.0),
+                Vec2::ZERO,
+                1.0,
+                1.0,
+                Mat2::IDENTITY,
+                Mat2::ZERO,
+                0.0,
+                MPM_PHASE_ID_WATER,
+            ));
+        }
+        {
+            let world = app.world_mut();
+            world.resource_mut::<MpmFullParticleReadbackCache>().payload = Some(
+                GpuParticleReadbackPayload {
+                    particles,
+                    particle_revision: 1,
                 },
-            });
-        app.update();
+            );
+            world.resource_mut::<MpmParticleReadbackStatus>().particle_count = 9;
+            world.resource_mut::<MpmParticleReadbackStatus>().particle_revision = 1;
+        }
 
         app.world_mut()
             .resource_mut::<Messages<GpuWorldEditRequest>>()
@@ -2348,16 +3259,19 @@ mod tests {
             });
         app.update();
 
-        let upload = app.world().resource::<MpmGpuUploadRequest>();
+        let remove_queue = app.world().resource::<MpmGpuWorldEditRemoveQueueRequest>();
+        let status = app.world().resource::<MpmParticleReadbackStatus>();
 
-        assert_eq!(upload.particles.len(), 5);
+        assert_eq!(remove_queue.removed_particle_count, 4);
+        assert_eq!(remove_queue.remove_particle_ids.len(), 4);
+        assert_eq!(status.particle_count, 5);
     }
 
     #[test]
-    fn world_edit_add_particles_prefers_latest_readback_snapshot() {
+    fn world_edit_add_particles_ignores_stale_cpu_upload_when_bootstrapping_from_readback() {
         let mut app = setup_edit_app();
         let stale_particle = GpuParticle::from_cpu(
-            Vec2::new(0.25, 0.25),
+            cell_to_world_center(IVec2::new(-CHUNK_SIZE_I32 * 2, 0)),
             Vec2::ZERO,
             1.0,
             1.0,
@@ -2367,7 +3281,7 @@ mod tests {
             MPM_PHASE_ID_WATER,
         );
         let latest_particle = GpuParticle::from_cpu(
-            cell_to_world_center(IVec2::new(4, 5)),
+            cell_to_world_center(IVec2::new(CHUNK_SIZE_I32 * 4, 0)),
             Vec2::ZERO,
             1.0,
             1.0,
@@ -2379,7 +3293,15 @@ mod tests {
         {
             let world = app.world_mut();
             world.resource_mut::<MpmGpuUploadRequest>().particles = vec![stale_particle];
-            world.resource_mut::<MpmReadbackSnapshot>().particles = vec![latest_particle];
+            world.resource_mut::<MpmGpuUploadRequest>().particle_revision = 1;
+            world.resource_mut::<MpmParticleReadbackStatus>().particle_count = 1;
+            world.resource_mut::<MpmParticleReadbackStatus>().particle_revision = 2;
+            world.resource_mut::<MpmFullParticleReadbackCache>().payload = Some(
+                GpuParticleReadbackPayload {
+                    particles: vec![latest_particle],
+                    particle_revision: 2,
+                },
+            );
         }
 
         app.world_mut()
@@ -2395,21 +3317,99 @@ mod tests {
         app.update();
 
         let upload = app.world().resource::<MpmGpuUploadRequest>();
-        let snapshot = app.world().resource::<MpmReadbackSnapshot>();
+        assert_eq!(upload.particle_revision, 1);
+        assert!(!upload.upload_particles);
+        assert!(upload.upload_mover_results);
+        assert_eq!(upload.mover_results.len(), 1);
+        assert!(app
+            .world()
+            .resource::<MpmGpuWorldEditAddQueueRequest>()
+            .ops
+            .is_empty());
 
+        app.update();
+
+        let upload = app.world().resource::<MpmGpuUploadRequest>();
+        let residency = app.world().resource::<MpmChunkResidencyState>();
+        let add_queue = app.world().resource::<MpmGpuWorldEditAddQueueRequest>();
+
+        assert_eq!(upload.particle_revision, 3);
+        assert_eq!(add_queue.added_particle_count, 4);
+        assert!(residency.chunk_to_slot.contains_key(&IVec2::new(4, 0)));
+        assert!(!residency.chunk_to_slot.contains_key(&IVec2::new(-2, 0)));
+    }
+
+    #[test]
+    fn world_edit_add_particles_updates_pending_full_upload_over_stale_full_readback_cache() {
+        let mut app = setup_edit_app();
+        let newer_particle = GpuParticle::from_cpu(
+            cell_to_world_center(IVec2::new(9, 1)),
+            Vec2::ZERO,
+            1.0,
+            1.0,
+            Mat2::IDENTITY,
+            Mat2::ZERO,
+            0.0,
+            MPM_PHASE_ID_WATER,
+        );
+        let stale_particle = GpuParticle::from_cpu(
+            cell_to_world_center(IVec2::new(1, 1)),
+            Vec2::ZERO,
+            1.0,
+            1.0,
+            Mat2::IDENTITY,
+            Mat2::ZERO,
+            0.0,
+            MPM_PHASE_ID_WATER,
+        );
+        {
+            let world = app.world_mut();
+            world.resource_mut::<MpmGpuUploadRequest>().particles = vec![newer_particle];
+            world.resource_mut::<MpmGpuUploadRequest>().particle_revision = 5;
+            world.resource_mut::<MpmGpuUploadRequest>().upload_particles = true;
+            world.resource_mut::<MpmParticleReadbackStatus>().particle_count = 1;
+            world.resource_mut::<MpmParticleReadbackStatus>().particle_revision = 4;
+            world.resource_mut::<MpmFullParticleReadbackCache>().payload = Some(
+                GpuParticleReadbackPayload {
+                    particles: vec![stale_particle],
+                    particle_revision: 4,
+                },
+            );
+        }
+
+        app.world_mut()
+            .resource_mut::<Messages<GpuWorldEditRequest>>()
+            .write(GpuWorldEditRequest {
+                cells: vec![IVec2::new(10, 1)],
+                command: GpuWorldEditCommand::AddParticles {
+                    material: ParticleMaterial::WaterLiquid,
+                    count_per_cell: 4,
+                },
+            });
+
+        app.update();
+
+        let upload = app.world().resource::<MpmGpuUploadRequest>();
+        let add_queue = app.world().resource::<MpmGpuWorldEditAddQueueRequest>();
+        let cache = app.world().resource::<MpmFullParticleReadbackCache>();
+        let payload = cache.payload.as_ref().expect("pending full upload cache");
+        assert_eq!(upload.particle_revision, 6);
+        assert!(upload.upload_particles);
+        assert_eq!(add_queue.added_particle_count, 0);
         assert_eq!(upload.particles.len(), 5);
-        assert_eq!(snapshot.particles.len(), 5);
+        assert_eq!(payload.particle_revision, 6);
+        assert_eq!(payload.particles.len(), 5);
         assert!(
             upload
                 .particles
                 .iter()
-                .any(|particle| world_to_cell(Vec2::from_array(particle.x)) == IVec2::new(4, 5))
+                .any(|particle| world_to_cell(Vec2::from_array(particle.x)) == IVec2::new(9, 1))
         );
         assert!(
             upload
                 .particles
                 .iter()
-                .all(|particle| world_to_cell(Vec2::from_array(particle.x)) != IVec2::new(0, 0))
+                .all(|particle| world_to_cell(Vec2::from_array(particle.x)) != IVec2::new(1, 1))
         );
     }
 
@@ -2464,22 +3464,16 @@ mod tests {
     fn prepare_particle_upload_prefers_explicit_clear_over_stale_snapshot() {
         let mut app = App::new();
         app.insert_resource(MpmGpuControl::default())
-            .insert_resource(MpmReadbackSnapshot {
-                particles: vec![GpuParticle::from_cpu(
-                    Vec2::new(1.0, 2.0),
-                    Vec2::ZERO,
-                    1.0,
-                    1.0,
-                    Mat2::IDENTITY,
-                    Mat2::ZERO,
-                    0.0,
-                    MPM_PHASE_ID_WATER,
-                )],
-            })
             .insert_resource(MpmGpuUploadRequest {
                 upload_particles: true,
+                particle_revision: 8,
                 ..Default::default()
             })
+            .insert_resource(MpmParticleReadbackStatus {
+                particle_count: 1,
+                particle_revision: 7,
+            })
+            .insert_resource(PendingGpuParticleAdds::default())
             .insert_resource(SimulationState::default())
             .add_systems(Update, prepare_particle_upload);
 
@@ -2493,33 +3487,301 @@ mod tests {
     }
 
     #[test]
+    fn prepare_gpu_params_uses_effective_particle_count_without_double_counting_pending_adds() {
+        let mut pending_gpu_adds = PendingGpuParticleAdds::default();
+        pending_gpu_adds.push_batch(PendingGpuParticleAddBatch {
+            particle_revision: 9,
+            added_particle_count: 6,
+            expected_total_particle_count: 16,
+            ops: vec![PendingGpuParticleAddOp {
+                cell: IVec2::new(0, 0),
+                material: ParticleMaterial::WaterLiquid,
+                count_per_cell: 6,
+            }],
+        });
+
+        let mut app = App::new();
+        app.insert_resource(MpmGpuControl::default())
+            .insert_resource(ActivePhysicsParams::default())
+            .insert_resource(MpmGpuUploadRequest {
+                particles: vec![
+                    GpuParticle::from_cpu(
+                        Vec2::new(1.0, 2.0),
+                        Vec2::ZERO,
+                        1.0,
+                        1.0,
+                        Mat2::IDENTITY,
+                        Mat2::ZERO,
+                        0.0,
+                        MPM_PHASE_ID_WATER,
+                    );
+                    3
+                ],
+                upload_particles_frame: false,
+                ..Default::default()
+            })
+            .insert_resource(MpmParticleReadbackStatus {
+                particle_count: 16,
+                particle_revision: 8,
+            })
+            .insert_resource(pending_gpu_adds)
+            .insert_resource(MpmChunkResidencyState::default())
+            .insert_resource(MpmStatisticsStatus::default())
+            .insert_resource(MpmGpuParamsRequest::default())
+            .add_systems(Update, prepare_gpu_params);
+
+        app.update();
+
+        let params = app.world().resource::<MpmGpuParamsRequest>();
+        assert_eq!(params.params.particle_count, 16);
+    }
+
+    #[test]
+    fn prepare_terrain_upload_preserves_staged_world_edit_uploads() {
+        let mut app = App::new();
+        app.insert_resource(MpmGpuControl::default())
+            .insert_resource(SimulationState {
+                mpm_enabled: true,
+                ..Default::default()
+            })
+            .insert_resource(TerrainWorld::default())
+            .insert_resource(MpmParticleReadbackStatus::default())
+            .insert_resource(MpmFullParticleReadbackRequest::default())
+            .insert_resource(MpmFullParticleReadbackCache::default())
+            .insert_resource(MpmChunkResidencyState {
+                initialized: true,
+                resident_chunk_count: 1,
+                ..Default::default()
+            })
+            .insert_resource(MpmGpuUploadRequest {
+                upload_chunks: true,
+                chunk_meta: vec![GpuChunkMeta::default()],
+                upload_terrain_cell_slot_diffs: true,
+                terrain_slot_ids: vec![0],
+                terrain_cell_solid_slot_diffs: vec![0; MPM_CHUNK_NODES_PER_SLOT as usize],
+                last_uploaded_terrain_version: Some(0),
+                ..Default::default()
+            })
+            .add_systems(Update, prepare_terrain_upload);
+
+        app.update();
+
+        let upload = app.world().resource::<MpmGpuUploadRequest>();
+        assert!(upload.upload_chunks);
+        assert!(upload.upload_terrain_cell_slot_diffs);
+        assert_eq!(upload.chunk_meta.len(), 1);
+        assert_eq!(upload.terrain_slot_ids, vec![0]);
+        assert_eq!(
+            upload.terrain_cell_solid_slot_diffs.len(),
+            MPM_CHUNK_NODES_PER_SLOT as usize
+        );
+    }
+
+    #[test]
     fn apply_gpu_readback_ignores_stale_when_gpu_path_inactive() {
         let mut app = App::new();
         app.insert_resource(MpmGpuControl::default())
             .insert_resource(GpuReadbackResult::default())
-            .insert_resource(SimulationState::default())
-            .insert_resource(MpmGpuUploadRequest::default())
-            .insert_resource(MpmReadbackSnapshot::default())
-            .insert_resource(MpmChunkResidencyState::default())
+            .insert_resource(MpmFullParticleReadbackRequest::default())
+            .insert_resource(MpmFullParticleReadbackCache::default())
             .add_systems(Update, apply_gpu_readback);
 
         app.world()
             .resource::<GpuReadbackResult>()
-            .store(vec![GpuParticle::from_cpu(
-                Vec2::new(3.0, 4.0),
-                Vec2::ZERO,
-                1.0,
-                1.0,
-                Mat2::IDENTITY,
-                Mat2::ZERO,
-                0.0,
-                MPM_PHASE_ID_WATER,
-            )]);
+            .store(GpuParticleReadbackPayload {
+                particles: vec![GpuParticle::from_cpu(
+                    Vec2::new(3.0, 4.0),
+                    Vec2::ZERO,
+                    1.0,
+                    1.0,
+                    Mat2::IDENTITY,
+                    Mat2::ZERO,
+                    0.0,
+                    MPM_PHASE_ID_WATER,
+                )],
+                particle_revision: 1,
+            });
 
         app.update();
 
-        let snapshot = app.world().resource::<MpmReadbackSnapshot>();
-        assert!(snapshot.particles.is_empty());
+        let cache = app.world().resource::<MpmFullParticleReadbackCache>();
+        assert!(cache.payload.is_none());
+    }
+
+    #[test]
+    fn apply_gpu_readback_ignores_older_particle_revision() {
+        let stale_particle = GpuParticle::from_cpu(
+            cell_to_world_center(IVec2::new(2, 2)),
+            Vec2::ZERO,
+            1.0,
+            1.0,
+            Mat2::IDENTITY,
+            Mat2::ZERO,
+            0.0,
+            MPM_PHASE_ID_WATER,
+        );
+
+        let mut app = App::new();
+        app.insert_resource(MpmGpuControl::default())
+            .insert_resource(GpuReadbackResult::default())
+            .insert_resource(MpmFullParticleReadbackRequest {
+                requested: true,
+                min_particle_revision: 5,
+            })
+            .insert_resource(MpmFullParticleReadbackCache::default())
+            .add_systems(Update, apply_gpu_readback);
+
+        app.world()
+            .resource::<GpuReadbackResult>()
+            .store(GpuParticleReadbackPayload {
+                particles: vec![stale_particle],
+                particle_revision: 4,
+            });
+
+        app.update();
+
+        let request = app.world().resource::<MpmFullParticleReadbackRequest>();
+        let cache = app.world().resource::<MpmFullParticleReadbackCache>();
+        assert!(request.requested);
+        assert_eq!(request.min_particle_revision, 5);
+        assert!(cache.payload.is_none());
+    }
+
+    #[test]
+    fn apply_gpu_readback_caches_requested_payload_and_clears_request() {
+        let current_particle = GpuParticle::from_cpu(
+            cell_to_world_center(IVec2::new(6, 2)),
+            Vec2::ZERO,
+            1.0,
+            1.0,
+            Mat2::IDENTITY,
+            Mat2::ZERO,
+            0.0,
+            MPM_PHASE_ID_WATER,
+        );
+
+        let mut app = App::new();
+        app.insert_resource(MpmGpuControl::default())
+            .insert_resource(GpuReadbackResult::default())
+            .insert_resource(MpmFullParticleReadbackRequest {
+                requested: true,
+                min_particle_revision: 6,
+            })
+            .insert_resource(MpmFullParticleReadbackCache::default())
+            .add_systems(Update, apply_gpu_readback);
+
+        app.world()
+            .resource::<GpuReadbackResult>()
+            .store(GpuParticleReadbackPayload {
+                particles: vec![current_particle],
+                particle_revision: 6,
+            });
+
+        app.update();
+
+        let request = app.world().resource::<MpmFullParticleReadbackRequest>();
+        let cache = app.world().resource::<MpmFullParticleReadbackCache>();
+        let payload = cache.payload.as_ref().expect("full payload cached");
+        assert!(!request.requested);
+        assert_eq!(payload.particle_revision, 6);
+        assert_eq!(payload.particles.len(), 1);
+        assert_eq!(
+            world_to_cell(Vec2::from_array(payload.particles[0].x)),
+            IVec2::new(6, 2)
+        );
+    }
+
+    #[test]
+    fn consume_world_edit_add_ack_drops_acked_batches() {
+        let mut pending_gpu_adds = PendingGpuParticleAdds::default();
+        pending_gpu_adds.push_batch(PendingGpuParticleAddBatch {
+            particle_revision: 3,
+            added_particle_count: 4,
+            expected_total_particle_count: 4,
+            ops: vec![PendingGpuParticleAddOp {
+                cell: IVec2::new(1, 0),
+                material: ParticleMaterial::WaterLiquid,
+                count_per_cell: 4,
+            }],
+        });
+        pending_gpu_adds.push_batch(PendingGpuParticleAddBatch {
+            particle_revision: 5,
+            added_particle_count: 2,
+            expected_total_particle_count: 6,
+            ops: vec![PendingGpuParticleAddOp {
+                cell: IVec2::new(2, 0),
+                material: ParticleMaterial::WaterLiquid,
+                count_per_cell: 2,
+            }],
+        });
+
+        let ack = GpuWorldEditAddApplyAck::default();
+        ack.signal_revision(3);
+
+        let mut app = App::new();
+        app.insert_resource(MpmGpuControl::default())
+            .insert_resource(ack)
+            .insert_resource(pending_gpu_adds)
+            .add_systems(Update, consume_world_edit_add_ack);
+
+        app.update();
+
+        let pending = app.world().resource::<PendingGpuParticleAdds>();
+        assert_eq!(pending.latest_revision(), 5);
+        assert_eq!(pending.total_added_particles(), 2);
+    }
+
+    #[test]
+    fn world_edit_add_requeues_oldest_pending_batch_without_new_input() {
+        let mut app = App::new();
+        let mut pending_gpu_adds = PendingGpuParticleAdds::default();
+        pending_gpu_adds.push_batch(PendingGpuParticleAddBatch {
+            particle_revision: 7,
+            added_particle_count: 4,
+            expected_total_particle_count: 10,
+            ops: vec![PendingGpuParticleAddOp {
+                cell: IVec2::new(CHUNK_SIZE_I32 * 3 + 2, 1),
+                material: ParticleMaterial::WaterLiquid,
+                count_per_cell: 4,
+            }],
+        });
+        app.insert_resource(MpmGpuControl::default())
+            .insert_resource(ActivePhysicsParams::default())
+            .insert_resource(TerrainWorld::default())
+            .insert_resource(MpmGpuUploadRequest::default())
+            .insert_resource(MpmParticleReadbackStatus {
+                particle_count: 10,
+                particle_revision: 7,
+            })
+            .insert_resource(MpmFullParticleReadbackRequest::default())
+            .insert_resource(MpmFullParticleReadbackCache::default())
+            .insert_resource(DeferredGpuWorldEditRequests::default())
+            .insert_resource(MpmChunkResidencyState {
+                initialized: true,
+                chunk_to_slot: HashMap::from([(IVec2::new(3, 0), 4)]),
+                slot_to_chunk: vec![IVec2::ZERO; 5],
+                slot_allocated: vec![false, false, false, false, true],
+                slot_state: vec![ChunkSlotState::default(); 5],
+                ..Default::default()
+            })
+            .insert_resource(pending_gpu_adds)
+            .insert_resource(MpmGpuWorldEditAddQueueRequest::default())
+            .insert_resource(MpmGpuWorldEditRemoveQueueRequest::default())
+            .add_message::<GpuWorldEditRequest>()
+            .add_systems(Update, apply_world_edit_requests);
+        app.world_mut().resource_mut::<MpmChunkResidencyState>().slot_to_chunk[4] =
+            IVec2::new(3, 0);
+
+        app.update();
+
+        let add_queue = app.world().resource::<MpmGpuWorldEditAddQueueRequest>();
+        assert_eq!(add_queue.particle_revision, 7);
+        assert_eq!(add_queue.base_particle_count, 6);
+        assert_eq!(add_queue.added_particle_count, 4);
+        assert_eq!(add_queue.ops.len(), 1);
+        assert_eq!(add_queue.ops[0].slot_id, 4);
+        assert_eq!(add_queue.ops[0].local_cell_x, 2);
+        assert_eq!(add_queue.ops[0].local_cell_y, 1);
     }
 
     #[test]

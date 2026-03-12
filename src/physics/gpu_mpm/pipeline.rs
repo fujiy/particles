@@ -43,6 +43,10 @@ pub struct MpmComputePipelines {
     pub extract_chunk_events_pipeline: CachedComputePipelineId,
     pub apply_mover_results_layout: BindGroupLayout,
     pub apply_mover_results_pipeline: CachedComputePipelineId,
+    pub world_edit_add_layout: BindGroupLayout,
+    pub world_edit_add_pipeline: CachedComputePipelineId,
+    pub world_edit_remove_layout: BindGroupLayout,
+    pub world_edit_remove_pipeline: CachedComputePipelineId,
     pub chunk_meta_clear_layout: BindGroupLayout,
     pub chunk_meta_clear_pipeline: CachedComputePipelineId,
     pub chunk_meta_accumulate_layout: BindGroupLayout,
@@ -393,6 +397,65 @@ impl FromWorld for MpmComputePipelines {
                 shader: shaders.apply_mover_results.clone(),
                 shader_defs: vec![],
                 entry_point: Some("apply_mover_results".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // world_edit_add: 0=params, 1=add_params, 2=chunk_meta(read), 3=ops(read), 4=particles(rw)
+        let world_edit_add_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let world_edit_add_layout = render_device.create_bind_group_layout(
+            "mpm_world_edit_add_layout",
+            &*world_edit_add_entries,
+        );
+        let world_edit_add_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_world_edit_add".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_world_edit_add_layout",
+                    &*world_edit_add_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.world_edit_add.clone(),
+                shader_defs: vec![],
+                entry_point: Some("apply_world_edit_add".into()),
+                zero_initialize_workgroup_memory: false,
+            });
+
+        // world_edit_remove: 0=remove_params, 1=remove_ids(read), 2=particles(read),
+        // 3=particle_scratch(rw), 4=keep_count(rw)
+        let world_edit_remove_entries = BindGroupLayoutEntries::sequential(
+            ShaderStages::COMPUTE,
+            (
+                binding_types::uniform_buffer_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_read_only_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+                binding_types::storage_buffer_sized(false, None),
+            ),
+        );
+        let world_edit_remove_layout = render_device.create_bind_group_layout(
+            "mpm_world_edit_remove_layout",
+            &*world_edit_remove_entries,
+        );
+        let world_edit_remove_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("mpm_world_edit_remove".into()),
+                layout: vec![BindGroupLayoutDescriptor::new(
+                    "mpm_world_edit_remove_layout",
+                    &*world_edit_remove_entries,
+                )],
+                push_constant_ranges: vec![],
+                shader: shaders.world_edit_remove.clone(),
+                shader_defs: vec![],
+                entry_point: Some("apply_world_edit_remove".into()),
                 zero_initialize_workgroup_memory: false,
             });
 
@@ -855,6 +918,10 @@ impl FromWorld for MpmComputePipelines {
             extract_chunk_events_pipeline,
             apply_mover_results_layout,
             apply_mover_results_pipeline,
+            world_edit_add_layout,
+            world_edit_add_pipeline,
+            world_edit_remove_layout,
+            world_edit_remove_pipeline,
             chunk_meta_clear_layout,
             chunk_meta_clear_pipeline,
             chunk_meta_accumulate_layout,

@@ -1,0 +1,48 @@
+{
+  "mpm": {
+    "enabled": true,
+    "scenario_name": "default_world",
+    "output_path": "artifacts/autoverify/default_world_far_spawn_chunk_growth.json",
+    "sample_material": "water_liquid",
+    "run_frames": 180,
+    "run_steps": 96,
+    "min_avg_fps": 10.0,
+    "max_penetration_ratio": 1.0,
+    "min_mean_drop": -1.0,
+    "min_resident_chunk_count": 45,
+    "min_render_active_chunk_count": 45,
+    "spawn_ops": [
+      {
+        "trigger_step": 0,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[-160, 0]]
+      },
+      {
+        "trigger_step": 8,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[-80, 0]]
+      },
+      {
+        "trigger_step": 16,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[0, 0]]
+      },
+      {
+        "trigger_step": 24,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[80, 0]]
+      },
+      {
+        "trigger_step": 32,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[160, 0]]
+      }
+    ]
+  },
+  "gpu_readback_interval_frames": 1
+}

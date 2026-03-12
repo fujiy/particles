@@ -12,6 +12,8 @@ pub struct MpmShaders {
     pub g2p: Handle<Shader>,
     pub extract_movers: Handle<Shader>,
     pub apply_mover_results: Handle<Shader>,
+    pub world_edit_add: Handle<Shader>,
+    pub world_edit_remove: Handle<Shader>,
     pub chunk_meta_update: Handle<Shader>,
     pub extract_chunk_events: Handle<Shader>,
     pub terrain_sdf_update: Handle<Shader>,
@@ -44,6 +46,8 @@ impl FromWorld for MpmShaders {
             g2p: asset_server.load("shaders/physics/mpm_g2p.wgsl"),
             extract_movers: asset_server.load("shaders/physics/mpm_extract_movers.wgsl"),
             apply_mover_results: asset_server.load("shaders/physics/mpm_apply_mover_results.wgsl"),
+            world_edit_add: asset_server.load("shaders/physics/mpm_world_edit_add.wgsl"),
+            world_edit_remove: asset_server.load("shaders/physics/mpm_world_edit_remove.wgsl"),
             chunk_meta_update: asset_server.load("shaders/physics/mpm_chunk_meta_update.wgsl"),
             extract_chunk_events: asset_server
                 .load("shaders/physics/mpm_extract_chunk_events.wgsl"),

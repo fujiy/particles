@@ -14,7 +14,7 @@ use bevy::prelude::*;
 
 use self::controls::{
     apply_save_load_requests, apply_sim_reset, handle_replay_requests, handle_sim_controls,
-    initialize_default_world,
+    initialize_default_world, PendingMapSave, PendingReplayArtifactSave,
 };
 use self::state::{
     LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest, ReplaySaveArtifactRequest,
@@ -43,6 +43,8 @@ impl Plugin for PhysicsPlugin {
         .init_resource::<SimulationState>()
         .init_resource::<ReplayState>()
         .init_resource::<MaterialParams>()
+        .init_resource::<PendingMapSave>()
+        .init_resource::<PendingReplayArtifactSave>()
         .add_message::<ResetSimulationRequest>()
         .add_message::<LoadDefaultWorldRequest>()
         .add_message::<SaveMapRequest>()

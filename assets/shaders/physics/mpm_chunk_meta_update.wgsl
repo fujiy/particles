@@ -18,6 +18,18 @@ struct GpuChunkMetaAtomic {
 @group(0) @binding(2) var<storage, read_write> chunk_meta: array<GpuChunkMetaAtomic>;
 const INVALID_SLOT: u32 = 0xffffffffu;
 
+fn neighbor_index_from_delta(dx: i32, dy: i32) -> u32 {
+    if dx == -1 && dy == -1 { return 0u; }
+    if dx ==  0 && dy == -1 { return 1u; }
+    if dx ==  1 && dy == -1 { return 2u; }
+    if dx == -1 && dy ==  0 { return 3u; }
+    if dx ==  1 && dy ==  0 { return 4u; }
+    if dx == -1 && dy ==  1 { return 5u; }
+    if dx ==  0 && dy ==  1 { return 6u; }
+    if dx ==  1 && dy ==  1 { return 7u; }
+    return INVALID_SLOT;
+}
+
 fn floor_div_i32(a: i32, b: i32) -> i32 {
     let q = a / b;
     let r = a % b;
@@ -46,9 +58,31 @@ fn accumulate_chunk_counts(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let p = particles[pid];
-    let slot_id = p.home_chunk_slot_id;
-    if slot_id >= params.resident_chunk_count || slot_id == INVALID_SLOT {
+    let home_slot = p.home_chunk_slot_id;
+    if home_slot >= params.resident_chunk_count || home_slot == INVALID_SLOT {
         return;
+    }
+
+    let inv_h = 1.0 / max(params.h, 1.0e-6);
+    let node_x = i32(floor(p.x.x * inv_h));
+    let node_y = i32(floor(p.x.y * inv_h));
+    let cdim = i32(params.chunk_node_dim);
+    let new_chunk_x = floor_div_i32(node_x, cdim);
+    let new_chunk_y = floor_div_i32(node_y, cdim);
+
+    var slot_id = home_slot;
+    let dx = new_chunk_x - chunk_meta[home_slot].chunk_coord_x;
+    let dy = new_chunk_y - chunk_meta[home_slot].chunk_coord_y;
+    if dx != 0 || dy != 0 {
+        if abs(dx) <= 1 && abs(dy) <= 1 {
+            let neighbor_index = neighbor_index_from_delta(dx, dy);
+            if neighbor_index != INVALID_SLOT {
+                let neighbor_slot = chunk_meta[home_slot].neighbor_slot_id[neighbor_index];
+                if neighbor_slot != INVALID_SLOT {
+                    slot_id = neighbor_slot;
+                }
+            }
+        }
     }
     atomicAdd(&chunk_meta[slot_id].particle_count_next, 1u);
 }

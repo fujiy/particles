@@ -13,6 +13,7 @@ use std::mem::size_of;
 use super::buffers::{
     ACTIVE_TILE_NODE_DIM, GpuActiveTileRecord, GpuChunkEventRecord, GpuChunkMeta, GpuGridLayout,
     GpuGridNode, GpuMoverResult, GpuMpmParams, GpuParticle, GpuStatisticsScalars,
+    GpuWorldEditAddOp, GpuWorldEditAddParams, GpuWorldEditRemoveParams,
 };
 use crate::physics::world::constants::{
     CELL_SIZE_M, CHUNK_SIZE_I32, WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X,
@@ -68,6 +69,8 @@ pub struct MpmGpuBuffers {
 
     /// Particle buffer.
     pub particle_buf: Buffer,
+    /// Scratch particle buffer used for GPU remove compaction.
+    pub particle_scratch_buf: Buffer,
 
     /// Grid buffer.
     pub grid_buf: Buffer,
@@ -107,6 +110,16 @@ pub struct MpmGpuBuffers {
     pub mover_result_count_buf: Buffer,
     /// CPU-uploaded mover result records.
     pub mover_result_buf: Buffer,
+    /// Uniform params for GPU incremental add edits.
+    pub world_edit_add_params_buf: Buffer,
+    /// CPU-uploaded incremental add edit records.
+    pub world_edit_add_op_buf: Buffer,
+    /// Uniform params for GPU incremental remove edits.
+    pub world_edit_remove_params_buf: Buffer,
+    /// CPU-uploaded sorted particle ids to remove.
+    pub world_edit_remove_id_buf: Buffer,
+    /// Atomic keep-count scratch for GPU remove compaction.
+    pub world_edit_remove_keep_count_buf: Buffer,
     /// Staging buffer for GPU→CPU mover readback (count + records, MAP_READ).
     pub mover_readback_buf: Buffer,
     /// Atomic chunk-event count generated on GPU each step.
@@ -123,10 +136,18 @@ pub struct MpmGpuBuffers {
 
     /// Current active particle count on GPU.
     pub particle_count: u32,
+    /// Revision of the particle set currently resident on GPU.
+    pub particle_revision: u64,
     /// Current active resident chunk count on GPU.
     pub active_chunk_count: u32,
     /// Current mover-result count to apply on GPU this frame.
     pub mover_result_count: u32,
+    /// Current incremental world-edit add op count to apply on GPU this frame.
+    pub world_edit_add_count: u32,
+    /// Current incremental world-edit remove particle-id count to apply on GPU this frame.
+    pub world_edit_remove_count: u32,
+    /// Source particle count before the current GPU remove compaction.
+    pub world_edit_remove_source_count: u32,
     /// Current terrain slot-update count for GPU terrain SDF recompute.
     pub terrain_update_slot_count: u32,
     /// Max grid-node capacity allocated for sparse chunk layout.
@@ -152,6 +173,12 @@ impl MpmGpuBuffers {
             label: Some("mpm_particles"),
             size: MAX_PARTICLES as u64 * size_of::<GpuParticle>() as u64,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let particle_scratch_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_particles_scratch"),
+            size: MAX_PARTICLES as u64 * size_of::<GpuParticle>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_SRC | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -263,6 +290,36 @@ impl MpmGpuBuffers {
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let world_edit_add_params_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_world_edit_add_params"),
+            size: size_of::<GpuWorldEditAddParams>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let world_edit_add_op_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_world_edit_add_ops"),
+            size: MAX_PARTICLES as u64 * size_of::<GpuWorldEditAddOp>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let world_edit_remove_params_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_world_edit_remove_params"),
+            size: size_of::<GpuWorldEditRemoveParams>() as u64,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let world_edit_remove_id_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_world_edit_remove_ids"),
+            size: MAX_PARTICLES as u64 * size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let world_edit_remove_keep_count_buf = device.create_buffer(&BufferDescriptor {
+            label: Some("mpm_world_edit_remove_keep_count"),
+            size: size_of::<u32>() as u64,
+            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mover_readback_buf = device.create_buffer(&BufferDescriptor {
             label: Some("mpm_mover_readback"),
             size: size_of::<u32>() as u64
@@ -308,6 +365,7 @@ impl MpmGpuBuffers {
             layout,
             params_buf,
             particle_buf,
+            particle_scratch_buf,
             grid_buf,
             chunk_meta_buf,
             active_tile_count_buf,
@@ -325,6 +383,11 @@ impl MpmGpuBuffers {
             mover_buf,
             mover_result_count_buf,
             mover_result_buf,
+            world_edit_add_params_buf,
+            world_edit_add_op_buf,
+            world_edit_remove_params_buf,
+            world_edit_remove_id_buf,
+            world_edit_remove_keep_count_buf,
             mover_readback_buf,
             chunk_event_count_buf,
             chunk_event_buf,
@@ -332,8 +395,12 @@ impl MpmGpuBuffers {
             stats_scalar_buf,
             stats_scalar_readback_buf,
             particle_count: 0,
+            particle_revision: 0,
             active_chunk_count: 0,
             mover_result_count: 0,
+            world_edit_add_count: 0,
+            world_edit_remove_count: 0,
+            world_edit_remove_source_count: 0,
             terrain_update_slot_count: 0,
             max_node_capacity,
             ready: false,
@@ -445,6 +512,64 @@ impl MpmGpuBuffers {
         }
         queue.write_buffer(&self.mover_result_buf, 0, cast_slice(results));
     }
+
+    pub fn upload_world_edit_adds(
+        &mut self,
+        queue: &RenderQueue,
+        base_particle_count: u32,
+        ops: &[GpuWorldEditAddOp],
+    ) {
+        assert!(ops.len() <= MAX_PARTICLES as usize);
+        self.world_edit_add_count = ops.len() as u32;
+        let params = GpuWorldEditAddParams {
+            base_particle_count,
+            op_count: self.world_edit_add_count,
+            _pad0: [0; 2],
+        };
+        queue.write_buffer(
+            &self.world_edit_add_params_buf,
+            0,
+            cast_slice(std::slice::from_ref(&params)),
+        );
+        if ops.is_empty() {
+            return;
+        }
+        queue.write_buffer(&self.world_edit_add_op_buf, 0, cast_slice(ops));
+    }
+
+    pub fn upload_world_edit_removes(
+        &mut self,
+        queue: &RenderQueue,
+        particle_count: u32,
+        remove_particle_ids: &[u32],
+    ) {
+        assert!(remove_particle_ids.len() <= MAX_PARTICLES as usize);
+        self.world_edit_remove_count = remove_particle_ids.len() as u32;
+        self.world_edit_remove_source_count = particle_count;
+        let params = GpuWorldEditRemoveParams {
+            particle_count,
+            remove_count: self.world_edit_remove_count,
+            _pad0: [0; 2],
+        };
+        queue.write_buffer(
+            &self.world_edit_remove_params_buf,
+            0,
+            cast_slice(std::slice::from_ref(&params)),
+        );
+        queue.write_buffer(
+            &self.world_edit_remove_keep_count_buf,
+            0,
+            cast_slice(std::slice::from_ref(&0u32)),
+        );
+        if remove_particle_ids.is_empty() {
+            return;
+        }
+        queue.write_buffer(
+            &self.world_edit_remove_id_buf,
+            0,
+            cast_slice(remove_particle_ids),
+        );
+    }
 }
 
 /// Bevy main-world resource: tracks what CPU needs to upload each frame.
@@ -460,16 +585,26 @@ pub struct MpmGpuUploadRequest {
     pub upload_mover_results_frame: bool,
     /// If true, upload chunk metadata this frame.
     pub upload_chunks: bool,
+    /// One-frame latched bit extracted into render world.
+    pub upload_chunks_frame: bool,
     /// If true, upload partial chunk metadata updates this frame.
     pub upload_chunk_diffs: bool,
+    /// One-frame latched bit extracted into render world.
+    pub upload_chunk_diffs_frame: bool,
     /// If true, upload terrain SDF/normals this frame.
     pub upload_terrain: bool,
+    /// One-frame latched bit extracted into render world.
+    pub upload_terrain_frame: bool,
     /// If true, upload terrain solid-cell diffs for selected slots this frame.
     pub upload_terrain_cell_slot_diffs: bool,
+    /// One-frame latched bit extracted into render world.
+    pub upload_terrain_cell_slot_diffs_frame: bool,
     /// Chunk metadata (slot-indexed contiguous resident set).
     pub chunk_meta: Vec<GpuChunkMeta>,
     /// Particle data to upload.
     pub particles: Vec<GpuParticle>,
+    /// Monotonic revision for `particles`.
+    pub particle_revision: u64,
     /// CPU→GPU mover results (`particle_id -> new_home_slot_id`).
     pub mover_results: Vec<GpuMoverResult>,
     /// CPU→GPU chunk metadata diffs (`slot_id`, `meta`).

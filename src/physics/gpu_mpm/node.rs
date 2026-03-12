@@ -19,7 +19,7 @@ use super::readback::{
     GpuChunkEventReadbackState, GpuMoverApplyAck, GpuMoverReadbackState, GpuReadbackState,
     GpuStatisticsReadbackState,
 };
-use super::sync::MpmStatisticsStatus;
+use super::sync::{GpuWorldEditAddApplyAck, MpmFullParticleReadbackRequest, MpmStatisticsStatus};
 
 const WORKGROUP_SIZE: u32 = 64;
 static GPU_READBACK_FRAME_COUNTER: std::sync::atomic::AtomicU64 =
@@ -45,6 +45,10 @@ static EXTRACT_MOVERS_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
 static EXTRACT_CHUNK_EVENTS_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static APPLY_MOVER_RESULTS_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static WORLD_EDIT_ADD_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static WORLD_EDIT_REMOVE_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static CHUNK_META_CLEAR_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -124,6 +128,10 @@ impl Node for MpmComputeNode {
         let Some(control) = world.get_resource::<MpmGpuControl>() else {
             return Ok(());
         };
+        let full_particle_readback_request = world
+            .get_resource::<MpmFullParticleReadbackRequest>()
+            .cloned()
+            .unwrap_or_default();
 
         let particle_count = buffers.particle_count;
         let particles_wgs = (particle_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
@@ -143,6 +151,65 @@ impl Node for MpmComputeNode {
         let pipelines = world.resource::<MpmComputePipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
         let device = render_context.render_device().clone();
+        let world_edit_add_wgs = (buffers.world_edit_add_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+        let world_edit_remove_wgs =
+            (buffers.world_edit_remove_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+        let world_edit_remove_bg = if buffers.world_edit_remove_count > 0 {
+            let Some(pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.world_edit_remove_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &WORLD_EDIT_REMOVE_PIPELINE_WARNED,
+                    "world_edit_remove",
+                    pipelines.world_edit_remove_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let bg = device.create_bind_group(
+                "mpm_world_edit_remove_bg",
+                &pipelines.world_edit_remove_layout,
+                &BindGroupEntries::sequential((
+                    buffers.world_edit_remove_params_buf.as_entire_binding(),
+                    buffers.world_edit_remove_id_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                    buffers.particle_scratch_buf.as_entire_binding(),
+                    buffers.world_edit_remove_keep_count_buf.as_entire_binding(),
+                )),
+            );
+            Some((pipeline, bg))
+        } else {
+            None
+        };
+        let world_edit_add_bg = if buffers.world_edit_add_count > 0 {
+            let Some(pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.world_edit_add_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &WORLD_EDIT_ADD_PIPELINE_WARNED,
+                    "world_edit_add",
+                    pipelines.world_edit_add_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let bg = device.create_bind_group(
+                "mpm_world_edit_add_bg",
+                &pipelines.world_edit_add_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.world_edit_add_params_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                    buffers.world_edit_add_op_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                )),
+            );
+            Some((pipeline, bg))
+        } else {
+            None
+        };
+        let has_world_edit_mutation =
+            buffers.world_edit_add_count > 0 || buffers.world_edit_remove_count > 0;
         let mover_result_wgs = (buffers.mover_result_count + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
         let apply_mover_results_bg = if buffers.mover_result_count > 0 {
             let Some(pipeline) =
@@ -170,6 +237,52 @@ impl Node for MpmComputeNode {
         } else {
             None
         };
+
+        if let Some((pipeline, bg)) = world_edit_remove_bg.as_ref() {
+            render_context.command_encoder().clear_buffer(
+                &buffers.world_edit_remove_keep_count_buf,
+                0,
+                None,
+            );
+            {
+                let mut pass =
+                    render_context
+                        .command_encoder()
+                        .begin_compute_pass(&ComputePassDescriptor {
+                            label: Some("mpm_world_edit_remove"),
+                            timestamp_writes: None,
+                        });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(world_edit_remove_wgs.max(1), 1, 1);
+            }
+            let copy_bytes =
+                buffers.world_edit_remove_source_count as u64 * size_of::<super::buffers::GpuParticle>() as u64;
+            if copy_bytes > 0 {
+                render_context.command_encoder().copy_buffer_to_buffer(
+                    &buffers.particle_scratch_buf,
+                    0,
+                    &buffers.particle_buf,
+                    0,
+                    copy_bytes,
+                );
+            }
+        }
+        if let Some((pipeline, bg)) = world_edit_add_bg.as_ref() {
+            let mut pass =
+                render_context
+                    .command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("mpm_world_edit_add"),
+                        timestamp_writes: None,
+                    });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bg, &[]);
+            pass.dispatch_workgroups(world_edit_add_wgs.max(1), 1, 1);
+            if let Some(ack) = world.get_resource::<GpuWorldEditAddApplyAck>() {
+                ack.signal_revision(buffers.particle_revision);
+            }
+        }
 
         if let Some((pipeline, bg)) = apply_mover_results_bg.as_ref() {
             let mut pass =
@@ -630,6 +743,128 @@ impl Node for MpmComputeNode {
                     pass.set_bind_group(0, &extract_chunk_events_bg, &[]);
                     pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
                 }
+            }
+        }
+
+        if !should_step && has_world_edit_mutation && chunk_count > 0 {
+            let Some(chunk_meta_clear_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.chunk_meta_clear_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &CHUNK_META_CLEAR_PIPELINE_WARNED,
+                    "chunk_meta_clear",
+                    pipelines.chunk_meta_clear_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let Some(chunk_meta_accumulate_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.chunk_meta_accumulate_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &CHUNK_META_ACCUM_PIPELINE_WARNED,
+                    "chunk_meta_accumulate",
+                    pipelines.chunk_meta_accumulate_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let Some(chunk_meta_finalize_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.chunk_meta_finalize_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &CHUNK_META_FINALIZE_PIPELINE_WARNED,
+                    "chunk_meta_finalize",
+                    pipelines.chunk_meta_finalize_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let Some(extract_chunk_events_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipelines.extract_chunk_events_pipeline)
+            else {
+                warn_missing_pipeline_once(
+                    &EXTRACT_CHUNK_EVENTS_PIPELINE_WARNED,
+                    "extract_chunk_events",
+                    pipelines.extract_chunk_events_pipeline,
+                    pipeline_cache,
+                );
+                return Ok(());
+            };
+            let chunk_meta_clear_bg = device.create_bind_group(
+                "mpm_chunk_meta_clear_bg_world_edit",
+                &pipelines.chunk_meta_clear_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                )),
+            );
+            let chunk_meta_accumulate_bg = device.create_bind_group(
+                "mpm_chunk_meta_accumulate_bg_world_edit",
+                &pipelines.chunk_meta_accumulate_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                )),
+            );
+            let chunk_meta_finalize_bg = device.create_bind_group(
+                "mpm_chunk_meta_finalize_bg_world_edit",
+                &pipelines.chunk_meta_finalize_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.particle_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                )),
+            );
+            let extract_chunk_events_bg = device.create_bind_group(
+                "mpm_extract_chunk_events_bg_world_edit",
+                &pipelines.extract_chunk_events_layout,
+                &BindGroupEntries::sequential((
+                    buffers.params_buf.as_entire_binding(),
+                    buffers.chunk_meta_buf.as_entire_binding(),
+                    buffers.chunk_event_count_buf.as_entire_binding(),
+                    buffers.chunk_event_buf.as_entire_binding(),
+                )),
+            );
+            let encoder = render_context.command_encoder();
+            encoder.clear_buffer(&buffers.chunk_event_count_buf, 0, None);
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("mpm_chunk_meta_clear_world_edit"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(chunk_meta_clear_pipeline);
+                pass.set_bind_group(0, &chunk_meta_clear_bg, &[]);
+                pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("mpm_chunk_meta_accumulate_world_edit"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(chunk_meta_accumulate_pipeline);
+                pass.set_bind_group(0, &chunk_meta_accumulate_bg, &[]);
+                pass.dispatch_workgroups(particles_wgs.max(1), 1, 1);
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("mpm_chunk_meta_finalize_world_edit"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(chunk_meta_finalize_pipeline);
+                pass.set_bind_group(0, &chunk_meta_finalize_bg, &[]);
+                pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
+            }
+            {
+                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("mpm_extract_chunk_events_world_edit"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(extract_chunk_events_pipeline);
+                pass.set_bind_group(0, &extract_chunk_events_bg, &[]);
+                pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
             }
         }
 
@@ -1141,7 +1376,7 @@ impl Node for MpmComputeNode {
                     .map(|state| !state.mapped)
                     .unwrap_or(true);
 
-                if has_particles && can_copy_particles {
+                if has_particles && can_copy_particles && full_particle_readback_request.requested {
                     let particle_byte_size =
                         particle_count as u64 * size_of::<super::buffers::GpuParticle>() as u64;
                     render_context.command_encoder().copy_buffer_to_buffer(
@@ -1184,7 +1419,7 @@ impl Node for MpmComputeNode {
                             .store(true, std::sync::atomic::Ordering::Release);
                     }
                 }
-                if should_step && can_copy_chunk_events {
+                if (should_step || has_world_edit_mutation) && can_copy_chunk_events {
                     let chunk_event_record_bytes = super::gpu_resources::MAX_CHUNK_EVENT_RECORDS
                         as u64
                         * size_of::<super::buffers::GpuChunkEventRecord>() as u64;

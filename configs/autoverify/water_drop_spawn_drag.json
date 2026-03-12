@@ -1,0 +1,52 @@
+{
+  "mpm": {
+    "enabled": true,
+    "scenario_name": "water_drop",
+    "output_path": "artifacts/autoverify/water_drop_spawn_drag.json",
+    "sample_material": "water_liquid",
+    "run_frames": 280,
+    "run_steps": 360,
+    "min_avg_fps": 10.0,
+    "max_penetration_ratio": 1.0,
+    "min_mean_drop": 0.5,
+    "spawn_ops": [
+      {
+        "trigger_step": 250,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[-2, 18]]
+      },
+      {
+        "trigger_step": 254,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[-1, 18]]
+      },
+      {
+        "trigger_step": 258,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[0, 18]]
+      },
+      {
+        "trigger_step": 262,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[1, 18]]
+      },
+      {
+        "trigger_step": 266,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[2, 18]]
+      },
+      {
+        "trigger_step": 270,
+        "material": "water_liquid",
+        "count_per_cell": 12,
+        "cells": [[3, 18]]
+      }
+    ]
+  },
+  "gpu_readback_interval_frames": 1
+}

@@ -143,6 +143,41 @@ const _: () = assert!(std::mem::size_of::<GpuMoverResult>() == 16);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct GpuWorldEditAddOp {
+    pub slot_id: u32,
+    pub local_cell_x: u32,
+    pub local_cell_y: u32,
+    pub count_per_cell: u32,
+    pub particle_offset: u32,
+    pub phase_id: u32,
+    pub mass: f32,
+    pub v0: f32,
+}
+
+const _: () = assert!(std::mem::size_of::<GpuWorldEditAddOp>() == 32);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct GpuWorldEditAddParams {
+    pub base_particle_count: u32,
+    pub op_count: u32,
+    pub _pad0: [u32; 2],
+}
+
+const _: () = assert!(std::mem::size_of::<GpuWorldEditAddParams>() == 16);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct GpuWorldEditRemoveParams {
+    pub particle_count: u32,
+    pub remove_count: u32,
+    pub _pad0: [u32; 2],
+}
+
+const _: () = assert!(std::mem::size_of::<GpuWorldEditRemoveParams>() == 16);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
 pub struct GpuChunkEventRecord {
     pub slot_id: u32,
     pub event_kind: u32,

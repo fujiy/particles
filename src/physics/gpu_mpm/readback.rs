@@ -15,22 +15,28 @@ use super::buffers::{GpuChunkEventRecord, GpuMoverRecord, GpuParticle, GpuStatis
 // Final parsed result (shared render world → main world via Arc)
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Debug, Default)]
+pub struct GpuParticleReadbackPayload {
+    pub particles: Vec<GpuParticle>,
+    pub particle_revision: u64,
+}
+
 #[derive(Resource, Clone, Default)]
 pub struct GpuReadbackResult {
-    pub inner: Arc<Mutex<Option<Vec<GpuParticle>>>>,
+    pub inner: Arc<Mutex<Option<GpuParticleReadbackPayload>>>,
 }
 
 impl GpuReadbackResult {
-    pub fn take(&self) -> Option<Vec<GpuParticle>> {
+    pub fn take(&self) -> Option<GpuParticleReadbackPayload> {
         if let Ok(mut g) = self.inner.lock() {
             g.take()
         } else {
             None
         }
     }
-    pub fn store(&self, particles: Vec<GpuParticle>) {
+    pub fn store(&self, payload: GpuParticleReadbackPayload) {
         if let Ok(mut g) = self.inner.lock() {
-            *g = Some(particles);
+            *g = Some(payload);
         }
     }
 }
@@ -121,6 +127,8 @@ pub struct GpuReadbackState {
     pub mapped: bool,
     /// Particle count for the in-flight mapping.
     pub pending_count: u32,
+    /// Particle revision captured when the current mapping was issued.
+    pub pending_particle_revision: u64,
     /// Set to true by the wgpu callback when mapping completes.
     pub mapped_ready: Arc<AtomicBool>,
     /// Readback cadence counter (render frames).
@@ -132,6 +140,7 @@ impl Default for GpuReadbackState {
         Self {
             mapped: false,
             pending_count: 0,
+            pending_particle_revision: 0,
             mapped_ready: Arc::new(AtomicBool::new(false)),
             frame_counter: 0,
         }

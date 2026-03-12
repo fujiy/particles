@@ -9,7 +9,7 @@ use particles::interface::InterfacePlugin;
 use particles::overlay::{OverlayPlugin, OverlayVisibilityOverrides};
 use particles::params::{ActivePhysicsParams, ParamsPlugin};
 use particles::physics::PhysicsPlugin;
-use particles::physics::gpu_mpm::GpuMpmPlugin;
+use particles::physics::gpu_mpm::{GpuMpmPlugin, MpmRenderDiagnostics};
 use particles::physics::gpu_mpm::buffers::GpuParticle;
 use particles::physics::gpu_mpm::gpu_resources::{MpmGpuControl, MpmGpuUploadRequest};
 use particles::physics::gpu_mpm::phase::{
@@ -17,8 +17,10 @@ use particles::physics::gpu_mpm::phase::{
     mpm_phase_id_for_particle,
 };
 use particles::physics::gpu_mpm::sync::{
-    GpuWorldEditCommand, GpuWorldEditRequest, MpmChunkResidencyState, MpmReadbackSnapshot,
-    MpmStatisticsSnapshot, MpmStatisticsStatus, apply_gpu_readback, apply_world_edit_requests,
+    GpuWorldEditCommand, GpuWorldEditRequest, MpmChunkResidencyState,
+    MpmFullParticleReadbackCache, MpmFullParticleReadbackRequest, MpmParticleReadbackStatus,
+    MpmStatisticsSnapshot, MpmStatisticsStatus, PendingGpuParticleAdds, apply_gpu_readback,
+    apply_world_edit_requests,
 };
 use particles::physics::material::{
     DEFAULT_MATERIAL_PARAMS, ParticleMaterial, terrain_boundary_radius_m,
@@ -27,10 +29,15 @@ use particles::physics::save_load;
 use particles::physics::scenario::{
     ScenarioStatisticsInput, default_scenario_spec_by_name, evaluate_scenario_state_from_statistics,
 };
-use particles::physics::state::{ReplayLoadScenarioRequest, ReplayState, SimulationState};
-use particles::physics::world::terrain::{TerrainCell, TerrainMaterial, TerrainWorld};
+use particles::physics::state::{
+    LoadDefaultWorldRequest, ReplayLoadScenarioRequest, ReplayState, SimulationState,
+};
+use particles::physics::world::terrain::{
+    CHUNK_SIZE_I32, TerrainCell, TerrainMaterial, TerrainWorld, world_to_cell,
+};
 use particles::render::{TerrainGpuPlugin, TerrainRenderDiagnostics, WaterDotGpuPlugin};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -49,6 +56,7 @@ fn tracy_layer(_app: &mut App) -> Option<BoxedLayer> {
 struct MpmAutoVerifyState {
     enabled: bool,
     scenario_name: String,
+    skip_scenario_load: bool,
     output_path: String,
     sample_material: Option<ParticleMaterial>,
     scenario_requested: bool,
@@ -70,8 +78,13 @@ struct MpmAutoVerifyState {
     spawn_ops: Vec<MpmAutoVerifySpawnOp>,
     spawn_ops_applied: u32,
     spawned_particles_requested: u32,
+    remove_ops: Vec<MpmAutoVerifyRemoveOp>,
+    remove_ops_applied: u32,
+    removed_particles_requested: u32,
     total_particles_before_first_spawn: Option<u32>,
     tracked_mean_y_before_first_spawn: Option<f32>,
+    min_resident_chunk_count: Option<u32>,
+    min_render_active_chunk_count: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -94,8 +107,12 @@ struct MpmAutoVerifyConfig {
     min_avg_fps: Option<f32>,
     max_penetration_ratio: Option<f32>,
     min_mean_drop: Option<f32>,
+    min_resident_chunk_count: Option<u32>,
+    min_render_active_chunk_count: Option<u32>,
     #[serde(default)]
     spawn_ops: Vec<MpmAutoVerifySpawnOpConfig>,
+    #[serde(default)]
+    remove_ops: Vec<MpmAutoVerifyRemoveOpConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -106,11 +123,26 @@ struct MpmAutoVerifySpawnOpConfig {
     cells: Vec<[i32; 2]>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct MpmAutoVerifyRemoveOpConfig {
+    trigger_step: u32,
+    max_count: u32,
+    cells: Vec<[i32; 2]>,
+}
+
 #[derive(Clone, Debug)]
 struct MpmAutoVerifySpawnOp {
     trigger_step: u32,
     material: ParticleMaterial,
     count_per_cell: u32,
+    cells: Vec<IVec2>,
+    applied: bool,
+}
+
+#[derive(Clone, Debug)]
+struct MpmAutoVerifyRemoveOp {
+    trigger_step: u32,
+    max_count: u32,
     cells: Vec<IVec2>,
     applied: bool,
 }
@@ -190,6 +222,7 @@ impl MpmAutoVerifyState {
             .or_else(|| std::env::var("PARTICLES_AUTOVERIFY_SCENARIO").ok())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "water_drop".to_string());
+        let skip_scenario_load = scenario_name == "default_world";
         let output_path = config
             .output_path
             .clone()
@@ -269,9 +302,23 @@ impl MpmAutoVerifyState {
                 applied: false,
             });
         }
+        let mut remove_ops = Vec::new();
+        for op in &config.remove_ops {
+            remove_ops.push(MpmAutoVerifyRemoveOp {
+                trigger_step: op.trigger_step,
+                max_count: op.max_count,
+                cells: op
+                    .cells
+                    .iter()
+                    .map(|cell| IVec2::new(cell[0], cell[1]))
+                    .collect(),
+                applied: false,
+            });
+        }
         Self {
             enabled,
             scenario_name,
+            skip_scenario_load,
             output_path,
             sample_material,
             scenario_requested: false,
@@ -293,8 +340,13 @@ impl MpmAutoVerifyState {
             spawn_ops,
             spawn_ops_applied: 0,
             spawned_particles_requested: 0,
+            remove_ops,
+            remove_ops_applied: 0,
+            removed_particles_requested: 0,
             total_particles_before_first_spawn: None,
             tracked_mean_y_before_first_spawn: None,
+            min_resident_chunk_count: config.min_resident_chunk_count,
+            min_render_active_chunk_count: config.min_render_active_chunk_count,
         }
     }
 }
@@ -491,7 +543,13 @@ struct MpmAutoVerifyReport {
     gpu_count_unknown: u32,
     gpu_max_speed_mps: f32,
     resident_chunk_count: u32,
+    render_active_chunk_count: u32,
     active_tile_count: u32,
+    readback_min_x: f32,
+    readback_max_x: f32,
+    readback_min_y: f32,
+    readback_max_y: f32,
+    readback_unique_chunk_count: usize,
     inactive_skip_rate: f32,
     invalid_slot_access_count: u64,
     chunk_sdf_samples: u32,
@@ -506,6 +564,8 @@ struct MpmAutoVerifyReport {
     pending_mover_readback: bool,
     spawn_ops_applied: u32,
     spawned_particles_requested: u32,
+    remove_ops_applied: u32,
+    removed_particles_requested: u32,
     total_particles_before_first_spawn: Option<u32>,
     tracked_mean_y_before_first_spawn: Option<f32>,
     failed_assertions: Vec<String>,
@@ -759,21 +819,52 @@ fn autoverify_hard_exit(exit_writer: &mut MessageWriter<bevy::app::AppExit>, cod
     std::process::exit(i32::from(code));
 }
 
+fn readback_particle_extent(
+    particles: &[GpuParticle],
+) -> (f32, f32, f32, f32, usize) {
+    if particles.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0, 0);
+    }
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    let mut unique_chunks = HashSet::new();
+    for particle in particles {
+        min_x = min_x.min(particle.x[0]);
+        max_x = max_x.max(particle.x[0]);
+        min_y = min_y.min(particle.x[1]);
+        max_y = max_y.max(particle.x[1]);
+        let cell = world_to_cell(Vec2::from_array(particle.x));
+        unique_chunks.insert(IVec2::new(
+            cell.x.div_euclid(CHUNK_SIZE_I32),
+            cell.y.div_euclid(CHUNK_SIZE_I32),
+        ));
+    }
+    (min_x, max_x, min_y, max_y, unique_chunks.len())
+}
+
 fn run_mpm_autoverify(
     mut state: ResMut<MpmAutoVerifyState>,
     time: Res<Time>,
     replay_state: Res<ReplayState>,
     gpu_stats: Res<MpmStatisticsSnapshot>,
     chunk_residency: Res<MpmChunkResidencyState>,
-    readback_snapshot: Res<MpmReadbackSnapshot>,
+    render_diagnostics: Res<MpmRenderDiagnostics>,
+    mut full_readback_request: ResMut<MpmFullParticleReadbackRequest>,
+    full_readback_cache: Res<MpmFullParticleReadbackCache>,
+    readback_status: Res<MpmParticleReadbackStatus>,
     active_physics_params: Res<ActivePhysicsParams>,
     terrain_world: Res<TerrainWorld>,
     mut sim_state: ResMut<SimulationState>,
     mut gpu_control: ResMut<MpmGpuControl>,
     mut stats_status: ResMut<MpmStatisticsStatus>,
-    mut scenario_writer: MessageWriter<ReplayLoadScenarioRequest>,
-    mut world_edit_writer: MessageWriter<GpuWorldEditRequest>,
-    mut exit_writer: MessageWriter<bevy::app::AppExit>,
+    mut writers: ParamSet<(
+        MessageWriter<LoadDefaultWorldRequest>,
+        MessageWriter<ReplayLoadScenarioRequest>,
+        MessageWriter<GpuWorldEditRequest>,
+        MessageWriter<bevy::app::AppExit>,
+    )>,
 ) {
     if !state.enabled {
         stats_status.max_speed = false;
@@ -826,9 +917,13 @@ fn run_mpm_autoverify(
     }
 
     if !state.scenario_requested {
-        scenario_writer.write(ReplayLoadScenarioRequest {
-            scenario_name: state.scenario_name.clone(),
-        });
+        if state.skip_scenario_load {
+            writers.p0().write(LoadDefaultWorldRequest);
+        } else {
+            writers.p1().write(ReplayLoadScenarioRequest {
+                scenario_name: state.scenario_name.clone(),
+            });
+        }
         state.scenario_requested = true;
         sim_state.running = false;
         sim_state.step_once = false;
@@ -856,6 +951,18 @@ fn run_mpm_autoverify(
 
     if !state.captured_start {
         if tracked_count == 0 {
+            if state.skip_scenario_load && !state.spawn_ops.is_empty() {
+                state.start_mean_y = tracked_mean_y;
+                state.captured_start = true;
+                state.wait_frames = 0;
+                state.elapsed_secs = 0.0;
+                state.phase = 1;
+                state.start_step = replay_state.current_step;
+                sim_state.running = true;
+                gpu_control.readback_enabled = true;
+                gpu_control.readback_interval_frames = 1;
+                return;
+            }
             state.wait_frames = state.wait_frames.saturating_add(1);
             if state.wait_frames > state.max_wait_frames {
                 let report = MpmAutoVerifyReport {
@@ -906,7 +1013,13 @@ fn run_mpm_autoverify(
                     gpu_count_unknown: gpu_stats.unknown,
                     gpu_max_speed_mps: gpu_stats.max_speed_mps,
                     resident_chunk_count: chunk_residency.resident_chunk_count,
+                    render_active_chunk_count: render_diagnostics.active_chunk_count(),
                     active_tile_count: chunk_residency.active_tile_count,
+                    readback_min_x: 0.0,
+                    readback_max_x: 0.0,
+                    readback_min_y: 0.0,
+                    readback_max_y: 0.0,
+                    readback_unique_chunk_count: 0,
                     inactive_skip_rate: chunk_residency.inactive_skip_rate,
                     invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
                     chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
@@ -927,6 +1040,8 @@ fn run_mpm_autoverify(
                     pending_mover_readback: chunk_residency.pending_mover_readback,
                     spawn_ops_applied: state.spawn_ops_applied,
                     spawned_particles_requested: state.spawned_particles_requested,
+                    remove_ops_applied: state.remove_ops_applied,
+                    removed_particles_requested: state.removed_particles_requested,
                     total_particles_before_first_spawn: state.total_particles_before_first_spawn,
                     tracked_mean_y_before_first_spawn: state.tracked_mean_y_before_first_spawn,
                     failed_assertions: Vec::new(),
@@ -939,7 +1054,7 @@ fn run_mpm_autoverify(
                 stats_status.granular_repose = false;
                 stats_status.material_interaction = false;
                 stats_status.grid_density = false;
-                autoverify_hard_exit(&mut exit_writer, 4);
+                autoverify_hard_exit(&mut writers.p3(), 4);
             }
             return;
         }
@@ -958,7 +1073,12 @@ fn run_mpm_autoverify(
     if state.phase == 1 {
         state.wait_frames = state.wait_frames.saturating_add(1);
         state.elapsed_secs += time.delta_secs();
-        let simulated_steps = replay_state.current_step.saturating_sub(state.start_step) as u32;
+        let replay_steps = replay_state.current_step.saturating_sub(state.start_step) as u32;
+        let simulated_steps = if state.skip_scenario_load {
+            state.wait_frames
+        } else {
+            replay_steps
+        };
         let mut pending_spawns = Vec::new();
         let mut spawned_particles_requested = 0u32;
         for spawn_op in state.spawn_ops.iter_mut() {
@@ -984,7 +1104,7 @@ fn run_mpm_autoverify(
                 state.tracked_mean_y_before_first_spawn = Some(tracked_mean_y);
             }
             for (cells, material, count_per_cell) in pending_spawns {
-                world_edit_writer.write(GpuWorldEditRequest {
+                writers.p2().write(GpuWorldEditRequest {
                     cells,
                     command: GpuWorldEditCommand::AddParticles {
                         material,
@@ -996,6 +1116,38 @@ fn run_mpm_autoverify(
             state.spawned_particles_requested = state
                 .spawned_particles_requested
                 .saturating_add(spawned_particles_requested);
+            gpu_control.readback_enabled = true;
+            gpu_control.readback_interval_frames = 1;
+        }
+        let mut pending_removes = Vec::new();
+        let mut removed_particles_requested = 0u32;
+        for remove_op in state.remove_ops.iter_mut() {
+            if remove_op.applied || simulated_steps < remove_op.trigger_step {
+                continue;
+            }
+            pending_removes.push((remove_op.cells.clone(), remove_op.max_count));
+            removed_particles_requested =
+                removed_particles_requested.saturating_add(remove_op.max_count);
+            remove_op.applied = true;
+        }
+        if !pending_removes.is_empty() {
+            let applied_remove_count = pending_removes.len() as u32;
+            if state.total_particles_before_first_spawn.is_none() {
+                state.total_particles_before_first_spawn = Some(gpu_stats.total());
+                state.tracked_mean_y_before_first_spawn = Some(tracked_mean_y);
+            }
+            for (cells, max_count) in pending_removes {
+                writers.p2().write(GpuWorldEditRequest {
+                    cells,
+                    command: GpuWorldEditCommand::RemoveParticles { max_count },
+                });
+            }
+            state.remove_ops_applied = state
+                .remove_ops_applied
+                .saturating_add(applied_remove_count);
+            state.removed_particles_requested = state
+                .removed_particles_requested
+                .saturating_add(removed_particles_requested);
             gpu_control.readback_enabled = true;
             gpu_control.readback_interval_frames = 1;
         }
@@ -1030,6 +1182,12 @@ fn run_mpm_autoverify(
     }
 
     if tracked_count == 0 {
+        let replay_steps = replay_state.current_step.saturating_sub(state.start_step) as u32;
+        let simulated_steps = if state.skip_scenario_load {
+            state.wait_frames
+        } else {
+            replay_steps
+        };
         let report = MpmAutoVerifyReport {
             passed: false,
             note: "Tracked particles disappeared during MPM verification.".to_string(),
@@ -1037,7 +1195,7 @@ fn run_mpm_autoverify(
             sampled_particles: 0,
             run_frames: state.wait_frames,
             run_frames_target: state.run_frames,
-            run_steps: replay_state.current_step.saturating_sub(state.start_step) as u32,
+            run_steps: simulated_steps,
             run_steps_target: state.run_steps,
             avg_fps: 0.0,
             start_mean_y: state.start_mean_y,
@@ -1078,7 +1236,13 @@ fn run_mpm_autoverify(
             gpu_count_unknown: gpu_stats.unknown,
             gpu_max_speed_mps: gpu_stats.max_speed_mps,
             resident_chunk_count: chunk_residency.resident_chunk_count,
+            render_active_chunk_count: render_diagnostics.active_chunk_count(),
             active_tile_count: chunk_residency.active_tile_count,
+            readback_min_x: 0.0,
+            readback_max_x: 0.0,
+            readback_min_y: 0.0,
+            readback_max_y: 0.0,
+            readback_unique_chunk_count: 0,
             inactive_skip_rate: chunk_residency.inactive_skip_rate,
             invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
             chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
@@ -1098,6 +1262,8 @@ fn run_mpm_autoverify(
             pending_mover_readback: chunk_residency.pending_mover_readback,
             spawn_ops_applied: state.spawn_ops_applied,
             spawned_particles_requested: state.spawned_particles_requested,
+            remove_ops_applied: state.remove_ops_applied,
+            removed_particles_requested: state.removed_particles_requested,
             total_particles_before_first_spawn: state.total_particles_before_first_spawn,
             tracked_mean_y_before_first_spawn: state.tracked_mean_y_before_first_spawn,
             failed_assertions: Vec::new(),
@@ -1110,15 +1276,30 @@ fn run_mpm_autoverify(
         stats_status.granular_repose = false;
         stats_status.material_interaction = false;
         stats_status.grid_density = false;
-        autoverify_hard_exit(&mut exit_writer, 5);
+        autoverify_hard_exit(&mut writers.p3(), 5);
     }
 
     let end_mean_y = tracked_mean_y;
     let mean_drop = state.start_mean_y - end_mean_y;
     let avg_fps = state.wait_frames as f32 / state.elapsed_secs.max(1.0e-5);
-    let simulated_steps = replay_state.current_step.saturating_sub(state.start_step) as u32;
+    let replay_steps = replay_state.current_step.saturating_sub(state.start_step) as u32;
+    let simulated_steps = if state.skip_scenario_load {
+        state.wait_frames
+    } else {
+        replay_steps
+    };
+    let Some(payload) = full_readback_cache
+        .payload
+        .as_ref()
+        .filter(|payload| payload.particle_revision >= readback_status.particle_revision)
+    else {
+        full_readback_request.request(readback_status.particle_revision);
+        return;
+    };
+    let (readback_min_x, readback_max_x, readback_min_y, readback_max_y, readback_unique_chunk_count) =
+        readback_particle_extent(&payload.particles);
     let granular_diag =
-        collect_granular_elastic_diagnostics(&readback_snapshot.particles, &active_physics_params);
+        collect_granular_elastic_diagnostics(&payload.particles, &active_physics_params);
 
     let fps_ok = avg_fps >= state.min_avg_fps;
     let drop_ok = mean_drop >= state.min_mean_drop;
@@ -1162,6 +1343,11 @@ fn run_mpm_autoverify(
             if state.spawn_ops_applied > 0 && row.label == "mass_particle_count" {
                 continue;
             }
+            if (state.spawn_ops_applied > 0 || state.remove_ops_applied > 0)
+                && row.label == "penetration_rate"
+            {
+                continue;
+            }
             if row.label == "max_speed_mps" {
                 continue;
             }
@@ -1192,6 +1378,41 @@ fn run_mpm_autoverify(
                     max_speed_expected, max_speed_actual
                 ));
             }
+        }
+    }
+    if state.spawned_particles_requested > 0 || state.removed_particles_requested > 0 {
+        if let Some(total_before_first_spawn) = state.total_particles_before_first_spawn {
+            let expected_total = total_before_first_spawn
+                .saturating_add(state.spawned_particles_requested);
+            let expected_total = expected_total
+                .saturating_sub(state.removed_particles_requested);
+            let actual_total = gpu_stats.total();
+            if actual_total != expected_total {
+                assertions_ok = false;
+                failed_assertions.push(format!(
+                    "spawn_particle_count: expected {}, actual {}",
+                    expected_total, actual_total
+                ));
+            }
+        }
+    }
+    if let Some(min_resident_chunk_count) = state.min_resident_chunk_count {
+        if chunk_residency.resident_chunk_count < min_resident_chunk_count {
+            assertions_ok = false;
+            failed_assertions.push(format!(
+                "resident_chunk_count: expected >= {}, actual {}",
+                min_resident_chunk_count, chunk_residency.resident_chunk_count
+            ));
+        }
+    }
+    if let Some(min_render_active_chunk_count) = state.min_render_active_chunk_count {
+        let render_active_chunk_count = render_diagnostics.active_chunk_count();
+        if render_active_chunk_count < min_render_active_chunk_count {
+            assertions_ok = false;
+            failed_assertions.push(format!(
+                "render_active_chunk_count: expected >= {}, actual {}",
+                min_render_active_chunk_count, render_active_chunk_count
+            ));
         }
     }
 
@@ -1258,7 +1479,13 @@ fn run_mpm_autoverify(
         gpu_count_unknown: gpu_stats.unknown,
         gpu_max_speed_mps: gpu_stats.max_speed_mps,
         resident_chunk_count: chunk_residency.resident_chunk_count,
+        render_active_chunk_count: render_diagnostics.active_chunk_count(),
         active_tile_count: chunk_residency.active_tile_count,
+        readback_min_x,
+        readback_max_x,
+        readback_min_y,
+        readback_max_y,
+        readback_unique_chunk_count,
         inactive_skip_rate: chunk_residency.inactive_skip_rate,
         invalid_slot_access_count: chunk_residency.invalid_slot_access_count,
         chunk_sdf_samples: chunk_residency.chunk_sdf_samples,
@@ -1277,6 +1504,8 @@ fn run_mpm_autoverify(
         pending_mover_readback: chunk_residency.pending_mover_readback,
         spawn_ops_applied: state.spawn_ops_applied,
         spawned_particles_requested: state.spawned_particles_requested,
+        remove_ops_applied: state.remove_ops_applied,
+        removed_particles_requested: state.removed_particles_requested,
         total_particles_before_first_spawn: state.total_particles_before_first_spawn,
         tracked_mean_y_before_first_spawn: state.tracked_mean_y_before_first_spawn,
         failed_assertions,
@@ -1303,18 +1532,21 @@ fn run_mpm_autoverify(
     stats_status.granular_repose = false;
     stats_status.material_interaction = false;
     stats_status.grid_density = false;
-    autoverify_hard_exit(&mut exit_writer, if passed { 0 } else { 6 });
+    autoverify_hard_exit(&mut writers.p3(), if passed { 0 } else { 6 });
 }
 
 fn apply_terrain_autoverify_ops(
     ops: &[TerrainAutoVerifyOp],
     terrain_world: &mut TerrainWorld,
     sim_state: &mut SimulationState,
-    readback_snapshot: &MpmReadbackSnapshot,
+    readback_status: &mut MpmParticleReadbackStatus,
+    full_readback_request: &mut MpmFullParticleReadbackRequest,
+    full_readback_cache: &mut MpmFullParticleReadbackCache,
     gpu_upload: &mut MpmGpuUploadRequest,
+    pending_gpu_adds: &mut PendingGpuParticleAdds,
     gpu_control: &mut MpmGpuControl,
     active_params: &ActivePhysicsParams,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     fn material_from_phase_id(phase_id: u32) -> Option<ParticleMaterial> {
         match phase_id as u8 {
             MPM_PHASE_ID_WATER => Some(ParticleMaterial::WaterLiquid),
@@ -1325,10 +1557,9 @@ fn apply_terrain_autoverify_ops(
     }
 
     fn snapshot_particles_from_readback(
-        readback: &MpmReadbackSnapshot,
+        particles: &[GpuParticle],
     ) -> Result<Vec<save_load::SnapshotParticle>, String> {
-        let particles: Vec<save_load::SnapshotParticle> = readback
-            .particles
+        let snapshot_particles: Vec<save_load::SnapshotParticle> = particles
             .iter()
             .filter_map(|particle| {
                 Some(save_load::SnapshotParticle {
@@ -1338,10 +1569,10 @@ fn apply_terrain_autoverify_ops(
                 })
             })
             .collect();
-        if particles.len() != readback.particles.len() {
+        if snapshot_particles.len() != particles.len() {
             return Err("GPU readback contains unknown phase ids".to_string());
         }
-        Ok(particles)
+        Ok(snapshot_particles)
     }
 
     fn gpu_particles_from_snapshot(
@@ -1384,7 +1615,15 @@ fn apply_terrain_autoverify_ops(
                 terrain_cell_changed = true;
             }
             TerrainAutoVerifyOp::SaveSnapshot { path } => {
-                let particles = snapshot_particles_from_readback(readback_snapshot)?;
+                let Some(payload) = full_readback_cache
+                    .payload
+                    .as_ref()
+                    .filter(|payload| payload.particle_revision >= readback_status.particle_revision)
+                else {
+                    full_readback_request.request(readback_status.particle_revision);
+                    return Ok(false);
+                };
+                let particles = snapshot_particles_from_readback(&payload.particles)?;
                 save_load::save_to_path_with_particles(path, terrain_world, &particles, sim_state)?
             }
             TerrainAutoVerifyOp::LoadSnapshot { path } => {
@@ -1392,7 +1631,23 @@ fn apply_terrain_autoverify_ops(
                     save_load::load_from_path_with_particles(path, terrain_world, sim_state)?;
                 let rho0 = active_params.0.water.rho0.max(1.0e-6);
                 gpu_upload.particles = gpu_particles_from_snapshot(&particles, rho0);
+                gpu_upload.particle_revision = gpu_upload
+                    .particle_revision
+                    .max(readback_status.particle_revision)
+                    .max(pending_gpu_adds.latest_revision())
+                    .saturating_add(1);
                 gpu_upload.upload_particles = true;
+                readback_status.particle_count = gpu_upload.particles.len() as u32;
+                readback_status.particle_revision = gpu_upload.particle_revision;
+                full_readback_cache.payload = Some(
+                    particles::physics::gpu_mpm::readback::GpuParticleReadbackPayload {
+                        particles: gpu_upload.particles.clone(),
+                        particle_revision: gpu_upload.particle_revision,
+                    },
+                );
+                full_readback_request.requested = false;
+                full_readback_request.min_particle_revision = 0;
+                pending_gpu_adds.clear();
                 gpu_control.readback_enabled = true;
                 gpu_control.readback_interval_frames = 1;
             }
@@ -1402,19 +1657,24 @@ fn apply_terrain_autoverify_ops(
         terrain_world
             .rebuild_static_particles_if_dirty(terrain_boundary_radius_m(DEFAULT_MATERIAL_PARAMS));
     }
-    Ok(())
+    Ok(true)
 }
 
 fn run_screenshot_autoverify(
     mut commands: Commands,
     mut state: ResMut<ScreenshotVerifyState>,
     mut sim_state: ResMut<SimulationState>,
-    mut scenario_writer: MessageWriter<ReplayLoadScenarioRequest>,
-    mut exit_writer: MessageWriter<bevy::app::AppExit>,
+    mut writers: ParamSet<(
+        MessageWriter<ReplayLoadScenarioRequest>,
+        MessageWriter<bevy::app::AppExit>,
+    )>,
     mut camera_query: Query<(&mut Projection, &mut Transform), With<Camera2d>>,
     mut terrain_world: ResMut<TerrainWorld>,
-    readback_snapshot: Res<MpmReadbackSnapshot>,
+    mut readback_status: ResMut<MpmParticleReadbackStatus>,
+    mut full_readback_request: ResMut<MpmFullParticleReadbackRequest>,
+    mut full_readback_cache: ResMut<MpmFullParticleReadbackCache>,
     mut gpu_upload: ResMut<MpmGpuUploadRequest>,
+    mut pending_gpu_adds: ResMut<PendingGpuParticleAdds>,
     mut gpu_control: ResMut<MpmGpuControl>,
     active_params: Res<ActivePhysicsParams>,
     mut overlay_visibility_overrides: ResMut<OverlayVisibilityOverrides>,
@@ -1435,7 +1695,7 @@ fn run_screenshot_autoverify(
         let _ = fs::remove_file(&state.output_path);
         let _ = fs::remove_file(&state.report_path);
         if !state.skip_scenario_load {
-            scenario_writer.write(ReplayLoadScenarioRequest {
+            writers.p0().write(ReplayLoadScenarioRequest {
                 scenario_name: state.scenario_name.clone(),
             });
         }
@@ -1458,19 +1718,25 @@ fn run_screenshot_autoverify(
     }
 
     if !state.terrain_ops_applied {
-        if let Err(error) = apply_terrain_autoverify_ops(
+        let applied = match apply_terrain_autoverify_ops(
             &state.terrain_ops,
             &mut terrain_world,
             &mut sim_state,
-            &readback_snapshot,
+            &mut readback_status,
+            &mut full_readback_request,
+            &mut full_readback_cache,
             &mut gpu_upload,
+            &mut pending_gpu_adds,
             &mut gpu_control,
             &active_params,
         ) {
-            bevy::log::error!("[autoverify] failed to apply terrain ops: {error}");
-            autoverify_hard_exit(&mut exit_writer, 8);
-        }
-        state.terrain_ops_applied = true;
+            Ok(applied) => applied,
+            Err(error) => {
+                bevy::log::error!("[autoverify] failed to apply terrain ops: {error}");
+                autoverify_hard_exit(&mut writers.p1(), 8);
+            }
+        };
+        state.terrain_ops_applied = applied;
     }
 
     if !state.overlay_applied {
@@ -1555,12 +1821,12 @@ fn run_screenshot_autoverify(
         };
         write_report(&state.report_path, &report);
         state.enabled = false;
-        autoverify_hard_exit(&mut exit_writer, 0);
+        autoverify_hard_exit(&mut writers.p1(), 0);
     }
 
     if state.wait_after_capture_frames > state.max_wait_after_capture_frames {
         state.enabled = false;
-        autoverify_hard_exit(&mut exit_writer, 7);
+        autoverify_hard_exit(&mut writers.p1(), 7);
     }
 }
 

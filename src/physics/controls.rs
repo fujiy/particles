@@ -8,7 +8,10 @@ use crate::physics::gpu_mpm::phase::{
     MPM_PHASE_ID_GRANULAR_SAND, MPM_PHASE_ID_GRANULAR_SOIL, MPM_PHASE_ID_WATER,
     mpm_phase_id_for_particle,
 };
-use crate::physics::gpu_mpm::sync::MpmReadbackSnapshot;
+use crate::physics::gpu_mpm::sync::{
+    MpmFullParticleReadbackCache, MpmFullParticleReadbackRequest, MpmParticleReadbackStatus,
+    PendingGpuParticleAdds,
+};
 use crate::physics::material::{MaterialParams, ParticleMaterial, terrain_boundary_radius_m};
 use crate::physics::save_load;
 use crate::physics::scenario::{
@@ -31,10 +34,9 @@ fn material_from_phase(phase_id: u32) -> Option<ParticleMaterial> {
 }
 
 fn snapshot_particles_from_gpu_readback(
-    snapshot: &MpmReadbackSnapshot,
+    particles: &[GpuParticle],
 ) -> Result<Vec<save_load::SnapshotParticle>, String> {
-    let particles: Vec<save_load::SnapshotParticle> = snapshot
-        .particles
+    let snapshot_particles: Vec<save_load::SnapshotParticle> = particles
         .iter()
         .filter_map(|p| {
             Some(save_load::SnapshotParticle {
@@ -44,10 +46,10 @@ fn snapshot_particles_from_gpu_readback(
             })
         })
         .collect();
-    if particles.len() != snapshot.particles.len() {
+    if snapshot_particles.len() != particles.len() {
         return Err("GPU readback contains unknown phase ids".to_string());
     }
-    Ok(particles)
+    Ok(snapshot_particles)
 }
 
 fn gpu_particles_from_snapshot(
@@ -71,6 +73,16 @@ fn gpu_particles_from_snapshot(
             ))
         })
         .collect()
+}
+
+#[derive(Resource, Debug, Default)]
+pub(crate) struct PendingReplayArtifactSave {
+    pub save_final: Option<bool>,
+}
+
+#[derive(Resource, Debug, Default)]
+pub(crate) struct PendingMapSave {
+    pub slot_name: Option<String>,
 }
 
 pub(crate) fn initialize_default_world(
@@ -126,7 +138,11 @@ pub(crate) fn handle_replay_requests(
     mut terrain_world: ResMut<TerrainWorld>,
     mut gpu_upload: ResMut<MpmGpuUploadRequest>,
     mut gpu_control: ResMut<MpmGpuControl>,
-    mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
+    mut readback_status: ResMut<MpmParticleReadbackStatus>,
+    mut full_readback_request: ResMut<MpmFullParticleReadbackRequest>,
+    mut full_readback_cache: ResMut<MpmFullParticleReadbackCache>,
+    mut pending_gpu_adds: ResMut<PendingGpuParticleAdds>,
+    mut pending_replay_save: ResMut<PendingReplayArtifactSave>,
     active_params: Res<ActivePhysicsParams>,
 ) {
     for request in load_reader.read() {
@@ -140,10 +156,25 @@ pub(crate) fn handle_replay_requests(
             Ok(snapshot_particles) => {
                 let rho0 = active_params.0.water.rho0.max(1.0e-6);
                 gpu_upload.particles = gpu_particles_from_snapshot(&snapshot_particles, rho0);
+                gpu_upload.particle_revision = gpu_upload
+                    .particle_revision
+                    .max(readback_status.particle_revision)
+                    .max(pending_gpu_adds.latest_revision())
+                    .saturating_add(1);
                 gpu_upload.upload_particles = true;
                 gpu_upload.mover_results.clear();
                 gpu_upload.upload_mover_results = true;
-                readback_snapshot.particles = gpu_upload.particles.clone();
+                readback_status.particle_count = gpu_upload.particles.len() as u32;
+                readback_status.particle_revision = gpu_upload.particle_revision;
+                full_readback_cache.payload = Some(
+                    crate::physics::gpu_mpm::readback::GpuParticleReadbackPayload {
+                        particles: gpu_upload.particles.clone(),
+                        particle_revision: gpu_upload.particle_revision,
+                    },
+                );
+                full_readback_request.requested = false;
+                full_readback_request.min_particle_revision = 0;
+                pending_gpu_adds.clear();
                 gpu_control.readback_enabled = true;
                 gpu_control.readback_interval_frames = 1;
                 replay_state.enabled = true;
@@ -168,41 +199,58 @@ pub(crate) fn handle_replay_requests(
     }
 
     for request in save_reader.read() {
-        let Some(name) = replay_state.scenario_name.clone() else {
-            replay_state.status_message = "Replay scenario is not loaded".to_string();
-            continue;
-        };
-        let Some(spec) = default_scenario_spec_by_name(&name) else {
-            replay_state.status_message = format!("Unknown replay scenario: {name}");
-            continue;
-        };
+        pending_replay_save.save_final = Some(request.save_final);
+    }
+    let Some(save_final) = pending_replay_save.save_final else {
+        return;
+    };
+    let Some(name) = replay_state.scenario_name.clone() else {
+        replay_state.status_message = "Replay scenario is not loaded".to_string();
+        pending_replay_save.save_final = None;
+        return;
+    };
+    let Some(spec) = default_scenario_spec_by_name(&name) else {
+        replay_state.status_message = format!("Unknown replay scenario: {name}");
+        pending_replay_save.save_final = None;
+        return;
+    };
 
-        if request.save_final {
-            sim_state.running = false;
-            sim_state.step_once = false;
-            replay_state.current_step = spec.step_count;
+    if save_final {
+        sim_state.running = false;
+        sim_state.step_once = false;
+        replay_state.current_step = spec.step_count;
+    }
+
+    let min_particle_revision = readback_status.particle_revision;
+    let Some(payload) = full_readback_cache
+        .payload
+        .as_ref()
+        .filter(|payload| payload.particle_revision >= min_particle_revision)
+    else {
+        full_readback_request.request(min_particle_revision);
+        return;
+    };
+    let snapshot_particles = match snapshot_particles_from_gpu_readback(&payload.particles) {
+        Ok(snapshot_particles) => snapshot_particles,
+        Err(error) => {
+            replay_state.status_message = format!("Failed to capture replay particles: {error}");
+            pending_replay_save.save_final = None;
+            return;
         }
-
-        let snapshot_particles = match snapshot_particles_from_gpu_readback(&readback_snapshot) {
-            Ok(snapshot_particles) => snapshot_particles,
-            Err(error) => {
-                replay_state.status_message =
-                    format!("Failed to capture replay particles: {error}");
-                continue;
-            }
-        };
-        match write_scenario_artifacts_for_snapshot(
-            &spec,
-            replay_state.current_step,
-            &terrain_world,
-            &snapshot_particles,
-        ) {
-            Ok(path) => {
-                replay_state.status_message = format!("Saved replay artifact: {}", path.display());
-            }
-            Err(error) => {
-                replay_state.status_message = format!("Failed to save replay artifact: {error}");
-            }
+    };
+    match write_scenario_artifacts_for_snapshot(
+        &spec,
+        replay_state.current_step,
+        &terrain_world,
+        &snapshot_particles,
+    ) {
+        Ok(path) => {
+            replay_state.status_message = format!("Saved replay artifact: {}", path.display());
+            pending_replay_save.save_final = None;
+        }
+        Err(error) => {
+            replay_state.status_message = format!("Failed to save replay artifact: {error}");
+            pending_replay_save.save_final = None;
         }
     }
 }
@@ -215,7 +263,10 @@ pub(crate) fn apply_sim_reset(
     mut terrain_world: ResMut<TerrainWorld>,
     mut gpu_upload: ResMut<MpmGpuUploadRequest>,
     mut gpu_control: ResMut<MpmGpuControl>,
-    mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
+    mut readback_status: ResMut<MpmParticleReadbackStatus>,
+    mut full_readback_request: ResMut<MpmFullParticleReadbackRequest>,
+    mut full_readback_cache: ResMut<MpmFullParticleReadbackCache>,
+    mut pending_gpu_adds: ResMut<PendingGpuParticleAdds>,
     material_params: Res<MaterialParams>,
     active_params: Res<ActivePhysicsParams>,
 ) {
@@ -239,10 +290,25 @@ pub(crate) fn apply_sim_reset(
                     };
                 let rho0 = active_params.0.water.rho0.max(1.0e-6);
                 gpu_upload.particles = gpu_particles_from_snapshot(&snapshot_particles, rho0);
+                gpu_upload.particle_revision = gpu_upload
+                    .particle_revision
+                    .max(readback_status.particle_revision)
+                    .max(pending_gpu_adds.latest_revision())
+                    .saturating_add(1);
                 gpu_upload.upload_particles = true;
                 gpu_upload.mover_results.clear();
                 gpu_upload.upload_mover_results = true;
-                readback_snapshot.particles = gpu_upload.particles.clone();
+                readback_status.particle_count = gpu_upload.particles.len() as u32;
+                readback_status.particle_revision = gpu_upload.particle_revision;
+                full_readback_cache.payload = Some(
+                    crate::physics::gpu_mpm::readback::GpuParticleReadbackPayload {
+                        particles: gpu_upload.particles.clone(),
+                        particle_revision: gpu_upload.particle_revision,
+                    },
+                );
+                full_readback_request.requested = false;
+                full_readback_request.min_particle_revision = 0;
+                pending_gpu_adds.clear();
                 gpu_control.readback_enabled = true;
                 gpu_control.readback_interval_frames = 1;
                 replay_state.scenario_total_steps = spec.step_count;
@@ -268,10 +334,25 @@ pub(crate) fn apply_sim_reset(
     terrain_world.clear();
     terrain_world.rebuild_static_particles_if_dirty(terrain_boundary_radius_m(*material_params));
     gpu_upload.particles.clear();
+    gpu_upload.particle_revision = gpu_upload
+        .particle_revision
+        .max(readback_status.particle_revision)
+        .max(pending_gpu_adds.latest_revision())
+        .saturating_add(1);
     gpu_upload.upload_particles = true;
     gpu_upload.mover_results.clear();
     gpu_upload.upload_mover_results = true;
-    readback_snapshot.particles.clear();
+    readback_status.particle_count = 0;
+    readback_status.particle_revision = gpu_upload.particle_revision;
+    full_readback_cache.payload = Some(
+        crate::physics::gpu_mpm::readback::GpuParticleReadbackPayload {
+            particles: Vec::new(),
+            particle_revision: gpu_upload.particle_revision,
+        },
+    );
+    full_readback_request.requested = false;
+    full_readback_request.min_particle_revision = 0;
+    pending_gpu_adds.clear();
     gpu_control.readback_enabled = true;
     gpu_control.readback_interval_frames = 1;
     sim_state.running = false;
@@ -294,20 +375,40 @@ pub(crate) fn apply_save_load_requests(
     mut terrain_world: ResMut<TerrainWorld>,
     mut gpu_upload: ResMut<MpmGpuUploadRequest>,
     mut gpu_control: ResMut<MpmGpuControl>,
-    mut readback_snapshot: ResMut<MpmReadbackSnapshot>,
+    mut readback_status: ResMut<MpmParticleReadbackStatus>,
+    mut full_readback_request: ResMut<MpmFullParticleReadbackRequest>,
+    mut full_readback_cache: ResMut<MpmFullParticleReadbackCache>,
+    mut pending_gpu_adds: ResMut<PendingGpuParticleAdds>,
+    mut pending_map_save: ResMut<PendingMapSave>,
     active_params: Res<ActivePhysicsParams>,
 ) {
     for request in save_reader.read() {
+        pending_map_save.slot_name = Some(request.slot_name.clone());
+    }
+
+    if let Some(slot_name) = pending_map_save.slot_name.clone() {
         gpu_control.readback_enabled = true;
         gpu_control.readback_interval_frames = 1;
-        match snapshot_particles_from_gpu_readback(&readback_snapshot) {
+        let min_particle_revision = readback_status.particle_revision;
+        let Some(payload) = full_readback_cache
+            .payload
+            .as_ref()
+            .filter(|payload| payload.particle_revision >= min_particle_revision)
+        else {
+            full_readback_request.request(min_particle_revision);
+            return;
+        };
+        match snapshot_particles_from_gpu_readback(&payload.particles) {
             Ok(snapshot_particles) => match save_load::save_to_slot_with_particles(
-                &request.slot_name,
+                &slot_name,
                 &terrain_world,
                 &snapshot_particles,
                 &sim_state,
             ) {
-                Ok(path) => tracing::info!("saved map to {}", path.display()),
+                Ok(path) => {
+                    tracing::info!("saved map to {}", path.display());
+                    pending_map_save.slot_name = None;
+                }
                 Err(error) => tracing::error!("failed to save map: {error}"),
             },
             Err(error) => tracing::error!("failed to save map: {error}"),
@@ -324,10 +425,25 @@ pub(crate) fn apply_save_load_requests(
                 // Force a full clear/upload on GPU path even when particle count is zero.
                 let rho0 = active_params.0.water.rho0.max(1.0e-6);
                 gpu_upload.particles = gpu_particles_from_snapshot(&snapshot_particles, rho0);
+                gpu_upload.particle_revision = gpu_upload
+                    .particle_revision
+                    .max(readback_status.particle_revision)
+                    .max(pending_gpu_adds.latest_revision())
+                    .saturating_add(1);
                 gpu_upload.upload_particles = true;
                 gpu_upload.mover_results.clear();
                 gpu_upload.upload_mover_results = true;
-                readback_snapshot.particles = gpu_upload.particles.clone();
+                readback_status.particle_count = gpu_upload.particles.len() as u32;
+                readback_status.particle_revision = gpu_upload.particle_revision;
+                full_readback_cache.payload = Some(
+                    crate::physics::gpu_mpm::readback::GpuParticleReadbackPayload {
+                        particles: gpu_upload.particles.clone(),
+                        particle_revision: gpu_upload.particle_revision,
+                    },
+                );
+                full_readback_request.requested = false;
+                full_readback_request.min_particle_revision = 0;
+                pending_gpu_adds.clear();
                 gpu_control.readback_enabled = true;
                 gpu_control.readback_interval_frames = 1;
 

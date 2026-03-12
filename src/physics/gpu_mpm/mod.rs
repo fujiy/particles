@@ -22,6 +22,8 @@ use bevy::render::render_graph::{RenderGraph, RenderLabel};
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Render, RenderApp, RenderSystems};
 use std::mem::size_of;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use self::gpu_resources::{
     MAX_CHUNK_EVENT_RECORDS, MAX_MOVER_RECORDS, MpmGpuBuffers, MpmGpuControl, MpmGpuParamsRequest,
@@ -56,12 +58,17 @@ impl ExtractResource for MpmGpuUploadRequest {
             upload_particles_frame: false,
             upload_mover_results: source.upload_mover_results_frame,
             upload_mover_results_frame: false,
-            upload_chunks: source.upload_chunks,
-            upload_chunk_diffs: source.upload_chunk_diffs,
-            upload_terrain: source.upload_terrain,
-            upload_terrain_cell_slot_diffs: source.upload_terrain_cell_slot_diffs,
+            upload_chunks: source.upload_chunks_frame,
+            upload_chunks_frame: false,
+            upload_chunk_diffs: source.upload_chunk_diffs_frame,
+            upload_chunk_diffs_frame: false,
+            upload_terrain: source.upload_terrain_frame,
+            upload_terrain_frame: false,
+            upload_terrain_cell_slot_diffs: source.upload_terrain_cell_slot_diffs_frame,
+            upload_terrain_cell_slot_diffs_frame: false,
             chunk_meta: source.chunk_meta.clone(),
             particles: source.particles.clone(),
+            particle_revision: source.particle_revision,
             mover_results: source.mover_results.clone(),
             chunk_meta_diffs: source.chunk_meta_diffs.clone(),
             terrain_sdf: source.terrain_sdf.clone(),
@@ -81,11 +88,16 @@ impl Clone for MpmGpuUploadRequest {
             upload_mover_results: self.upload_mover_results,
             upload_mover_results_frame: self.upload_mover_results_frame,
             upload_chunks: self.upload_chunks,
+            upload_chunks_frame: self.upload_chunks_frame,
             upload_chunk_diffs: self.upload_chunk_diffs,
+            upload_chunk_diffs_frame: self.upload_chunk_diffs_frame,
             upload_terrain: self.upload_terrain,
+            upload_terrain_frame: self.upload_terrain_frame,
             upload_terrain_cell_slot_diffs: self.upload_terrain_cell_slot_diffs,
+            upload_terrain_cell_slot_diffs_frame: self.upload_terrain_cell_slot_diffs_frame,
             chunk_meta: self.chunk_meta.clone(),
             particles: self.particles.clone(),
+            particle_revision: self.particle_revision,
             mover_results: self.mover_results.clone(),
             chunk_meta_diffs: self.chunk_meta_diffs.clone(),
             terrain_sdf: self.terrain_sdf.clone(),
@@ -123,6 +135,27 @@ impl ExtractResource for MpmGpuControl {
     }
 }
 
+impl ExtractResource for sync::MpmGpuWorldEditAddQueueRequest {
+    type Source = sync::MpmGpuWorldEditAddQueueRequest;
+    fn extract_resource(source: &Self::Source) -> Self {
+        source.clone()
+    }
+}
+
+impl ExtractResource for sync::MpmGpuWorldEditRemoveQueueRequest {
+    type Source = sync::MpmGpuWorldEditRemoveQueueRequest;
+    fn extract_resource(source: &Self::Source) -> Self {
+        source.clone()
+    }
+}
+
+impl ExtractResource for sync::MpmFullParticleReadbackRequest {
+    type Source = sync::MpmFullParticleReadbackRequest;
+    fn extract_resource(source: &Self::Source) -> Self {
+        source.clone()
+    }
+}
+
 impl ExtractResource for sync::MpmStatisticsStatus {
     type Source = sync::MpmStatisticsStatus;
     fn extract_resource(source: &Self::Source) -> Self {
@@ -147,6 +180,21 @@ impl Clone for MpmGpuRunRequest {
     }
 }
 
+#[derive(Resource, Clone, Default)]
+pub struct MpmRenderDiagnostics {
+    active_chunk_count: Arc<AtomicU32>,
+}
+
+impl MpmRenderDiagnostics {
+    pub fn set_active_chunk_count(&self, count: u32) {
+        self.active_chunk_count.store(count, Ordering::Release);
+    }
+
+    pub fn active_chunk_count(&self) -> u32 {
+        self.active_chunk_count.load(Ordering::Acquire)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Prepare system: perform CPU→GPU uploads in render world
 // ---------------------------------------------------------------------------
@@ -154,7 +202,10 @@ impl Clone for MpmGpuRunRequest {
 fn prepare_gpu_uploads(
     control: Res<MpmGpuControl>,
     upload: Res<MpmGpuUploadRequest>,
+    world_edit_add_queue: Res<sync::MpmGpuWorldEditAddQueueRequest>,
+    world_edit_remove_queue: Res<sync::MpmGpuWorldEditRemoveQueueRequest>,
     params_req: Res<MpmGpuParamsRequest>,
+    diagnostics: Res<MpmRenderDiagnostics>,
     mut buffers: ResMut<MpmGpuBuffers>,
     queue: Res<RenderQueue>,
 ) {
@@ -165,6 +216,7 @@ fn prepare_gpu_uploads(
 
     if upload.upload_particles {
         buffers.upload_particles(&queue, &upload.particles);
+        buffers.particle_revision = upload.particle_revision;
         buffers.ready = buffers.particle_count > 0;
     } else if buffers.particle_count > 0 {
         buffers.particle_count = params_req.params.particle_count;
@@ -175,15 +227,56 @@ fn prepare_gpu_uploads(
         buffers.upload_chunks(&queue, &upload.chunk_meta);
     } else if upload.upload_chunk_diffs {
         buffers.upload_chunk_diffs(&queue, &upload.chunk_meta_diffs);
+        buffers.active_chunk_count = params_req.params.resident_chunk_count;
     } else {
         buffers.active_chunk_count = params_req.params.resident_chunk_count;
     }
+    diagnostics.set_active_chunk_count(buffers.active_chunk_count);
 
     if upload.upload_mover_results {
         buffers.upload_mover_results(&queue, &upload.mover_results);
     }
+    let remove_source_count = buffers.particle_count;
+    buffers.upload_world_edit_removes(
+        &queue,
+        remove_source_count,
+        &world_edit_remove_queue.remove_particle_ids,
+    );
+    if world_edit_remove_queue.removed_particle_count > 0 {
+        buffers.particle_count = buffers
+            .particle_count
+            .saturating_sub(world_edit_remove_queue.removed_particle_count);
+        buffers.particle_revision = world_edit_remove_queue.particle_revision;
+        buffers.ready = buffers.particle_count > 0;
+    }
+    let add_queue_is_stale =
+        world_edit_add_queue.added_particle_count > 0
+            && world_edit_add_queue.particle_revision < buffers.particle_revision;
+    let add_ops = if add_queue_is_stale {
+        &[][..]
+    } else {
+        world_edit_add_queue.ops.as_slice()
+    };
+    let add_base_particle_count = if add_queue_is_stale {
+        buffers.particle_count
+    } else {
+        world_edit_add_queue.base_particle_count
+    };
+    buffers.upload_world_edit_adds(&queue, add_base_particle_count, add_ops);
+    if !add_queue_is_stale && world_edit_add_queue.added_particle_count > 0 {
+        let is_new_revision = world_edit_add_queue.particle_revision > buffers.particle_revision;
+        if is_new_revision {
+            buffers.particle_count = world_edit_add_queue
+                .base_particle_count
+                .saturating_add(world_edit_add_queue.added_particle_count);
+            buffers.particle_revision = world_edit_add_queue.particle_revision;
+            buffers.ready = buffers.particle_count > 0;
+        }
+    }
 
-    if upload.upload_terrain && !upload.terrain_sdf.is_empty() && !upload.terrain_normal.is_empty()
+    if upload.upload_terrain
+        && !upload.terrain_sdf.is_empty()
+        && !upload.terrain_normal.is_empty()
     {
         buffers.upload_terrain(&queue, &upload.terrain_sdf, &upload.terrain_normal);
     }
@@ -217,6 +310,7 @@ fn prepare_gpu_uploads(
 fn readback_particles(
     control: Res<MpmGpuControl>,
     buffers: Res<MpmGpuBuffers>,
+    request: Res<sync::MpmFullParticleReadbackRequest>,
     mut state: ResMut<GpuReadbackState>,
     readback_result: Res<GpuReadbackResult>,
 ) {
@@ -248,18 +342,19 @@ fn readback_particles(
                 .mapped_ready
                 .store(false, std::sync::atomic::Ordering::Release);
             state.mapped = false;
-            readback_result.store(particles);
+            readback_result.store(readback::GpuParticleReadbackPayload {
+                particles,
+                particle_revision: state.pending_particle_revision,
+            });
         }
         // If not ready yet: callback still pending — don't issue another map_async.
         return;
     }
 
-    // Step 2: issue map_async according to configured cadence.
-    state.frame_counter = state.frame_counter.wrapping_add(1);
-    let interval = control.readback_interval_frames.max(1) as u64;
-    if state.frame_counter % interval != 0 {
+    if !request.requested {
         return;
     }
+    state.frame_counter = state.frame_counter.wrapping_add(1);
     let particle_count = buffers.particle_count;
     let byte_size = particle_count as u64 * size_of::<buffers::GpuParticle>() as u64;
     let slice = buffers.readback_buf.slice(..byte_size);
@@ -272,6 +367,7 @@ fn readback_particles(
     });
 
     state.pending_count = particle_count;
+    state.pending_particle_revision = buffers.particle_revision;
     state.mapped = true;
 }
 
@@ -487,6 +583,7 @@ pub struct GpuMpmPlugin;
 
 impl Plugin for GpuMpmPlugin {
     fn build(&self, app: &mut App) {
+        let render_diagnostics = MpmRenderDiagnostics::default();
         let readback = GpuReadbackResult::default();
         let readback_for_render = readback.clone();
         let statistics_readback = GpuStatisticsReadbackResult::default();
@@ -497,6 +594,8 @@ impl Plugin for GpuMpmPlugin {
         let chunk_event_readback_for_render = chunk_event_readback.clone();
         let mover_apply_ack = GpuMoverApplyAck::default();
         let mover_apply_ack_for_render = mover_apply_ack.clone();
+        let world_edit_add_apply_ack = sync::GpuWorldEditAddApplyAck::default();
+        let world_edit_add_apply_ack_for_render = world_edit_add_apply_ack.clone();
 
         app.init_resource::<MpmGpuUploadRequest>()
             .init_resource::<MpmGpuParamsRequest>()
@@ -505,14 +604,22 @@ impl Plugin for GpuMpmPlugin {
             .init_resource::<MpmGpuControl>()
             .init_resource::<sync::MpmStatisticsStatus>()
             .add_message::<sync::GpuWorldEditRequest>()
-            .init_resource::<sync::MpmReadbackSnapshot>()
+            .init_resource::<sync::MpmParticleReadbackStatus>()
+            .init_resource::<sync::MpmFullParticleReadbackRequest>()
+            .init_resource::<sync::MpmFullParticleReadbackCache>()
+            .init_resource::<sync::PendingGpuParticleAdds>()
+            .init_resource::<sync::DeferredGpuWorldEditRequests>()
+            .init_resource::<sync::MpmGpuWorldEditAddQueueRequest>()
+            .init_resource::<sync::MpmGpuWorldEditRemoveQueueRequest>()
             .init_resource::<sync::MpmChunkResidencyState>()
             .init_resource::<sync::MpmStatisticsSnapshot>()
+            .insert_resource(render_diagnostics.clone())
             .insert_resource(readback)
             .insert_resource(statistics_readback)
             .insert_resource(mover_readback)
             .insert_resource(chunk_event_readback)
             .insert_resource(mover_apply_ack)
+            .insert_resource(world_edit_add_apply_ack)
             .configure_sets(
                 Update,
                 (
@@ -532,6 +639,7 @@ impl Plugin for GpuMpmPlugin {
                     sync::apply_mover_readback,
                     sync::prepare_gpu_params,
                     sync::prepare_gpu_run_state,
+                    sync::prepare_aux_upload_frames,
                 )
                     .chain()
                     .in_set(sync::MpmSyncSet::PrepareUpload),
@@ -541,6 +649,7 @@ impl Plugin for GpuMpmPlugin {
                 (
                     sync::apply_gpu_readback,
                     sync::apply_statistics_readback,
+                    sync::consume_world_edit_add_ack,
                     sync::consume_mover_apply_ack,
                 )
                     .chain()
@@ -550,16 +659,23 @@ impl Plugin for GpuMpmPlugin {
             .add_plugins(ExtractResourcePlugin::<MpmGpuParamsRequest>::default())
             .add_plugins(ExtractResourcePlugin::<MpmGpuRunRequest>::default())
             .add_plugins(ExtractResourcePlugin::<MpmGpuControl>::default())
+            .add_plugins(ExtractResourcePlugin::<sync::MpmGpuWorldEditAddQueueRequest>::default())
+            .add_plugins(
+                ExtractResourcePlugin::<sync::MpmGpuWorldEditRemoveQueueRequest>::default(),
+            )
+            .add_plugins(ExtractResourcePlugin::<sync::MpmFullParticleReadbackRequest>::default())
             .add_plugins(ExtractResourcePlugin::<sync::MpmStatisticsStatus>::default());
 
         let render_app = app.sub_app_mut(RenderApp);
 
         render_app
+            .insert_resource(render_diagnostics)
             .insert_resource(readback_for_render)
             .insert_resource(statistics_readback_for_render)
             .insert_resource(mover_readback_for_render)
             .insert_resource(chunk_event_readback_for_render)
             .insert_resource(mover_apply_ack_for_render)
+            .insert_resource(world_edit_add_apply_ack_for_render)
             .init_resource::<GpuReadbackState>()
             .init_resource::<GpuStatisticsReadbackState>()
             .init_resource::<GpuMoverReadbackState>()
