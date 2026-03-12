@@ -13,10 +13,10 @@ struct WaterDotParams {
     height: u32,
     particle_count: u32,
     blur_radius_dots: u32,
+    world_dot_origin_x: i32,
+    world_dot_origin_y: i32,
     palette_seed: u32,
     _pad1: u32,
-    _pad2: u32,
-    _pad3: u32,
 }
 
 struct WaterDotPalette {
@@ -126,6 +126,10 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     }
 
     let material_id = winner & WINNER_MATERIAL_MASK;
-    let color = palette_color(material_id, dot_cell.x, dot_cell.y, params.palette_seed);
+    let world_dot = vec2<i32>(
+        params.world_dot_origin_x + dot_cell.x,
+        params.world_dot_origin_y + dot_cell.y,
+    );
+    let color = palette_color(material_id, world_dot.x, world_dot.y, params.palette_seed);
     return vec4<f32>(color, 1.0);
 }

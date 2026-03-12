@@ -422,6 +422,7 @@
   - 2026-03-12: `water_dot_gpu_mainline.wgsl` を reservoir resolve ベースへ更新し、coverage 閾値と packed winner material だけから最終 dot 色を再構成するよう変更した。render pass は terrain cache を参照せず、palette 決定のみを担当する。
   - 2026-03-12: `src/render/water_dot_gpu.rs` の前処理 resource/pipeline を整理し、材質別 `density_atomic_*` / `blurred_density_*` / `blur_x/y_*` を削除した。GPU profiler scope は `water/clear`・`water/splat`・`water/render` の固定本数のみになり、前処理 cost が材質数から切り離された。
   - 2026-03-12: `cargo check` / `cargo test --lib`（51件 pass）を再実行。runtime verification として `cargo run -q -- --autoverify-config configs/autoverify/terrain_dot_layer_hole_water_drop.json` および `cargo run -q -- --autoverify-config configs/autoverify/profile_hud_water_drop.json` を実行し、`/Users/yuuki.fj/Develop/particles/artifacts/autoverify/terrain_dot_layer_hole_water_drop.png` で水面の dot 再構成を、`/Users/yuuki.fj/Develop/particles/artifacts/autoverify/profile_hud_water_drop.png` で reservoir 版パス構成の実行を確認した。途中で WGSL の 16 進リテラル表記不備を修正し、shader compile error が解消されたことも runtime で確認済み。
+  - 2026-03-12: カメラ平行移動で dot grid 原点が chunk 単位に跳ぶと reservoir と palette の hash 入力が local dot 座標ごと変わっていたため、乱数と palette 参照を world-dot 座標基準へ修正した。`WaterDotParams` に `world_dot_origin_x/y` を追加し、layout origin も `dot_size_m` へ整列させて、同じ world 位置ではカメラ移動後も winner/palette サンプリングが不連続に飛ばないよう更新した。`cargo check`、追加 unit test 2 本、`configs/autoverify/terrain_dot_layer_hole_water_drop.json` を再実行して確認済み。
 
 ### [UI-PROFILE-01] 左上HUDのCPU/GPUプロファイル棒グラフ可視化
 

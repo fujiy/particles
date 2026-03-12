@@ -11,10 +11,10 @@ struct WaterDotParams {
     height: u32,
     particle_count: u32,
     blur_radius_dots: u32,
+    world_dot_origin_x: i32,
+    world_dot_origin_y: i32,
     palette_seed: u32,
     _pad1: u32,
-    _pad2: u32,
-    _pad3: u32,
 }
 
 struct GpuParticle {
@@ -165,7 +165,9 @@ fn splat_particles(@builtin(global_invocation_id) gid: vec3<u32>) {
             let idx = dot_index(x, y);
             atomicAdd(&coverage_atomic[idx], atomic_units);
 
-            let u = random_open01(max(p.render_seed, 1u), x, y);
+            let world_dot_x = params.world_dot_origin_x + x;
+            let world_dot_y = params.world_dot_origin_y + y;
+            let u = random_open01(max(p.render_seed, 1u), world_dot_x, world_dot_y);
             let race_key = -log(u) / max(contribution, 1.0e-6);
             atomicMin(&winner_packed[idx], reservoir_payload(race_key, material_id));
         }

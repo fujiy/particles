@@ -153,7 +153,8 @@ fn compute_world_locked_dot_grid_layout(camera_pos: Vec2, viewport_world_m: Vec2
         height = (required_span_world_m.y / dot_size_m).ceil().max(1.0) as u32;
     }
     let min_world_m = camera_pos - viewport_world_m * 0.5 - padding_world_m;
-    let origin = (min_world_m / snap_world_m).floor() * snap_world_m;
+    let snapped_origin = (min_world_m / snap_world_m).floor() * snap_world_m;
+    let origin = (snapped_origin / dot_size_m).floor() * dot_size_m;
     DotGridLayout {
         width,
         height,
@@ -208,8 +209,10 @@ struct WaterDotParams {
     height: u32,
     particle_count: u32,
     blur_radius_dots: u32,
+    world_dot_origin_x: i32,
+    world_dot_origin_y: i32,
     palette_seed: u32,
-    _pad1: [u32; 3],
+    _pad1: u32,
 }
 
 const _: () = assert!(std::mem::size_of::<WaterDotParams>() == 64);
@@ -238,6 +241,12 @@ struct WaterDotGpuResources {
 }
 
 impl WaterDotGpuResources {
+    fn world_dot_origin(&self) -> IVec2 {
+        (self.layout.origin / self.layout.dot_size_m)
+            .round()
+            .as_ivec2()
+    }
+
     fn params_for(
         &self,
         particle_count: u32,
@@ -269,6 +278,7 @@ impl WaterDotGpuResources {
                 DEFAULT_BLUR_RADIUS_DOTS,
                 DEFAULT_WATER_PALETTE_SEED,
             ));
+        let world_dot_origin = self.world_dot_origin();
         WaterDotParams {
             origin_x: self.layout.origin.x,
             origin_y: self.layout.origin.y,
@@ -282,8 +292,10 @@ impl WaterDotGpuResources {
             height: self.layout.height,
             particle_count,
             blur_radius_dots,
+            world_dot_origin_x: world_dot_origin.x,
+            world_dot_origin_y: world_dot_origin.y,
             palette_seed,
-            _pad1: [0; 3],
+            _pad1: 0,
         }
     }
 
@@ -866,6 +878,14 @@ impl Plugin for WaterDotGpuPlugin {
 mod tests {
     use super::*;
 
+    fn world_dot_for_position(layout: DotGridLayout, world_pos: Vec2) -> IVec2 {
+        let local_dot = ((world_pos - layout.origin) / layout.dot_size_m)
+            .floor()
+            .as_ivec2();
+        let world_dot_origin = (layout.origin / layout.dot_size_m).round().as_ivec2();
+        world_dot_origin + local_dot
+    }
+
     #[test]
     fn world_locked_layout_covers_far_camera_with_padding() {
         let viewport_world_m = Vec2::new(24.0, 14.0);
@@ -898,6 +918,34 @@ mod tests {
 
         assert_eq!(layout_a.origin, layout_b.origin);
         assert!((layout_c.origin.x - layout_a.origin.x - snap_world_m).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn world_locked_layout_origin_is_dot_aligned() {
+        let layout = compute_world_locked_dot_grid_layout(Vec2::new(123.4, -56.7), Vec2::new(24.0, 14.0));
+        let origin_in_dots = layout.origin / layout.dot_size_m;
+
+        assert!((origin_in_dots.x - origin_in_dots.x.round()).abs() < 1.0e-5);
+        assert!((origin_in_dots.y - origin_in_dots.y.round()).abs() < 1.0e-5);
+    }
+
+    #[test]
+    fn world_dot_coordinates_remain_stable_when_layout_origin_shifts() {
+        let snap_world_m = DOT_GRID_ORIGIN_SNAP_CELLS as f32 * CELL_SIZE_M;
+        let viewport_world_m = Vec2::new(24.0, 14.0);
+        let base_camera_pos = Vec2::new(snap_world_m * 5.0, snap_world_m * 2.0);
+        let layout_a = compute_world_locked_dot_grid_layout(base_camera_pos, viewport_world_m);
+        let layout_c = compute_world_locked_dot_grid_layout(
+            base_camera_pos + Vec2::new(snap_world_m * 1.01, 0.0),
+            viewport_world_m,
+        );
+        let sample_world = base_camera_pos + Vec2::new(1.75 * CELL_SIZE_M, -0.5 * CELL_SIZE_M);
+
+        assert_eq!(layout_a.dot_size_m, layout_c.dot_size_m);
+        assert_eq!(
+            world_dot_for_position(layout_a, sample_world),
+            world_dot_for_position(layout_c, sample_world)
+        );
     }
 
     #[test]
