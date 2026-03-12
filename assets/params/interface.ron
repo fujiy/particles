@@ -46,6 +46,23 @@
         tool_break_brush_radius_cell_scale: 0.5,
         hud_fps_window_sec: 1.0,
     ),
+    profiler: (
+        update_hz: 30.0,
+        bar_width_px: 240.0,
+        bar_height_px: 12.0,
+        lane_gap_px: 6.0,
+        label_width_px: 30.0,
+        lane_label_font_px: 12.0,
+        min_segment_ms_per_sec: 2.0,
+        max_segments_per_lane: 32,
+        over_budget_headroom: 1.1,
+        colors: (
+            bar_bg: "#1A1F29E6",
+            physics: "#3D8CEBF2",
+            render: "#EDC33BF2",
+            others: "#9EA9BAF2",
+        ),
+    ),
     icon_palette: (
         water: (
             "#2A78CAEB",

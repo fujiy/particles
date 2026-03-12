@@ -19,6 +19,9 @@ use std::mem::size_of;
 use super::ParticleOverlayState;
 use crate::physics::gpu_mpm::buffers::{GpuMpmParams, GpuParticle};
 use crate::physics::gpu_mpm::gpu_resources::MpmGpuBuffers;
+use crate::physics::profiler::{
+    begin_gpu_pass_query, cpu_profile_span, end_gpu_pass_query, resolve_gpu_profiler_queries,
+};
 
 const PARTICLE_OVERLAY_SHADER_PATH: &str = "shaders/overlay/particle_overlay_gpu.wgsl";
 
@@ -177,6 +180,7 @@ impl ViewNode for ParticleOverlayGpuNode {
         (view_target, view_uniform_offset, view_pipeline): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("overlay", "particle_node").entered();
         let overlay_state = world.resource::<ParticleOverlayState>();
         if !overlay_state.enabled {
             return Ok(());
@@ -223,6 +227,12 @@ impl ViewNode for ParticleOverlayGpuNode {
             &BindGroupEntries::sequential((view_binding, params_binding, particles_binding)),
         );
 
+        let profile_query = begin_gpu_pass_query(
+            world,
+            "overlay",
+            "particle",
+            render_context.command_encoder(),
+        );
         let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("particle_overlay_gpu_pass"),
             color_attachments: &[Some(RenderPassColorAttachment {
@@ -235,12 +245,17 @@ impl ViewNode for ParticleOverlayGpuNode {
                 },
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.render_pass_timestamp_writes()),
             occlusion_query_set: None,
         });
         render_pass.set_render_pipeline(pipeline);
         render_pass.set_bind_group(0, &bind_group, &[view_uniform_offset.offset]);
         render_pass.draw(0..6, 0..particle_count);
+        drop(render_pass);
+        end_gpu_pass_query(world, render_context.command_encoder(), profile_query);
+        resolve_gpu_profiler_queries(world, render_context.command_encoder());
 
         Ok(())
     }

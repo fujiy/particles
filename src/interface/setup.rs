@@ -38,6 +38,48 @@ pub(super) fn setup_simulation_ui(
                 TextColor(Color::WHITE),
                 SimulationHudFpsText,
             ));
+            parent
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: px(interface_params.0.profiler.lane_gap_px),
+                        ..default()
+                    },
+                    RuntimeProfileHudRoot,
+                ))
+                .with_children(|profile| {
+                    for lane in [RuntimeProfileLane::Cpu, RuntimeProfileLane::Gpu] {
+                        profile
+                            .spawn((
+                                Node {
+                                    align_items: AlignItems::Center,
+                                    column_gap: px(6.0),
+                                    ..default()
+                                },
+                            ))
+                            .with_children(|row| {
+                                row.spawn((
+                                    Text::new(lane.label()),
+                                    TextFont::from_font_size(
+                                        interface_params.0.profiler.lane_label_font_px,
+                                    ),
+                                    TextColor(Color::srgba(0.9, 0.92, 0.97, 0.95)),
+                                ));
+                                row.spawn((
+                                    Node {
+                                        width: px(interface_params.0.profiler.bar_width_px),
+                                        height: px(interface_params.0.profiler.bar_height_px),
+                                        overflow: Overflow::clip(),
+                                        ..default()
+                                    },
+                                    BackgroundColor(
+                                        interface_params.0.profiler.colors.bar_bg.to_color(),
+                                    ),
+                                    RuntimeProfileLaneBar { lane },
+                                ));
+                            });
+                    }
+                });
             parent.spawn((
                 Text::new(
                     "Sim: --\nWater(L): --\nStone(S): --\nStone(G): --\nSoil(S): --\nSoil(G): --\nSand(S): --\nSand(G): --",
@@ -310,6 +352,29 @@ pub(super) fn setup_simulation_ui(
                 TextFont::from_font_size(13.0),
                 TextColor(Color::WHITE),
                 WorldToolTooltipText,
+            ));
+        });
+
+    commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                display: Display::None,
+                left: px(0.0),
+                top: px(0.0),
+                padding: UiRect::axes(px(8.0), px(4.0)),
+                ..default()
+            },
+            BackgroundColor(colors.tooltip_bg.to_color()),
+            GlobalZIndex(layout.tooltip_global_z_index),
+            RuntimeProfileTooltip,
+        ))
+        .with_children(|parent| {
+            parent.spawn((
+                Text::new(""),
+                TextFont::from_font_size(13.0),
+                TextColor(Color::WHITE),
+                RuntimeProfileTooltipText,
             ));
         });
 

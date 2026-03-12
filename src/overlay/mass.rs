@@ -19,6 +19,9 @@ use super::MassOverlayState;
 use crate::params::ActiveOverlayParams;
 use crate::physics::gpu_mpm::buffers::{GpuChunkMeta, GpuGridNode, GpuMpmParams};
 use crate::physics::gpu_mpm::gpu_resources::MpmGpuBuffers;
+use crate::physics::profiler::{
+    begin_gpu_pass_query, cpu_profile_span, end_gpu_pass_query, resolve_gpu_profiler_queries,
+};
 
 const MASS_OVERLAY_GPU_SHADER_PATH: &str = "shaders/overlay/mass_overlay_gpu.wgsl";
 
@@ -250,6 +253,7 @@ impl ViewNode for MassOverlayGpuNode {
         (view_target, view_uniform_offset, view_pipeline): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("overlay", "mass_node").entered();
         let Some(overlay_state) = world.get_resource::<MassOverlayState>() else {
             return Ok(());
         };
@@ -299,16 +303,27 @@ impl ViewNode for MassOverlayGpuNode {
             )),
         );
 
+        let profile_query = begin_gpu_pass_query(
+            world,
+            "overlay",
+            "mass",
+            render_context.command_encoder(),
+        );
         let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("mass_overlay_gpu_pass"),
             color_attachments: &[Some(view_target.get_color_attachment())],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.render_pass_timestamp_writes()),
             occlusion_query_set: None,
         });
         render_pass.set_render_pipeline(pipeline);
         render_pass.set_bind_group(0, &bind_group, &[view_uniform_offset.offset]);
         render_pass.draw(0..6, 0..1);
+        drop(render_pass);
+        end_gpu_pass_query(world, render_context.command_encoder(), profile_query);
+        resolve_gpu_profiler_queries(world, render_context.command_encoder());
         Ok(())
     }
 }

@@ -52,6 +52,9 @@ use bytemuck::{Pod, Zeroable, cast_slice};
 use crate::camera_controller::MainCamera;
 use crate::params::ActiveRenderParams;
 use crate::physics::material::TerrainMaterial;
+use crate::physics::profiler::{
+    begin_gpu_pass_query, cpu_profile_span, end_gpu_pass_query, resolve_gpu_profiler_queries,
+};
 use crate::physics::state::SimUpdateSet;
 use crate::physics::world::constants::CELL_SIZE_M;
 use crate::physics::world::terrain::{CHUNK_SIZE, CHUNK_SIZE_I32, TerrainCell, TerrainWorld};
@@ -1050,6 +1053,7 @@ impl Node for TerrainNearUpdateNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("terrain", "near_update_node").entered();
         if !world
             .get_resource::<TerrainNearCacheDirty>()
             .is_some_and(|d| d.0)
@@ -1096,13 +1100,19 @@ impl Node for TerrainNearUpdateNode {
         let w = dirty_count.div_ceil(NEAR_UPDATE_WORKGROUP);
 
         let encoder = render_context.command_encoder();
+        let profile_query = begin_gpu_pass_query(world, "terrain", "near_update", encoder);
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("terrain_near_update"),
-            timestamp_writes: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.compute_pass_timestamp_writes()),
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(w, 1, 1);
+        drop(pass);
+        end_gpu_pass_query(world, encoder, profile_query);
+        resolve_gpu_profiler_queries(world, encoder);
 
         Ok(())
     }
@@ -1138,6 +1148,7 @@ impl Node for TerrainOverrideApplyNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("terrain", "override_apply_node").entered();
         if !world
             .get_resource::<TerrainOverrideCacheDirty>()
             .is_some_and(|d| d.0)
@@ -1182,13 +1193,19 @@ impl Node for TerrainOverrideApplyNode {
 
         let dispatch = run_count.div_ceil(OVERRIDE_APPLY_WORKGROUP);
         let encoder = render_context.command_encoder();
+        let profile_query = begin_gpu_pass_query(world, "terrain", "override_apply", encoder);
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("terrain_override_apply"),
-            timestamp_writes: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.compute_pass_timestamp_writes()),
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(dispatch, 1, 1);
+        drop(pass);
+        end_gpu_pass_query(world, encoder, profile_query);
+        resolve_gpu_profiler_queries(world, encoder);
         Ok(())
     }
 }
@@ -1203,6 +1220,7 @@ impl Node for TerrainChunkGenerateNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("terrain", "chunk_generate_node").entered();
         if !world
             .get_resource::<TerrainChunkGenerateDirty>()
             .is_some_and(|d| d.0)
@@ -1256,14 +1274,18 @@ impl Node for TerrainChunkGenerateNode {
         let dispatch = cell_count.div_ceil(CHUNK_GENERATE_WORKGROUP);
         let byte_size = (TERRAIN_CHUNK_CELLS * std::mem::size_of::<u32>()) as u64;
         let encoder = render_context.command_encoder();
+        let profile_query = begin_gpu_pass_query(world, "terrain", "chunk_generate", encoder);
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("terrain_chunk_generate"),
-            timestamp_writes: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.compute_pass_timestamp_writes()),
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(dispatch, 1, 1);
         drop(pass);
+        end_gpu_pass_query(world, encoder, profile_query);
         encoder.copy_buffer_to_buffer(
             &resources.generated_buf,
             0,
@@ -1274,6 +1296,7 @@ impl Node for TerrainChunkGenerateNode {
         if let Ok(mut inner) = readback_state.inner.lock() {
             inner.pending_map = Some(meta);
         }
+        resolve_gpu_profiler_queries(world, encoder);
         Ok(())
     }
 }
@@ -1288,6 +1311,7 @@ impl Node for TerrainFarUpdateNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("terrain", "far_update_node").entered();
         if !world
             .get_resource::<TerrainFarCacheDirty>()
             .is_some_and(|d| d.0)
@@ -1338,13 +1362,19 @@ impl Node for TerrainFarUpdateNode {
         let dispatch_x = w.div_ceil(FAR_UPDATE_WORKGROUP_X);
         let dispatch_y = h.div_ceil(FAR_UPDATE_WORKGROUP_Y);
         let encoder = render_context.command_encoder();
+        let profile_query = begin_gpu_pass_query(world, "terrain", "far_update", encoder);
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("terrain_far_update"),
-            timestamp_writes: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.compute_pass_timestamp_writes()),
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+        drop(pass);
+        end_gpu_pass_query(world, encoder, profile_query);
+        resolve_gpu_profiler_queries(world, encoder);
 
         Ok(())
     }
@@ -1360,6 +1390,7 @@ impl Node for TerrainBackUpdateNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("terrain", "back_update_node").entered();
         if !world
             .get_resource::<TerrainBackCacheDirty>()
             .is_some_and(|d| d.0)
@@ -1410,13 +1441,19 @@ impl Node for TerrainBackUpdateNode {
         let dispatch_x = w.div_ceil(FAR_UPDATE_WORKGROUP_X);
         let dispatch_y = h.div_ceil(FAR_UPDATE_WORKGROUP_Y);
         let encoder = render_context.command_encoder();
+        let profile_query = begin_gpu_pass_query(world, "terrain", "back_update", encoder);
         let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
             label: Some("terrain_back_update"),
-            timestamp_writes: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.compute_pass_timestamp_writes()),
         });
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[]);
         pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+        drop(pass);
+        end_gpu_pass_query(world, encoder, profile_query);
+        resolve_gpu_profiler_queries(world, encoder);
 
         Ok(())
     }
@@ -1503,6 +1540,7 @@ impl ViewNode for TerrainComposeNode {
         (view_target, view_uniform_offset, view_pipeline): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("terrain", "compose_node").entered();
         let Some(resources) = world.get_resource::<TerrainNearGpuResources>() else {
             return Ok(());
         };
@@ -1533,16 +1571,27 @@ impl ViewNode for TerrainComposeNode {
             )),
         );
 
+        let profile_query = begin_gpu_pass_query(
+            world,
+            "terrain",
+            "compose",
+            render_context.command_encoder(),
+        );
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("terrain_compose_pass"),
             color_attachments: &[Some(view_target.get_color_attachment())],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.render_pass_timestamp_writes()),
             occlusion_query_set: None,
         });
         pass.set_render_pipeline(pipeline);
         pass.set_bind_group(0, &bind_group, &[view_uniform_offset.offset]);
         pass.draw(0..6, 0..1);
+        drop(pass);
+        end_gpu_pass_query(world, render_context.command_encoder(), profile_query);
+        resolve_gpu_profiler_queries(world, render_context.command_encoder());
 
         Ok(())
     }

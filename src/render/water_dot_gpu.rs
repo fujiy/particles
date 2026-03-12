@@ -34,6 +34,9 @@ use crate::camera_controller::MainCamera;
 use crate::params::palette::{MaterialPalette4, PaletteColor};
 use crate::params::{ActivePaletteParams, ActiveRenderParams};
 use crate::physics::gpu_mpm::{MpmComputeLabel, gpu_resources::MpmGpuBuffers};
+use crate::physics::profiler::{
+    begin_gpu_pass_query, cpu_profile_span, end_gpu_pass_query, resolve_gpu_profiler_queries,
+};
 use crate::physics::world::constants::CELL_SIZE_M;
 
 const WATER_DOT_RENDER_SHADER_PATH: &str = "shaders/render/water_dot_gpu_mainline.wgsl";
@@ -741,6 +744,7 @@ impl Node for WaterDotPreprocessNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("water", "preprocess_node").entered();
         let Some(resources) = world.get_resource::<WaterDotGpuResources>() else {
             return Ok(());
         };
@@ -832,17 +836,23 @@ impl Node for WaterDotPreprocessNode {
         let encoder = render_context.command_encoder();
 
         {
+            let profile_query = begin_gpu_pass_query(world, "water", "clear", encoder);
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("water_dot_clear"),
-                timestamp_writes: None,
+                timestamp_writes: profile_query
+                    .as_ref()
+                    .and_then(|query| query.compute_pass_timestamp_writes()),
             });
             pass.set_pipeline(clear_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dot_workgroups, 1, 1);
+            drop(pass);
+            end_gpu_pass_query(world, encoder, profile_query);
         }
 
         if particle_count == 0 {
             HAD_PARTICLES_PREVIOUS_FRAME.store(false, std::sync::atomic::Ordering::Relaxed);
+            resolve_gpu_profiler_queries(world, encoder);
             return Ok(());
         }
 
@@ -924,76 +934,112 @@ impl Node for WaterDotPreprocessNode {
         };
 
         {
+            let profile_query = begin_gpu_pass_query(world, "water", "splat", encoder);
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("water_dot_splat"),
-                timestamp_writes: None,
+                timestamp_writes: profile_query
+                    .as_ref()
+                    .and_then(|query| query.compute_pass_timestamp_writes()),
             });
             pass.set_pipeline(splat_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(particle_workgroups, 1, 1);
+            drop(pass);
+            end_gpu_pass_query(world, encoder, profile_query);
         }
 
         {
+            let profile_query = begin_gpu_pass_query(world, "water", "blur_x_water", encoder);
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("water_dot_blur_x_water"),
-                timestamp_writes: None,
+                timestamp_writes: profile_query
+                    .as_ref()
+                    .and_then(|query| query.compute_pass_timestamp_writes()),
             });
             pass.set_pipeline(blur_x_water_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dot_workgroups, 1, 1);
+            drop(pass);
+            end_gpu_pass_query(world, encoder, profile_query);
         }
 
         {
+            let profile_query = begin_gpu_pass_query(world, "water", "blur_y_water", encoder);
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("water_dot_blur_y_water"),
-                timestamp_writes: None,
+                timestamp_writes: profile_query
+                    .as_ref()
+                    .and_then(|query| query.compute_pass_timestamp_writes()),
             });
             pass.set_pipeline(blur_y_water_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dot_workgroups, 1, 1);
+            drop(pass);
+            end_gpu_pass_query(world, encoder, profile_query);
         }
 
         {
+            let profile_query = begin_gpu_pass_query(world, "water", "blur_x_soil", encoder);
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("water_dot_blur_x_soil"),
-                timestamp_writes: None,
+                timestamp_writes: profile_query
+                    .as_ref()
+                    .and_then(|query| query.compute_pass_timestamp_writes()),
             });
             pass.set_pipeline(blur_x_soil_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dot_workgroups, 1, 1);
+            drop(pass);
+            end_gpu_pass_query(world, encoder, profile_query);
         }
 
         {
+            let profile_query = begin_gpu_pass_query(world, "water", "blur_y_soil", encoder);
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("water_dot_blur_y_soil"),
-                timestamp_writes: None,
+                timestamp_writes: profile_query
+                    .as_ref()
+                    .and_then(|query| query.compute_pass_timestamp_writes()),
             });
             pass.set_pipeline(blur_y_soil_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dot_workgroups, 1, 1);
+            drop(pass);
+            end_gpu_pass_query(world, encoder, profile_query);
         }
 
         {
+            let profile_query = begin_gpu_pass_query(world, "water", "blur_x_sand", encoder);
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("water_dot_blur_x_sand"),
-                timestamp_writes: None,
+                timestamp_writes: profile_query
+                    .as_ref()
+                    .and_then(|query| query.compute_pass_timestamp_writes()),
             });
             pass.set_pipeline(blur_x_sand_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dot_workgroups, 1, 1);
+            drop(pass);
+            end_gpu_pass_query(world, encoder, profile_query);
         }
 
         {
+            let profile_query = begin_gpu_pass_query(world, "water", "blur_y_sand", encoder);
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
                 label: Some("water_dot_blur_y_sand"),
-                timestamp_writes: None,
+                timestamp_writes: profile_query
+                    .as_ref()
+                    .and_then(|query| query.compute_pass_timestamp_writes()),
             });
             pass.set_pipeline(blur_y_sand_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(dot_workgroups, 1, 1);
+            drop(pass);
+            end_gpu_pass_query(world, encoder, profile_query);
         }
 
         HAD_PARTICLES_PREVIOUS_FRAME.store(true, std::sync::atomic::Ordering::Relaxed);
+        resolve_gpu_profiler_queries(world, encoder);
 
         Ok(())
     }
@@ -1013,6 +1059,7 @@ impl ViewNode for WaterDotGpuNode {
         (view_target, view_uniform_offset, view_pipeline): QueryItem<Self::ViewQuery>,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("water", "render_node").entered();
         let Some(resources) = world.get_resource::<WaterDotGpuResources>() else {
             return Ok(());
         };
@@ -1057,16 +1104,27 @@ impl ViewNode for WaterDotGpuNode {
             )),
         );
 
+        let profile_query = begin_gpu_pass_query(
+            world,
+            "water",
+            "render",
+            render_context.command_encoder(),
+        );
         let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
             label: Some("water_dot_gpu_pass"),
             color_attachments: &[Some(view_target.get_color_attachment())],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.render_pass_timestamp_writes()),
             occlusion_query_set: None,
         });
         render_pass.set_render_pipeline(pipeline);
         render_pass.set_bind_group(0, &bind_group, &[view_uniform_offset.offset]);
         render_pass.draw(0..6, 0..1);
+        drop(render_pass);
+        end_gpu_pass_query(world, render_context.command_encoder(), profile_query);
+        resolve_gpu_profiler_queries(world, render_context.command_encoder());
 
         Ok(())
     }

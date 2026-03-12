@@ -130,6 +130,28 @@ pub struct InterfaceBehaviorParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterfaceProfilerParams {
+    pub update_hz: f32,
+    pub bar_width_px: f32,
+    pub bar_height_px: f32,
+    pub lane_gap_px: f32,
+    pub label_width_px: f32,
+    pub lane_label_font_px: f32,
+    pub min_segment_ms_per_sec: f32,
+    pub max_segments_per_lane: u32,
+    pub over_budget_headroom: f32,
+    pub colors: InterfaceProfilerColorParams,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterfaceProfilerColorParams {
+    pub bar_bg: UiColor,
+    pub physics: UiColor,
+    pub render: UiColor,
+    pub others: UiColor,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InterfaceIconPaletteParams {
     pub water: [UiColor8; 4],
     pub stone: [UiColor8; 4],
@@ -142,6 +164,7 @@ pub struct InterfaceParams {
     pub colors: InterfaceColorParams,
     pub layout: InterfaceLayoutParams,
     pub behavior: InterfaceBehaviorParams,
+    pub profiler: InterfaceProfilerParams,
     pub icon_palette: InterfaceIconPaletteParams,
 }
 
@@ -257,6 +280,43 @@ impl Default for InterfaceParams {
                 tool_stroke_step_cell_scale: 0.5,
                 tool_break_brush_radius_cell_scale: 0.5,
                 hud_fps_window_sec: 1.0,
+            },
+            profiler: InterfaceProfilerParams {
+                update_hz: 10.0,
+                bar_width_px: 240.0,
+                bar_height_px: 12.0,
+                lane_gap_px: 6.0,
+                label_width_px: 30.0,
+                lane_label_font_px: 12.0,
+                min_segment_ms_per_sec: 2.0,
+                max_segments_per_lane: 10,
+                over_budget_headroom: 1.1,
+                colors: InterfaceProfilerColorParams {
+                    bar_bg: UiColor {
+                        r: 0.10,
+                        g: 0.12,
+                        b: 0.16,
+                        a: 0.90,
+                    },
+                    physics: UiColor {
+                        r: 0.24,
+                        g: 0.55,
+                        b: 0.92,
+                        a: 0.95,
+                    },
+                    render: UiColor {
+                        r: 0.93,
+                        g: 0.76,
+                        b: 0.18,
+                        a: 0.95,
+                    },
+                    others: UiColor {
+                        r: 0.62,
+                        g: 0.66,
+                        b: 0.73,
+                        a: 0.95,
+                    },
+                },
             },
             icon_palette: InterfaceIconPaletteParams {
                 water: [
@@ -555,6 +615,41 @@ impl InterfaceParams {
             0.1,
             10.0
         );
+
+        let p = &self.profiler;
+        check!(p.update_hz, "profiler.update_hz", 1.0, 60.0);
+        check!(p.bar_width_px, "profiler.bar_width_px", 80.0, 800.0);
+        check!(p.bar_height_px, "profiler.bar_height_px", 4.0, 48.0);
+        check!(p.lane_gap_px, "profiler.lane_gap_px", 0.0, 48.0);
+        check!(p.label_width_px, "profiler.label_width_px", 16.0, 120.0);
+        check!(
+            p.lane_label_font_px,
+            "profiler.lane_label_font_px",
+            6.0,
+            32.0
+        );
+        check!(
+            p.min_segment_ms_per_sec,
+            "profiler.min_segment_ms_per_sec",
+            0.0,
+            500.0
+        );
+        if !(1..=32).contains(&p.max_segments_per_lane) {
+            return Err(format!(
+                "profiler.max_segments_per_lane: {} は [1, 32] の範囲外",
+                p.max_segments_per_lane
+            ));
+        }
+        check!(
+            p.over_budget_headroom,
+            "profiler.over_budget_headroom",
+            1.0,
+            4.0
+        );
+        check_color("profiler.colors.bar_bg", p.colors.bar_bg)?;
+        check_color("profiler.colors.physics", p.colors.physics)?;
+        check_color("profiler.colors.render", p.colors.render)?;
+        check_color("profiler.colors.others", p.colors.others)?;
         Ok(())
     }
 }

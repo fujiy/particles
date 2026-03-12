@@ -1,7 +1,9 @@
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
-use bevy::log::{BoxedLayer, LogPlugin};
+use bevy::log::LogPlugin;
 use bevy::prelude::*;
 use bevy::render::RenderPlugin;
+use bevy::render::render_resource::WgpuFeatures;
+use bevy::render::settings::{RenderCreation, WgpuSettings};
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_inspector_egui::bevy_egui::EguiPlugin;
 use particles::camera_controller::CameraControllerPlugin;
@@ -25,6 +27,7 @@ use particles::physics::gpu_mpm::sync::{
 use particles::physics::material::{
     DEFAULT_MATERIAL_PARAMS, ParticleMaterial, terrain_boundary_radius_m,
 };
+use particles::physics::profiler::build_profiling_layer;
 use particles::physics::save_load;
 use particles::physics::scenario::{
     ScenarioStatisticsInput, default_scenario_spec_by_name, evaluate_scenario_state_from_statistics,
@@ -40,17 +43,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-
-fn tracy_layer(_app: &mut App) -> Option<BoxedLayer> {
-    #[cfg(feature = "tracy")]
-    {
-        Some(Box::new(tracing_tracy::TracyLayer::default()))
-    }
-    #[cfg(not(feature = "tracy"))]
-    {
-        None
-    }
-}
 
 #[derive(Resource, Debug)]
 struct MpmAutoVerifyState {
@@ -1855,11 +1847,15 @@ fn main() {
     let default_plugins = DefaultPlugins
         .set(ImagePlugin::default_nearest())
         .set(RenderPlugin {
+            render_creation: RenderCreation::Automatic(WgpuSettings {
+                features: WgpuFeatures::TIMESTAMP_QUERY,
+                ..default()
+            }),
             synchronous_pipeline_compilation: true,
             ..default()
         })
         .set(LogPlugin {
-            custom_layer: tracy_layer,
+            custom_layer: build_profiling_layer,
             ..default()
         });
     let mut app = App::new();

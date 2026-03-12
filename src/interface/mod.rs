@@ -6,6 +6,9 @@ use crate::params::interface::InterfaceColorParams;
 use crate::physics::cell_to_world_center;
 use crate::physics::material::ParticleMaterial;
 use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
+use crate::physics::profiler::{
+    RuntimeProfileLane, RuntimeProfileSnapshot, RuntimeProfileSegment, update_runtime_profile_snapshot,
+};
 use crate::physics::save_load;
 use crate::physics::scenario::{
     count_solid_cells, default_scenario_names, default_scenario_spec_by_name,
@@ -84,6 +87,7 @@ impl Plugin for InterfacePlugin {
         app.init_resource::<WorldInteractionState>()
             .init_resource::<SaveLoadUiState>()
             .init_resource::<FpsHudStats>()
+            .init_resource::<RuntimeProfileHudState>()
             .add_systems(Startup, setup_simulation_ui)
             .add_systems(
                 Update,
@@ -118,7 +122,10 @@ impl Plugin for InterfacePlugin {
                     update_test_assert_panel,
                     update_world_tool_tooltip,
                     update_fps_hud_stats,
+                    update_runtime_profile_snapshot,
                     update_simulation_hud,
+                    sync_runtime_profile_hud,
+                    update_runtime_profile_tooltip,
                     update_scale_bar,
                 )
                     .chain()
@@ -136,6 +143,31 @@ struct SimulationHudFpsText;
 
 #[derive(Component)]
 struct SimulationHudStatsText;
+
+#[derive(Component)]
+struct RuntimeProfileHudRoot;
+
+#[derive(Component, Clone, Copy)]
+struct RuntimeProfileLaneBar {
+    lane: RuntimeProfileLane,
+}
+
+#[derive(Component, Clone, Copy)]
+struct RuntimeProfileSegmentNode {
+    lane: RuntimeProfileLane,
+    index: usize,
+}
+
+#[derive(Component)]
+struct RuntimeProfileTooltip;
+
+#[derive(Component)]
+struct RuntimeProfileTooltipText;
+
+#[derive(Resource, Debug, Default)]
+struct RuntimeProfileHudState {
+    rendered_sequence: u64,
+}
 
 #[derive(Component)]
 struct ScaleBarLine;
@@ -359,9 +391,10 @@ use input_handlers::{
 use ui_systems::{
     update_fps_hud_stats, update_save_load_dialog, update_save_load_name_input_button_visuals,
     update_save_load_open_button_visuals, update_save_load_reset_button_visuals,
-    update_save_load_slot_button_visuals, update_scale_bar, update_sim_play_pause_button_label,
-    update_sim_play_pause_button_visuals, update_sim_step_button_visuals, update_simulation_hud,
-    update_test_assert_panel, update_world_tool_button_visuals, update_world_tool_tooltip,
+    update_save_load_slot_button_visuals, update_runtime_profile_tooltip, update_scale_bar,
+    update_sim_play_pause_button_label, update_sim_play_pause_button_visuals,
+    update_sim_step_button_visuals, update_simulation_hud, update_test_assert_panel,
+    update_world_tool_button_visuals, update_world_tool_tooltip, sync_runtime_profile_hud,
 };
 
 use world_edit::{draw_world_tool_hover_highlight, handle_world_interactions};

@@ -24,6 +24,7 @@ use super::readback::{
 };
 use crate::params::ActivePhysicsParams;
 use crate::physics::material::{ParticleMaterial, particle_properties};
+use crate::physics::profiler::cpu_profile_span;
 use crate::physics::state::{ReplayState, SimulationState};
 use crate::physics::world::constants::{CELL_SIZE_M, CHUNK_SIZE_I32};
 use crate::physics::world::terrain::{
@@ -1019,6 +1020,7 @@ pub fn prepare_terrain_upload(
 
 /// Latch one-shot non-particle upload flags for render extraction, then clear the main-world bits.
 pub fn prepare_aux_upload_frames(mut upload: ResMut<MpmGpuUploadRequest>) {
+    let _profile_span = cpu_profile_span("physics", "prepare_aux_upload_frames").entered();
     upload.upload_chunks_frame = std::mem::take(&mut upload.upload_chunks);
     upload.upload_chunk_diffs_frame = std::mem::take(&mut upload.upload_chunk_diffs);
     upload.upload_terrain_frame = std::mem::take(&mut upload.upload_terrain);
@@ -1036,6 +1038,7 @@ pub fn prepare_gpu_params(
     stats_status: Res<MpmStatisticsStatus>,
     mut params_req: ResMut<MpmGpuParamsRequest>,
 ) {
+    let _profile_span = cpu_profile_span("physics", "prepare_gpu_params").entered();
     if control.init_only {
         return;
     }
@@ -1129,6 +1132,7 @@ pub fn prepare_gpu_run_state(
     mut step_clock: ResMut<MpmGpuStepClock>,
     mut run_req: ResMut<MpmGpuRunRequest>,
 ) {
+    let _profile_span = cpu_profile_span("physics", "prepare_gpu_run_state").entered();
     if control.init_only {
         run_req.enabled = false;
         run_req.substeps = 0;
@@ -1197,6 +1201,7 @@ pub fn apply_gpu_readback(
     mut request: ResMut<MpmFullParticleReadbackRequest>,
     mut cache: ResMut<MpmFullParticleReadbackCache>,
 ) {
+    let _profile_span = cpu_profile_span("io", "apply_gpu_readback").entered();
     if !control.readback_enabled {
         return;
     }
@@ -1712,6 +1717,7 @@ pub fn apply_statistics_readback(
     stats_readback: Res<GpuStatisticsReadbackResult>,
     mut stats_snapshot: ResMut<MpmStatisticsSnapshot>,
 ) {
+    let _profile_span = cpu_profile_span("io", "apply_statistics_readback").entered();
     if control.init_only || !control.readback_enabled {
         return;
     }

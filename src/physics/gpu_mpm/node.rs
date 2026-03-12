@@ -20,6 +20,9 @@ use super::readback::{
     GpuStatisticsReadbackState,
 };
 use super::sync::{GpuWorldEditAddApplyAck, MpmFullParticleReadbackRequest, MpmStatisticsStatus};
+use crate::physics::profiler::{
+    begin_gpu_pass_query, cpu_profile_span, end_gpu_pass_query, resolve_gpu_profiler_queries,
+};
 
 const WORKGROUP_SIZE: u32 = 64;
 static GPU_READBACK_FRAME_COUNTER: std::sync::atomic::AtomicU64 =
@@ -89,6 +92,21 @@ static STATS_GRID_DENSITY_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
 static STATS_GRID_DENSITY_FINAL_PIPELINE_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+macro_rules! profiled_compute_pass {
+    ($world:expr, $encoder:expr, $category:expr, $detail:expr, $label:expr, |$pass:ident| $body:block) => {{
+        let profile_query = begin_gpu_pass_query($world, $category, $detail, $encoder);
+        let mut $pass = $encoder.begin_compute_pass(&ComputePassDescriptor {
+            label: Some($label),
+            timestamp_writes: profile_query
+                .as_ref()
+                .and_then(|query| query.compute_pass_timestamp_writes()),
+        });
+        $body
+        drop($pass);
+        end_gpu_pass_query($world, $encoder, profile_query);
+    }};
+}
+
 fn warn_missing_pipeline_once(
     warned: &std::sync::atomic::AtomicBool,
     name: &str,
@@ -116,6 +134,7 @@ impl Node for MpmComputeNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("physics", "mpm_compute_node").entered();
         let Some(buffers) = world.get_resource::<MpmGpuBuffers>() else {
             return Ok(());
         };
@@ -622,127 +641,75 @@ impl Node for MpmComputeNode {
             for _ in 0..run_req.substeps {
                 encoder.clear_buffer(&buffers.active_tile_count_buf, 0, None);
                 encoder.clear_buffer(&buffers.active_tile_dispatch_buf, 0, None);
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_active_tile_clear"),
-                        timestamp_writes: None,
-                    });
+                profiled_compute_pass!(world, encoder, "physics", "active_tile_clear", "mpm_active_tile_clear", |pass| {
                     pass.set_pipeline(active_tile_clear_pipeline);
                     pass.set_bind_group(0, &active_tile_clear_bg, &[]);
                     pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
-                }
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_active_tile_mark"),
-                        timestamp_writes: None,
-                    });
+                });
+                profiled_compute_pass!(world, encoder, "physics", "active_tile_mark", "mpm_active_tile_mark", |pass| {
                     pass.set_pipeline(active_tile_mark_pipeline);
                     pass.set_bind_group(0, &active_tile_mark_bg, &[]);
                     pass.dispatch_workgroups(particles_wgs.max(1), 1, 1);
-                }
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_active_tile_compact"),
-                        timestamp_writes: None,
-                    });
+                });
+                profiled_compute_pass!(world, encoder, "physics", "active_tile_compact", "mpm_active_tile_compact", |pass| {
                     pass.set_pipeline(active_tile_compact_pipeline);
                     pass.set_bind_group(0, &active_tile_compact_bg, &[]);
                     pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
-                }
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_active_tile_dispatch"),
-                        timestamp_writes: None,
-                    });
+                });
+                profiled_compute_pass!(world, encoder, "physics", "active_tile_dispatch", "mpm_active_tile_dispatch", |pass| {
                     pass.set_pipeline(active_tile_dispatch_pipeline);
                     pass.set_bind_group(0, &active_tile_dispatch_bg, &[]);
                     pass.dispatch_workgroups(1, 1, 1);
-                }
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_clear"),
-                        timestamp_writes: None,
-                    });
+                });
+                profiled_compute_pass!(world, encoder, "physics", "clear", "mpm_clear", |pass| {
                     pass.set_pipeline(clear_pipeline);
                     pass.set_bind_group(0, &clear_bg, &[]);
                     pass.dispatch_workgroups_indirect(&buffers.active_tile_dispatch_buf, 0);
-                }
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_p2g"),
-                        timestamp_writes: None,
-                    });
+                });
+                profiled_compute_pass!(world, encoder, "physics", "p2g", "mpm_p2g", |pass| {
                     pass.set_pipeline(p2g_pipeline);
                     pass.set_bind_group(0, &p2g_bg, &[]);
                     pass.dispatch_workgroups(particles_wgs, 1, 1);
-                }
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_grid_update"),
-                        timestamp_writes: None,
-                    });
+                });
+                profiled_compute_pass!(world, encoder, "physics", "grid_update", "mpm_grid_update", |pass| {
                     pass.set_pipeline(grid_update_pipeline);
                     pass.set_bind_group(0, &grid_update_bg, &[]);
                     pass.dispatch_workgroups_indirect(&buffers.active_tile_dispatch_buf, 0);
-                }
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_g2p"),
-                        timestamp_writes: None,
-                    });
+                });
+                profiled_compute_pass!(world, encoder, "physics", "g2p", "mpm_g2p", |pass| {
                     pass.set_pipeline(g2p_pipeline);
                     pass.set_bind_group(0, &g2p_bg, &[]);
                     pass.dispatch_workgroups(particles_wgs, 1, 1);
-                }
+                });
             }
             encoder.clear_buffer(&buffers.mover_count_buf, 0, None);
-            {
-                let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("mpm_extract_movers"),
-                    timestamp_writes: None,
-                });
+            profiled_compute_pass!(world, encoder, "physics", "extract_movers", "mpm_extract_movers", |pass| {
                 pass.set_pipeline(extract_movers_pipeline);
                 pass.set_bind_group(0, &extract_movers_bg, &[]);
                 pass.dispatch_workgroups(particles_wgs.max(1), 1, 1);
-            }
+            });
             if chunk_count > 0 {
                 encoder.clear_buffer(&buffers.chunk_event_count_buf, 0, None);
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_chunk_meta_clear"),
-                        timestamp_writes: None,
-                    });
+                profiled_compute_pass!(world, encoder, "physics", "chunk_meta_clear", "mpm_chunk_meta_clear", |pass| {
                     pass.set_pipeline(chunk_meta_clear_pipeline);
                     pass.set_bind_group(0, &chunk_meta_clear_bg, &[]);
                     pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
-                }
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_chunk_meta_accumulate"),
-                        timestamp_writes: None,
-                    });
+                });
+                profiled_compute_pass!(world, encoder, "physics", "chunk_meta_accumulate", "mpm_chunk_meta_accumulate", |pass| {
                     pass.set_pipeline(chunk_meta_accumulate_pipeline);
                     pass.set_bind_group(0, &chunk_meta_accumulate_bg, &[]);
                     pass.dispatch_workgroups(particles_wgs.max(1), 1, 1);
-                }
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_chunk_meta_finalize"),
-                        timestamp_writes: None,
-                    });
+                });
+                profiled_compute_pass!(world, encoder, "physics", "chunk_meta_finalize", "mpm_chunk_meta_finalize", |pass| {
                     pass.set_pipeline(chunk_meta_finalize_pipeline);
                     pass.set_bind_group(0, &chunk_meta_finalize_bg, &[]);
                     pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
-                }
-                {
-                    let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                        label: Some("mpm_extract_chunk_events"),
-                        timestamp_writes: None,
-                    });
+                });
+                profiled_compute_pass!(world, encoder, "physics", "extract_chunk_events", "mpm_extract_chunk_events", |pass| {
                     pass.set_pipeline(extract_chunk_events_pipeline);
                     pass.set_bind_group(0, &extract_chunk_events_bg, &[]);
                     pass.dispatch_workgroups(chunk_wgs.max(1), 1, 1);
-                }
+                });
             }
         }
 
@@ -1448,6 +1415,7 @@ impl Node for MpmComputeNode {
             }
         }
 
+        resolve_gpu_profiler_queries(world, render_context.command_encoder());
         Ok(())
     }
 }

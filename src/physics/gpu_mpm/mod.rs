@@ -37,6 +37,7 @@ use self::readback::{
     GpuStatisticsReadbackResult, GpuStatisticsReadbackState,
 };
 use self::shaders::MpmShaders;
+use crate::physics::profiler::cpu_profile_span;
 use crate::physics::state::SimUpdateSet;
 
 // ---------------------------------------------------------------------------
@@ -209,6 +210,7 @@ fn prepare_gpu_uploads(
     mut buffers: ResMut<MpmGpuBuffers>,
     queue: Res<RenderQueue>,
 ) {
+    let _profile_span = cpu_profile_span("physics", "prepare_gpu_uploads").entered();
     if control.init_only {
         return;
     }

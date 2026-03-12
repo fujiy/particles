@@ -16,6 +16,7 @@ use self::controls::{
     apply_save_load_requests, apply_sim_reset, handle_replay_requests, handle_sim_controls,
     initialize_default_world, PendingMapSave, PendingReplayArtifactSave,
 };
+use self::profiler::RuntimeProfilerPlugin;
 use self::state::{
     LoadDefaultWorldRequest, LoadMapRequest, ReplayLoadScenarioRequest, ReplaySaveArtifactRequest,
     ReplayState, ResetSimulationRequest, SaveMapRequest, SimUpdateSet, SimulationState,
@@ -27,7 +28,8 @@ pub struct PhysicsPlugin;
 
 impl Plugin for PhysicsPlugin {
     fn build(&self, app: &mut App) {
-        app.configure_sets(
+        app.add_plugins(RuntimeProfilerPlugin)
+            .configure_sets(
             Update,
             (
                 SimUpdateSet::Controls,
@@ -38,30 +40,30 @@ impl Plugin for PhysicsPlugin {
                 SimUpdateSet::Finalize,
             )
                 .chain(),
-        )
-        .init_resource::<TerrainWorld>()
-        .init_resource::<SimulationState>()
-        .init_resource::<ReplayState>()
-        .init_resource::<MaterialParams>()
-        .init_resource::<PendingMapSave>()
-        .init_resource::<PendingReplayArtifactSave>()
-        .add_message::<ResetSimulationRequest>()
-        .add_message::<LoadDefaultWorldRequest>()
-        .add_message::<SaveMapRequest>()
-        .add_message::<LoadMapRequest>()
-        .add_message::<ReplayLoadScenarioRequest>()
-        .add_message::<ReplaySaveArtifactRequest>()
-        .add_systems(Startup, initialize_default_world)
-        .add_systems(
-            Update,
-            (
-                handle_sim_controls,
-                apply_sim_reset,
-                handle_replay_requests,
-                apply_save_load_requests,
             )
-                .chain()
-                .in_set(SimUpdateSet::Controls),
-        );
+            .init_resource::<TerrainWorld>()
+            .init_resource::<SimulationState>()
+            .init_resource::<ReplayState>()
+            .init_resource::<MaterialParams>()
+            .init_resource::<PendingMapSave>()
+            .init_resource::<PendingReplayArtifactSave>()
+            .add_message::<ResetSimulationRequest>()
+            .add_message::<LoadDefaultWorldRequest>()
+            .add_message::<SaveMapRequest>()
+            .add_message::<LoadMapRequest>()
+            .add_message::<ReplayLoadScenarioRequest>()
+            .add_message::<ReplaySaveArtifactRequest>()
+            .add_systems(Startup, initialize_default_world)
+            .add_systems(
+                Update,
+                (
+                    handle_sim_controls,
+                    apply_sim_reset,
+                    handle_replay_requests,
+                    apply_save_load_requests,
+                )
+                    .chain()
+                    .in_set(SimUpdateSet::Controls),
+            );
     }
 }

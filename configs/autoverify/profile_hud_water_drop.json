@@ -1,0 +1,11 @@
+{
+  "screenshot": {
+    "enabled": true,
+    "scenario_name": "water_drop",
+    "output_path": "artifacts/autoverify/profile_hud_water_drop.png",
+    "report_path": "artifacts/autoverify/profile_hud_water_drop_report.json",
+    "warmup_frames": 180,
+    "max_wait_after_capture_frames": 240,
+    "run_simulation": true
+  }
+}

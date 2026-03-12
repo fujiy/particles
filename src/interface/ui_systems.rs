@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use bevy::ui::{ComputedNode, UiGlobalTransform};
 use bevy::window::PrimaryWindow;
 
 use super::*;
@@ -7,6 +8,7 @@ use crate::overlay::{MassOverlayState, PhysicsAreaOverlayState, SdfOverlayState,
 use crate::params::ActiveInterfaceParams;
 use crate::params::ActivePhysicsParams;
 use crate::physics::gpu_mpm::gpu_resources::world_grid_layout;
+use crate::physics::profiler::cpu_profile_span;
 use crate::physics::gpu_mpm::sync::{
     MpmChunkResidencyState, MpmStatisticsSnapshot, MpmStatisticsStatus,
 };
@@ -597,6 +599,7 @@ pub(super) fn update_simulation_hud(
         Single<&mut Text, With<SimulationHudStatsText>>,
     )>,
 ) {
+    let _profile_span = cpu_profile_span("ui", "update_simulation_hud").entered();
     hud_texts.p0().0 = format!(
         "FPS({:.1}s avg/min): {:.1}/{:.1}",
         interface_params.0.behavior.hud_fps_window_sec, fps_stats.avg_fps, fps_stats.min_fps
@@ -661,6 +664,128 @@ pub(super) fn update_simulation_hud(
     );
 }
 
+pub(super) fn sync_runtime_profile_hud(
+    mut commands: Commands,
+    interface_params: Res<ActiveInterfaceParams>,
+    snapshot: Res<RuntimeProfileSnapshot>,
+    mut hud_state: ResMut<RuntimeProfileHudState>,
+    mut lane_bars: Query<(&RuntimeProfileLaneBar, &mut Node, &mut BackgroundColor, Entity)>,
+) {
+    let _profile_span = cpu_profile_span("ui", "sync_runtime_profile_hud").entered();
+    if !snapshot.is_changed() && !interface_params.is_changed() {
+        return;
+    }
+
+    let profiler = &interface_params.0.profiler;
+    for (lane_bar, mut node, mut bg, entity) in &mut lane_bars {
+        node.width = px(profiler.bar_width_px);
+        node.height = px(profiler.bar_height_px);
+        *bg = profiler.colors.bar_bg.to_color().into();
+
+        commands.entity(entity).despawn_children();
+
+        let segments = match lane_bar.lane {
+            RuntimeProfileLane::Cpu => &snapshot.cpu,
+            RuntimeProfileLane::Gpu => &snapshot.gpu,
+        };
+        let bar_width_px = profiler.bar_width_px.max(1.0);
+        let scale_ms_per_sec = snapshot.scale_ms_per_sec.max(1.0);
+        commands.entity(entity).with_children(|parent| {
+            for (index, segment) in segments.iter().enumerate() {
+                let width_px = (segment.rate_ms_per_sec / scale_ms_per_sec) * bar_width_px;
+                if width_px <= 0.0 {
+                    continue;
+                }
+                parent.spawn((
+                    Node {
+                        width: px(width_px),
+                        height: percent(100.0),
+                        ..default()
+                    },
+                    BackgroundColor(profile_segment_color(
+                        profiler.colors.clone(),
+                        &segment.category,
+                        &segment.detail,
+                    )),
+                    RuntimeProfileSegmentNode {
+                        lane: lane_bar.lane,
+                        index,
+                    },
+                ));
+            }
+        });
+    }
+
+    hud_state.rendered_sequence = snapshot.sequence;
+}
+
+pub(super) fn update_runtime_profile_tooltip(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    interface_params: Res<ActiveInterfaceParams>,
+    snapshot: Res<RuntimeProfileSnapshot>,
+    mut tooltip: Single<&mut Node, With<RuntimeProfileTooltip>>,
+    mut tooltip_text: Single<&mut Text, With<RuntimeProfileTooltipText>>,
+    lane_bars: Query<(&RuntimeProfileLaneBar, &ComputedNode, &UiGlobalTransform)>,
+    mut segment_nodes: Query<(&RuntimeProfileSegmentNode, &mut BackgroundColor)>,
+) {
+    let _profile_span = cpu_profile_span("ui", "update_runtime_profile_tooltip").entered();
+    let Some(window) = windows.iter().next() else {
+        tooltip.display = Display::None;
+        apply_runtime_profile_hover_colors(&snapshot, &interface_params.0.profiler.colors, None, &mut segment_nodes);
+        return;
+    };
+    let Some(cursor_physical) = window.physical_cursor_position() else {
+        tooltip.display = Display::None;
+        apply_runtime_profile_hover_colors(&snapshot, &interface_params.0.profiler.colors, None, &mut segment_nodes);
+        return;
+    };
+    let Some(cursor) = window.cursor_position() else {
+        tooltip.display = Display::None;
+        apply_runtime_profile_hover_colors(&snapshot, &interface_params.0.profiler.colors, None, &mut segment_nodes);
+        return;
+    };
+    let hovered_segment = lane_bars
+        .iter()
+        .filter_map(|(lane_bar, node, transform)| {
+            if !node.contains_point(*transform, cursor_physical) {
+                return None;
+            }
+            let normalized = node.normalize_point(*transform, cursor_physical)?;
+            let x = normalized.x + 0.5;
+            if !(0.0..=1.0).contains(&x) {
+                return None;
+            }
+            let segments = match lane_bar.lane {
+                RuntimeProfileLane::Cpu => &snapshot.cpu,
+                RuntimeProfileLane::Gpu => &snapshot.gpu,
+            };
+            segment_at_bar_position(segments, snapshot.scale_ms_per_sec, x)
+                .map(|(index, segment)| (lane_bar.lane, index, segment))
+        })
+        .next();
+    apply_runtime_profile_hover_colors(
+        &snapshot,
+        &interface_params.0.profiler.colors,
+        hovered_segment.map(|(lane, index, _)| (lane, index)),
+        &mut segment_nodes,
+    );
+    let Some((_, _, segment)) = hovered_segment else {
+        tooltip.display = Display::None;
+        return;
+    };
+
+    tooltip.display = Display::Flex;
+    tooltip.left = px(cursor.x + interface_params.0.layout.tooltip_cursor_offset_x_px);
+    tooltip.top = px(cursor.y + interface_params.0.layout.tooltip_cursor_offset_y_px);
+    tooltip_text.0 = format!(
+        "{} {}\n{:.1} ms/s\ninterval total: {:.2} ms",
+        segment.lane.label(),
+        segment.label,
+        segment.rate_ms_per_sec,
+        segment.total_ms,
+    );
+}
+
 pub(super) fn update_scale_bar(
     windows: Query<&Window, With<PrimaryWindow>>,
     camera_q: Query<&Projection, With<MainCamera>>,
@@ -708,4 +833,100 @@ fn snap_scale_bar_world_length(target_world_m: f32) -> f32 {
         })
         .unwrap_or(1.0)
         .max(1.0)
+}
+
+fn profile_segment_color(
+    colors: crate::params::interface::InterfaceProfilerColorParams,
+    category: &str,
+    detail: &str,
+) -> Color {
+    let base = match normalized_profile_category(category) {
+        "physics" => colors.physics,
+        "render" => colors.render,
+        _ => colors.others,
+    };
+    let mix = profile_detail_mix(detail);
+    let lift = mix.max(0.0);
+    let shade = (-mix).max(0.0);
+    Color::srgba(
+        lerp(lerp(base.r, 1.0, lift), 0.0, shade),
+        lerp(lerp(base.g, 1.0, lift), 0.0, shade),
+        lerp(lerp(base.b, 1.0, lift), 0.0, shade),
+        base.a,
+    )
+}
+
+fn profile_detail_mix(detail: &str) -> f32 {
+    let mut hash = 0u32;
+    for byte in detail.bytes() {
+        hash = hash.wrapping_mul(16777619).wrapping_add(byte as u32);
+    }
+    ((hash & 0xFF) as f32 / 255.0 - 0.5) * 0.45
+}
+
+fn lerp(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+
+fn normalized_profile_category(category: &str) -> &'static str {
+    match category {
+        "physics" => "physics",
+        "terrain" | "water" | "overlay" | "ui" | "render" => "render",
+        _ => "others",
+    }
+}
+
+fn segment_at_bar_position(
+    segments: &[RuntimeProfileSegment],
+    scale_ms_per_sec: f32,
+    x01: f32,
+) -> Option<(usize, &RuntimeProfileSegment)> {
+    let mut cursor = x01.clamp(0.0, 1.0);
+    let mut accum = 0.0;
+    for (index, segment) in segments.iter().enumerate() {
+        let width = (segment.rate_ms_per_sec / scale_ms_per_sec.max(1.0)).max(0.0);
+        let end = (accum + width).min(1.0);
+        if cursor >= accum && cursor <= end && end > accum {
+            return Some((index, segment));
+        }
+        accum = end;
+        if accum >= 1.0 {
+            break;
+        }
+        if cursor < accum {
+            cursor = accum;
+        }
+    }
+    None
+}
+
+fn apply_runtime_profile_hover_colors(
+    snapshot: &RuntimeProfileSnapshot,
+    colors: &crate::params::interface::InterfaceProfilerColorParams,
+    hovered: Option<(RuntimeProfileLane, usize)>,
+    segment_nodes: &mut Query<(&RuntimeProfileSegmentNode, &mut BackgroundColor)>,
+) {
+    for (segment_node, mut bg) in segment_nodes.iter_mut() {
+        let color = if hovered == Some((segment_node.lane, segment_node.index)) {
+            Color::WHITE
+        } else {
+            runtime_profile_segment_color(snapshot, colors.clone(), segment_node)
+        };
+        *bg = color.into();
+    }
+}
+
+fn runtime_profile_segment_color(
+    snapshot: &RuntimeProfileSnapshot,
+    colors: crate::params::interface::InterfaceProfilerColorParams,
+    segment_node: &RuntimeProfileSegmentNode,
+) -> Color {
+    let segment = match segment_node.lane {
+        RuntimeProfileLane::Cpu => snapshot.cpu.get(segment_node.index),
+        RuntimeProfileLane::Gpu => snapshot.gpu.get(segment_node.index),
+    };
+    let Some(segment) = segment else {
+        return colors.bar_bg.to_color();
+    };
+    profile_segment_color(colors, &segment.category, &segment.detail)
 }

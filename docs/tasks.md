@@ -320,6 +320,42 @@
   - 2026-03-07: `assets/params/*.ron` の該当色値を hex 形式へ移行。
   - 2026-03-07: 追加テストを含む状態で `cargo check` / `cargo test` を全件通過。
 
+### [UI-PROFILE-01] 左上HUDのCPU/GPUプロファイル棒グラフ可視化
+
+- Status: `In Progress`
+- 背景:
+  - 左上HUDには FPS と統計テキストはあるが、CPU/GPU のどの処理がフレーム時間を支配しているかを実行中に判断できない。
+  - `active tile` や render/compute pass の最適化を進めるには、CPU span と GPU scope を同一 HUD 上で比較できる常時可視化が必要。
+- スコープ:
+  - FPS 表示の直下、`Sim: Running/Paused` 表示の上に CPU / GPU それぞれの水平積み上げ棒グラフを追加する。
+  - CPU は Bevy trace span を subscribe して update 間隔ごとに集計し、GPU は `wgpu-profiler` の scope 単位結果を集計する。
+  - 棒グラフはカテゴリ色 + 詳細差分色で描画し、hover で名前と「実時間1秒あたりの処理時間」を表示する。
+  - 更新頻度、サイズ、色、最小表示閾値などの runtime tuning 値は `assets/params/interface.ron` へ追加する。
+- Subtasks:
+  - [x] Work Unit を追加し、CPU/GPU profiler 可視化の実装単位を定義する。
+  - [x] CPU trace subscriber を追加し、span enter/exit から update 間隔内の合計時間を集計する。
+  - [x] GPU profiler を render graph / draw pass / compute pass へ統合し、scope 結果を main world へ反映する。
+  - [x] 左上 HUD に CPU / GPU 棒グラフ UI、hover tooltip、動的スケール計算を実装する。
+  - [x] `interface.ron` に profiler 可視化パラメータを追加し、hot reload 可能にする。
+  - [x] `cargo check` / `cargo test --lib` と、必要な runtime artifact で可視化挙動を確認する。
+  - [ ] hover tooltip の repeatable runtime 検証手順を追加する。
+- 完了条件:
+  - CPU / GPU の各グラフが 1 秒あたり 10 回（または設定値）で更新され、直近区間の積算時間を表示する。
+  - 主要 scope/span が色分けされ、hover で span/scope 名と時間を確認できる。
+  - グラフ幅スケールが実フレームレートに追従し、余裕があるときは最大幅まで伸びる。
+- 進捗:
+  - 2026-03-12: Work Unit を追加し、CPU は Bevy trace subscriber、GPU は `wgpu-profiler`、表示は左上 HUD 埋め込みの棒グラフ UI で進める方針を確定。
+  - 2026-03-12: `bevy/trace` を常時有効化し、`physics::profiler` に custom tracing layer + shared accumulator + render-world `wgpu-profiler` 統合を追加。CPU は exclusive span time、GPU は query tree の exclusive self time を集計する方式で snapshot 化。
+  - 2026-03-12: `assets/params/interface.ron` / `params::interface` に profiler 設定群（更新頻度、棒グラフ寸法、閾値、カテゴリ色）を追加。左上 HUD に CPU/GPU 2 行の積み上げ棒グラフを挿入し、segment hover tooltip を実装。
+  - 2026-03-12: `wgpu-profiler` は `wgpu 27` と揃う `0.25.0` へ pin。`cargo check` と `cargo test --lib` 51件通過。
+  - 2026-03-12: profiler tooltip の hit test を UI 物理座標ベースから Bevy UI の論理座標ベースへ修正し、pause 中は profiler 集計窓を更新せず reset するよう変更。`cargo check` / `cargo test --lib` / `configs/autoverify/profile_hud_water_drop.json` を再実行。
+  - 2026-03-12: `configs/autoverify/profile_hud_water_drop.json` を追加し、`cargo run -q -- --autoverify-config configs/autoverify/profile_hud_water_drop.json` を実行。`artifacts/autoverify/profile_hud_water_drop.png` で HUD 上の CPU/GPU 棒グラフ描画を確認。
+  - 2026-03-12: profiler hover の当たり判定を Bevy UI の実装に合わせて `physical_cursor_position()` ベースへ戻し、hover 中 segment を白でハイライトする再着色経路を追加。`cargo check` / `cargo test --lib` / `configs/autoverify/profile_hud_water_drop.json` を再実行。
+  - 2026-03-12: profiler 色カテゴリを `physics` / `render` / `others` の3系統へ整理。色設定は `assets/params/interface.ron` の `profiler.colors` に集約し、`terrain` / `water` / `overlay` / `ui` は表示上 `render` 色へ正規化するよう更新。
+  - 2026-03-12: profiler tooltip に出すカテゴリ名も snapshot 生成時に `physics` / `render` / `others` へ正規化し、`water/...` などの旧カテゴリ名が HUD に出ないよう更新。`cargo check` / `cargo test --lib` / `configs/autoverify/profile_hud_water_drop.json` を再実行。
+  - 2026-03-12: profiler bar 内の segment 順序を時間順から固定順へ変更。`physics -> render -> others` のカテゴリ順、その中は detail 名の辞書順で snapshot を整列するよう更新。`cargo check` / `cargo test --lib` を再実行。
+  - 2026-03-12: `assets/params/interface.ron` の `profiler.max_segments_per_lane` を増やして表示可能 segment 数を拡張し、`others/remainder` への過剰な集約を抑える運用へ調整。
+
 ## Done (Recent)
 
 ### [MPM-OVERLAY-01] MPMセル質量オーバーレイ追加

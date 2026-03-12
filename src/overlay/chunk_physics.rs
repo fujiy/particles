@@ -23,6 +23,9 @@ use super::{PhysicsAreaOverlayState, TileOverlayState};
 use crate::params::ActiveOverlayParams;
 use crate::physics::gpu_mpm::buffers::{GpuChunkMeta, GpuMpmParams};
 use crate::physics::gpu_mpm::gpu_resources::MpmGpuBuffers;
+use crate::physics::profiler::{
+    begin_gpu_pass_query, cpu_profile_span, end_gpu_pass_query, resolve_gpu_profiler_queries,
+};
 
 const CHUNK_PHYSICS_OVERLAY_SHADER_PATH: &str = "shaders/overlay/chunk_physics_overlay_gpu.wgsl";
 const CHUNK_PHYSICS_COPY_SHADER_PATH: &str = "shaders/overlay/chunk_physics_copy.wgsl";
@@ -377,6 +380,7 @@ impl ViewNode for ChunkPhysicsOverlayGpuNode {
         >,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        let _profile_span = cpu_profile_span("overlay", "chunk_physics_node").entered();
         let chunk_overlay_enabled = world
             .get_resource::<TileOverlayState>()
             .map(|s| s.enabled)
@@ -408,6 +412,12 @@ impl ViewNode for ChunkPhysicsOverlayGpuNode {
             )),
         );
         {
+            let copy_query = begin_gpu_pass_query(
+                world,
+                "overlay",
+                "chunk_copy",
+                render_context.command_encoder(),
+            );
             let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
                 label: Some("chunk_physics_overlay_copy_pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
@@ -417,12 +427,16 @@ impl ViewNode for ChunkPhysicsOverlayGpuNode {
                     ops: Operations::default(),
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: copy_query
+                    .as_ref()
+                    .and_then(|query| query.render_pass_timestamp_writes()),
                 occlusion_query_set: None,
             });
             render_pass.set_render_pipeline(copy_pipeline);
             render_pass.set_bind_group(0, &copy_bind_group, &[]);
             render_pass.draw(0..3, 0..1);
+            drop(render_pass);
+            end_gpu_pass_query(world, render_context.command_encoder(), copy_query);
         }
 
         let (params_binding, chunk_meta_binding, terrain_node_solid_binding, chunk_count) =
@@ -468,6 +482,12 @@ impl ViewNode for ChunkPhysicsOverlayGpuNode {
             )),
         );
         {
+            let overlay_query = begin_gpu_pass_query(
+                world,
+                "overlay",
+                "chunk",
+                render_context.command_encoder(),
+            );
             let mut render_pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
                 label: Some("chunk_physics_overlay_gpu_pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {
@@ -480,13 +500,18 @@ impl ViewNode for ChunkPhysicsOverlayGpuNode {
                     },
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: overlay_query
+                    .as_ref()
+                    .and_then(|query| query.render_pass_timestamp_writes()),
                 occlusion_query_set: None,
             });
             render_pass.set_render_pipeline(pipeline);
             render_pass.set_bind_group(0, &bind_group, &[view_uniform_offset.offset]);
             render_pass.draw(0..6, 0..chunk_count);
+            drop(render_pass);
+            end_gpu_pass_query(world, render_context.command_encoder(), overlay_query);
         }
+        resolve_gpu_profiler_queries(world, render_context.command_encoder());
         Ok(())
     }
 }
