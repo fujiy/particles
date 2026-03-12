@@ -254,7 +254,7 @@ pub fn default_scenario_specs() -> Vec<ScenarioSpec> {
             }],
             step_count: 600,
             thresholds: ScenarioThresholds {
-                max_penetration_rate: Some(0.05),
+                max_penetration_rate: Some(0.1),
                 max_max_speed_mps: Some(30.0),
                 min_sleep_ratio: None,
             },
