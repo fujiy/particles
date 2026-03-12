@@ -168,6 +168,7 @@ struct ScreenshotAutoVerifyConfig {
 struct ScreenshotOverlayConfig {
     chunk: Option<bool>,
     sdf: Option<bool>,
+    mass: Option<bool>,
     physics_area: Option<bool>,
     particle: Option<bool>,
 }
@@ -370,6 +371,7 @@ struct ScreenshotVerifyState {
     camera_scale_applied: bool,
     overlay_chunk: Option<bool>,
     overlay_sdf: Option<bool>,
+    overlay_mass: Option<bool>,
     overlay_physics_area: Option<bool>,
     overlay_particle: Option<bool>,
     overlay_applied: bool,
@@ -460,6 +462,7 @@ impl ScreenshotVerifyState {
         let terrain_ops = parse_terrain_autoverify_ops(&config.terrain_ops);
         let overlay_chunk = config.overlay.as_ref().and_then(|o| o.chunk);
         let overlay_sdf = config.overlay.as_ref().and_then(|o| o.sdf);
+        let overlay_mass = config.overlay.as_ref().and_then(|o| o.mass);
         let overlay_physics_area = config.overlay.as_ref().and_then(|o| o.physics_area);
         let overlay_particle = config.overlay.as_ref().and_then(|o| o.particle);
         Self {
@@ -480,6 +483,7 @@ impl ScreenshotVerifyState {
             camera_scale_applied: false,
             overlay_chunk,
             overlay_sdf,
+            overlay_mass,
             overlay_physics_area,
             overlay_particle,
             overlay_applied: false,
@@ -1742,6 +1746,7 @@ fn run_screenshot_autoverify(
     if !state.overlay_applied {
         overlay_visibility_overrides.chunk = state.overlay_chunk;
         overlay_visibility_overrides.sdf = state.overlay_sdf;
+        overlay_visibility_overrides.mass = state.overlay_mass;
         overlay_visibility_overrides.physics_area = state.overlay_physics_area;
         overlay_visibility_overrides.particle = state.overlay_particle;
         state.overlay_applied = true;

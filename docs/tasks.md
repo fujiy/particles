@@ -281,6 +281,7 @@
   - 2026-03-12: default world で 6x6 相当の初期 active chunk から先へ広がらない退行に対し、新規 `AddParticles` 用に allocate した target chunk/halo を GPU add apply 前から resident として `chunk_meta` へ反映する補助を追加。さらに `upload_chunks/upload_chunk_diffs/upload_terrain_cell_slot_diffs` を one-shot `*_frame` flag に分離し、render world が stale な full chunk upload flag を握り続けて後続 diff 更新を潰す状態を解消した。`world_edit_add_particles_marks_target_halo_slots_resident_before_gpu_apply` を追加し、`cargo test --lib` 47件 / `cargo check` を通過。`configs/autoverify/default_world_far_spawn_chunk_growth.json` は 5 点遠距離 spawn に拡張して `resident_chunk_count=50`, `render_active_chunk_count=50`, `spawned_particles_requested=60`, `runtime_rebuild_count=0` を確認し、6x6 超えの resident/render active chunk 拡大を artifact で固定した。
   - 2026-03-12: 上記 refactor 後も default world の遠距離 spawn 実粒子が原点側 1 chunk へ潰れる退行が残っていたため、GPU world-edit add の pending batch を入力のないフレームでも oldest 順に再送するよう更新し、render world 側では retry で `particle_count` / `particle_revision` を二重更新しないよう整理した。あわせて render world の chunk/terrain upload 判定が main-world 専用 `*_frame` flag を参照していた不整合を修正し、さらに `apply_chunk_event_readback` / `apply_mover_readback` が world-edit 側で先に積んだ `chunk_meta` upload を上書きしないよう merge 型 staging に変更した。`world_edit_add_requeues_oldest_pending_batch_without_new_input` を追加し、`cargo test --lib` 48件 / `cargo check` を通過。`configs/autoverify/default_world_far_spawn_chunk_growth.json` を再確認し、`artifacts/autoverify/default_world_far_spawn_chunk_growth.json` で `resident_chunk_count=45`, `render_active_chunk_count=45`, `spawned_particles_requested=60`, `readback_unique_chunk_count=5`, `readback_min_x=-39.96875`, `readback_max_x=40.21875`, `runtime_rebuild_count=0` を確認して、default world の「1x1 chunk に潰れる」症状が artifact 上で解消した。
   - 2026-03-12: さらに render world で terrain slot update list だけが main-world 専用 `upload_terrain_cell_slot_diffs_frame` を参照しており、`terrain_sdf_update` が走らず `terrain_node_solid` が更新されない退行を修正した。これにより `play` しても時間が進まない症状は解消し、`configs/autoverify/water_drop_motion.json` は `mean_drop=8.437712`, `gpu_max_speed_mps=8.655025`, `resident_chunk_count=36`, `render_active_chunk_count=36`, `runtime_rebuild_count=0` まで回復した。一方で最終 `terrain_penetration_ratio=0.05217087` が閾値 `0.05` をわずかに超えており、`passed=false` は現在この軽微な penetration 超過のみが原因になっている。
+  - 2026-03-12: user approval に基づき `water_drop` scenario spec の `max_penetration_rate` を `0.05 -> 0.06` へ緩和した。再検証で `artifacts/autoverify/water_drop_motion.json` は `passed=true`, `terrain_penetration_ratio=0.05217087`, `mean_drop=8.437712`, `gpu_max_speed_mps=8.655025`, `runtime_rebuild_count=0` を確認し、停止退行解消後に残っていた threshold-only fail を解消した。
 
 ### [MPM-CHUNK-05] 安定化・運用仕上げ（容量、監視、フェイルセーフ）
 
@@ -319,6 +320,29 @@
   - 2026-03-07: 追加テストを含む状態で `cargo check` / `cargo test` を全件通過。
 
 ## Done (Recent)
+
+### [MPM-OVERLAY-01] MPMセル質量オーバーレイ追加
+
+- Status: `Done`
+- 背景:
+  - 既存の Chunk/Grid Overlay と SDF Overlay では、resident chunk 内で MPM グリッドへ集約された質量分布を直接確認できない。
+  - 境界近傍や world edit 後の質量偏りを診断するには、GPU 常駐 `grid_buf` からセル単位の質量を即座に見られる可視化が必要。
+- スコープ:
+  - resident chunk に対して、MPM グリッド値からセル質量を算出して GPU overlay として描画する。
+  - overlay 有効時にカラーバーを UI 表示し、現在のカラーマップ上限が分かるようにする。
+  - screenshot autoverify から表示状態を切り替えられるようにする。
+- Subtasks:
+  - [x] resident chunk の `grid_buf` を参照する GPU mass overlay pass を追加する。
+  - [x] Mass Overlay トグルボタンとカラーバー UI を追加する。
+  - [x] HUD / screenshot autoverify override を mass overlay 対応へ拡張する。
+  - [x] `water_drop` screenshot artifact で表示成立を確認する。
+- 完了条件:
+  - resident chunk のみを対象にセル質量が描画される。
+  - overlay 有効時にカラーバーが表示され、色レンジ上限が UI から確認できる。
+  - screenshot artifact で描画成立を再現できる。
+- 進捗:
+  - 2026-03-12: `mass_overlay_gpu.wgsl` と `src/overlay/mass.rs` を追加し、resident chunk の `grid_buf.water_mass + granular_mass` から 2x2 node 平均でセル質量を算出する GPU pass を実装。`overlay.ron` に色とレンジ係数を追加し、Mass Overlay ボタン / カラーバー / HUD 表示 / screenshot override を接続した。
+  - 2026-03-12: `configs/autoverify/overlay_mass_water_drop.json` を追加し、`cargo run -q -- --autoverify-config configs/autoverify/overlay_mass_water_drop.json` で `artifacts/autoverify/overlay_mass_water_drop.png` / `.json` を生成。artifact 上で `Mass Overlay: ON` とカラーバー表示、resident chunk 内のセル質量可視化成立を確認した。
 
 ### [MPM-PHYS-WATER-BOUNDARY-01] 静的地形の壁面境界修正（solid node除外 + 粒子フェイルセーフ）
 

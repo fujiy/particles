@@ -3,7 +3,7 @@ use bevy::window::PrimaryWindow;
 
 use super::*;
 use crate::camera_controller::MainCamera;
-use crate::overlay::{PhysicsAreaOverlayState, SdfOverlayState, TileOverlayState};
+use crate::overlay::{MassOverlayState, PhysicsAreaOverlayState, SdfOverlayState, TileOverlayState};
 use crate::params::ActiveInterfaceParams;
 use crate::params::ActivePhysicsParams;
 use crate::physics::gpu_mpm::gpu_resources::world_grid_layout;
@@ -588,6 +588,7 @@ pub(super) fn update_simulation_hud(
     chunk_overlay_state: Res<TileOverlayState>,
     physics_overlay_state: Res<PhysicsAreaOverlayState>,
     sdf_overlay_state: Res<SdfOverlayState>,
+    mass_overlay_state: Res<MassOverlayState>,
     chunk_residency: Res<MpmChunkResidencyState>,
     terrain_render_diagnostics: Res<TerrainRenderDiagnostics>,
     terrain_world: Res<TerrainWorld>,
@@ -624,7 +625,7 @@ pub(super) fn update_simulation_hud(
     let loaded_chunks = terrain_world.loaded_chunk_coords().len();
     let modified_chunks = terrain_world.override_chunk_coords().len();
     hud_texts.p1().0 = format!(
-        "Sim: {sim_status}\nTerrainGen/frame: {:>7} (d={:>4},{:>4} full={} r=0x{:02X})\nTerrainOvr/frame: runs={:>5} cells={:>6} pending={:>5} done={:>5.1}%\nTerrainOvr/total: runs={:>7} cells={:>8}\nGPU Total: {gpu_total_count}\nWater(L): {water_count}\nGranular(Soil+Stone): {granular_soil_like_count}\nGranular(Sand): {granular_sand_count}\nGPU Unknown: {unknown_phase_count}\nChunk/Grid Overlay: {} | resident {} chunks | active tiles {}/{} skip {:>5.1}% | nodes {}x{} cells {}x{}\nRender Chunks: {} (Modified: {})\nSDF Overlay: {}",
+        "Sim: {sim_status}\nTerrainGen/frame: {:>7} (d={:>4},{:>4} full={} r=0x{:02X})\nTerrainOvr/frame: runs={:>5} cells={:>6} pending={:>5} done={:>5.1}%\nTerrainOvr/total: runs={:>7} cells={:>8}\nGPU Total: {gpu_total_count}\nWater(L): {water_count}\nGranular(Soil+Stone): {granular_soil_like_count}\nGranular(Sand): {granular_sand_count}\nGPU Unknown: {unknown_phase_count}\nChunk/Grid Overlay: {} | resident {} chunks | active tiles {}/{} skip {:>5.1}% | nodes {}x{} cells {}x{}\nRender Chunks: {} (Modified: {})\nSDF Overlay: {} | Mass Overlay: {}",
         terrain_render_diagnostics.terrain_generation_eval_count_frame,
         terrain_render_diagnostics.terrain_generation_origin_delta_x_frame,
         terrain_render_diagnostics.terrain_generation_origin_delta_y_frame,
@@ -648,6 +649,11 @@ pub(super) fn update_simulation_hud(
         loaded_chunks,
         modified_chunks,
         if sdf_overlay_state.enabled {
+            "ON"
+        } else {
+            "OFF"
+        },
+        if mass_overlay_state.enabled {
             "ON"
         } else {
             "OFF"

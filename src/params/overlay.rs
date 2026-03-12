@@ -55,6 +55,14 @@ pub struct OverlaySdfParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverlayMassParams {
+    /// カラーマップ上限を `rho0 * cell_area` の何倍にするか. 許容: 0.1 – 16.0
+    pub max_ref_cell_mass_scale: f32,
+    /// オーバーレイ全体の不透明度倍率. 許容: 0.0 – 1.0
+    pub opacity: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverlayUiParams {
     /// ボタン共通の右余白 [px]. 許容: 0.0 – 200.0
     pub right_px: f32,
@@ -64,6 +72,8 @@ pub struct OverlayUiParams {
     pub sdf_button_bottom_px: f32,
     /// Physics Area ボタン下端 [px]. 許容: 0.0 – 400.0
     pub physics_area_button_bottom_px: f32,
+    /// Mass Overlay ボタン下端 [px]. 許容: 0.0 – 400.0
+    pub mass_button_bottom_px: f32,
     /// Particle ボタン下端 [px]. 許容: 0.0 – 400.0
     pub particle_button_bottom_px: f32,
     /// ボタン横パディング [px]. 許容: 0.0 – 40.0
@@ -78,6 +88,16 @@ pub struct OverlayUiParams {
     pub info_top_px: f32,
     /// 情報ラベルフォントサイズ [px]. 許容: 8.0 – 40.0
     pub info_font_size_px: f32,
+    /// Mass color bar 右余白 [px]. 許容: 0.0 – 400.0
+    pub mass_colorbar_right_px: f32,
+    /// Mass color bar 下端 [px]. 許容: 0.0 – 400.0
+    pub mass_colorbar_bottom_px: f32,
+    /// Mass color bar 幅 [px]. 許容: 8.0 – 120.0
+    pub mass_colorbar_width_px: f32,
+    /// Mass color bar 高さ [px]. 許容: 40.0 – 320.0
+    pub mass_colorbar_height_px: f32,
+    /// Mass color bar ラベルフォントサイズ [px]. 許容: 8.0 – 32.0
+    pub mass_colorbar_font_size_px: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +114,9 @@ pub struct OverlayColorParams {
     pub chunk_overlay_free_grid: OverlayColor,
     pub chunk_overlay_active_tile_fill: OverlayColor,
     pub chunk_overlay_active_tile_edge: OverlayColor,
+    pub mass_overlay_low: OverlayColor,
+    pub mass_overlay_mid: OverlayColor,
+    pub mass_overlay_high: OverlayColor,
     pub grid_chunk_boundary: OverlayColor,
     pub grid_cached_chunk: OverlayColor,
     pub grid_modified_chunk: OverlayColor,
@@ -104,6 +127,7 @@ pub struct OverlayColorParams {
 #[derive(Asset, TypePath, Debug, Clone, Serialize, Deserialize)]
 pub struct OverlayParams {
     pub sdf: OverlaySdfParams,
+    pub mass: OverlayMassParams,
     pub ui: OverlayUiParams,
     pub colors: OverlayColorParams,
 }
@@ -117,11 +141,16 @@ impl Default for OverlayParams {
                 range_cell_scale: 6.0,
                 negative_fill_z: 0.2,
             },
+            mass: OverlayMassParams {
+                max_ref_cell_mass_scale: 1.0,
+                opacity: 0.72,
+            },
             ui: OverlayUiParams {
                 right_px: 12.0,
                 tile_button_bottom_px: 88.0,
                 sdf_button_bottom_px: 126.0,
                 physics_area_button_bottom_px: 50.0,
+                mass_button_bottom_px: 50.0,
                 particle_button_bottom_px: 12.0,
                 button_padding_x_px: 10.0,
                 button_padding_y_px: 6.0,
@@ -129,6 +158,11 @@ impl Default for OverlayParams {
                 info_left_px: 12.0,
                 info_top_px: 12.0,
                 info_font_size_px: 14.0,
+                mass_colorbar_right_px: 14.0,
+                mass_colorbar_bottom_px: 168.0,
+                mass_colorbar_width_px: 24.0,
+                mass_colorbar_height_px: 168.0,
+                mass_colorbar_font_size_px: 12.0,
             },
             colors: OverlayColorParams {
                 button_bg_off: OverlayColor {
@@ -203,6 +237,24 @@ impl Default for OverlayParams {
                     b: 0.66,
                     a: 0.72,
                 },
+                mass_overlay_low: OverlayColor {
+                    r: 0.15,
+                    g: 0.44,
+                    b: 0.90,
+                    a: 0.18,
+                },
+                mass_overlay_mid: OverlayColor {
+                    r: 0.99,
+                    g: 0.78,
+                    b: 0.18,
+                    a: 0.42,
+                },
+                mass_overlay_high: OverlayColor {
+                    r: 0.88,
+                    g: 0.21,
+                    b: 0.10,
+                    a: 0.78,
+                },
                 grid_chunk_boundary: OverlayColor {
                     r: 0.80,
                     g: 0.86,
@@ -259,6 +311,13 @@ impl OverlayParams {
         );
         check!(self.sdf.range_cell_scale, "sdf.range_cell_scale", 0.5, 30.0);
         check!(self.sdf.negative_fill_z, "sdf.negative_fill_z", 0.0, 2.0);
+        check!(
+            self.mass.max_ref_cell_mass_scale,
+            "mass.max_ref_cell_mass_scale",
+            0.1,
+            16.0
+        );
+        check!(self.mass.opacity, "mass.opacity", 0.0, 1.0);
 
         check!(self.ui.right_px, "ui.right_px", 0.0, 200.0);
         check!(
@@ -276,6 +335,12 @@ impl OverlayParams {
         check!(
             self.ui.physics_area_button_bottom_px,
             "ui.physics_area_button_bottom_px",
+            0.0,
+            400.0
+        );
+        check!(
+            self.ui.mass_button_bottom_px,
+            "ui.mass_button_bottom_px",
             0.0,
             400.0
         );
@@ -306,6 +371,36 @@ impl OverlayParams {
         check!(self.ui.info_left_px, "ui.info_left_px", 0.0, 400.0);
         check!(self.ui.info_top_px, "ui.info_top_px", 0.0, 400.0);
         check!(self.ui.info_font_size_px, "ui.info_font_size_px", 8.0, 40.0);
+        check!(
+            self.ui.mass_colorbar_right_px,
+            "ui.mass_colorbar_right_px",
+            0.0,
+            400.0
+        );
+        check!(
+            self.ui.mass_colorbar_bottom_px,
+            "ui.mass_colorbar_bottom_px",
+            0.0,
+            400.0
+        );
+        check!(
+            self.ui.mass_colorbar_width_px,
+            "ui.mass_colorbar_width_px",
+            8.0,
+            120.0
+        );
+        check!(
+            self.ui.mass_colorbar_height_px,
+            "ui.mass_colorbar_height_px",
+            40.0,
+            320.0
+        );
+        check!(
+            self.ui.mass_colorbar_font_size_px,
+            "ui.mass_colorbar_font_size_px",
+            8.0,
+            32.0
+        );
         let color_values = [
             ("colors.button_bg_off", self.colors.button_bg_off),
             ("colors.button_bg_on", self.colors.button_bg_on),
@@ -339,6 +434,9 @@ impl OverlayParams {
                 "colors.grid_chunk_boundary",
                 self.colors.grid_chunk_boundary,
             ),
+            ("colors.mass_overlay_low", self.colors.mass_overlay_low),
+            ("colors.mass_overlay_mid", self.colors.mass_overlay_mid),
+            ("colors.mass_overlay_high", self.colors.mass_overlay_high),
             ("colors.grid_cached_chunk", self.colors.grid_cached_chunk),
             (
                 "colors.grid_modified_chunk",

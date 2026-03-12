@@ -16,6 +16,9 @@
         chunk_overlay_free_grid: "#8888882b",
         chunk_overlay_active_tile_fill: "#39dda9e1",
         chunk_overlay_active_tile_edge: "#39DDAAB8",
+        mass_overlay_low: "#276FE62E",
+        mass_overlay_mid: "#FCC8306B",
+        mass_overlay_high: "#E03614C7",
         grid_chunk_boundary: "#CCDBED38",
         grid_cached_chunk: "#52DBFA9E",
         grid_modified_chunk: "#FC6E38F2",
@@ -34,6 +37,13 @@
         negative_fill_z: 0.2,
     ),
 
+    mass: (
+        // カラーマップ上限を `rho0 * cell_area` の何倍にするか. 許容: 0.1 – 16.0
+        max_ref_cell_mass_scale: 1.0,
+        // オーバーレイ全体の不透明度倍率. 許容: 0.0 – 1.0
+        opacity: 0.72,
+    ),
+
     ui: (
         // ボタン共通の右余白 [px]. 許容: 0.0 – 200.0
         right_px: 12.0,
@@ -41,6 +51,7 @@
         tile_button_bottom_px: 88.0,
         sdf_button_bottom_px: 126.0,
         physics_area_button_bottom_px: 50.0,
+        mass_button_bottom_px: 50.0,
         particle_button_bottom_px: 12.0,
         // ボタンパディング [px]. 許容: x:0.0–40.0, y:0.0–24.0
         button_padding_x_px: 10.0,
@@ -51,5 +62,11 @@
         info_left_px: 12.0,
         info_top_px: 12.0,
         info_font_size_px: 14.0,
+        // Mass color bar 配置/サイズ [px]
+        mass_colorbar_right_px: 14.0,
+        mass_colorbar_bottom_px: 168.0,
+        mass_colorbar_width_px: 24.0,
+        mass_colorbar_height_px: 168.0,
+        mass_colorbar_font_size_px: 12.0,
     ),
 )
