@@ -3,7 +3,7 @@
 #define_import_path particles::mpm_types
 
 // Particle storage layout (one array of GpuParticle, 72 bytes each).
-// Matches Rust GpuParticle: x(8)+v(8)+mass(4)+v0(4)+f(16)+c(16)+v_vol(4)+phase_id(4)+phi_p(4)+home_slot(4)=72
+// Matches Rust GpuParticle: x(8)+v(8)+mass(4)+v0(4)+f(16)+c(16)+v_vol(4)+phase_id(4)+phi_p(4)+home_slot+material(4)=72
 struct GpuParticle {
     // position (m)
     x: vec2<f32>,
@@ -29,7 +29,7 @@ struct GpuParticle {
     phase_id: u32,
     // Water fill fraction φ_p [Eq.9, physics.md]. Written by G2P, read by P2G.
     phi_p: f32,
-    // Occupied/home chunk slot id.
+    // Packed occupied/home chunk slot id (low 24 bits) + material id (high 8 bits).
     home_chunk_slot_id: u32,
 }
 
@@ -121,9 +121,28 @@ struct MpmParams {
 const PHASE_WATER: u32 = 0u;
 const PHASE_GRANULAR_SOIL: u32 = 1u;
 const PHASE_GRANULAR_SAND: u32 = 2u;
+const PARTICLE_HOME_SLOT_MASK: u32 = 0x00FFFFFFu;
+const PARTICLE_HOME_MATERIAL_SHIFT: u32 = 24u;
+const INVALID_PARTICLE_SLOT: u32 = PARTICLE_HOME_SLOT_MASK;
 
 fn phase_is_granular(phase_id: u32) -> bool {
     return phase_id == PHASE_GRANULAR_SOIL || phase_id == PHASE_GRANULAR_SAND;
+}
+
+fn particle_slot_id(p: GpuParticle) -> u32 {
+    return p.home_chunk_slot_id & PARTICLE_HOME_SLOT_MASK;
+}
+
+fn particle_material_id(p: GpuParticle) -> u32 {
+    return p.home_chunk_slot_id >> PARTICLE_HOME_MATERIAL_SHIFT;
+}
+
+fn repack_particle_home_slot(packed_home: u32, slot_id: u32) -> u32 {
+    return (packed_home & ~PARTICLE_HOME_SLOT_MASK) | (slot_id & PARTICLE_HOME_SLOT_MASK);
+}
+
+fn pack_particle_home_slot(slot_id: u32, material_id: u32) -> u32 {
+    return (material_id << PARTICLE_HOME_MATERIAL_SHIFT) | (slot_id & PARTICLE_HOME_SLOT_MASK);
 }
 
 // Quadratic B-spline kernel weight and gradient for 1D distance.

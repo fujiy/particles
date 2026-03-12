@@ -1,7 +1,7 @@
 // Apply incremental particle-add requests directly on GPU particle storage.
 // One invocation per add-op record; each invocation writes up to count_per_cell particles.
 
-#import particles::mpm_types::{GpuParticle, MpmParams}
+#import particles::mpm_types::{GpuParticle, MpmParams, pack_particle_home_slot}
 
 struct GpuChunkMeta {
     chunk_coord_x: i32,
@@ -27,6 +27,7 @@ struct GpuWorldEditAddOp {
     count_per_cell: u32,
     particle_offset: u32,
     phase_id: u32,
+    material_id: u32,
     mass: f32,
     v0: f32,
 }
@@ -85,7 +86,7 @@ fn apply_world_edit_add(@builtin(global_invocation_id) gid: vec3<u32>) {
                 0.0,
                 op.phase_id,
                 1.0,
-                op.slot_id,
+                pack_particle_home_slot(op.slot_id, op.material_id),
             );
             spawned += 1u;
         }

@@ -31,39 +31,6 @@ pub struct DeformationClampParams {
     pub c_max_norm: f32,
 }
 
-/// APIC ↔ PIC ブレンドパラメータ [Eq.32, physics.md]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApicBlendParams {
-    /// 水の APIC ブレンド係数 α. 1.0 = 完全 APIC, 0.0 = 完全 PIC. 許容: 0.0 – 1.0
-    pub water: f32,
-    /// 粉体の APIC ブレンド係数 α. 許容: 0.0 – 1.0
-    pub granular: f32,
-}
-
-/// 地形境界 Coulomb 摩擦パラメータ [Eq.29, physics.md]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BoundaryFrictionParams {
-    /// 水の Coulomb 摩擦係数 μ_b. 許容: 0.0 – 2.0
-    pub water: f32,
-    /// 粉体の Coulomb 摩擦係数 μ_b. 許容: 0.0 – 2.0
-    pub granular: f32,
-}
-
-/// Drucker-Prager 粉体パラメータ (soil または sand)
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DruckerPragerParams {
-    /// ヤング率 E [Pa]. 許容: 1.0 – 1e8
-    pub youngs_modulus_pa: f32,
-    /// ポアソン比 ν. 許容: 0.0 – 0.45
-    pub poisson_ratio: f32,
-    /// 内部摩擦角 φ [度]. 許容: 0.0 – 60.0
-    pub friction_deg: f32,
-    /// 凝着力 c [Pa]. 許容: 0.0 – 1e6
-    pub cohesion_pa: f32,
-    /// 硬化係数 h. 許容: 0.0 – 10.0
-    pub hardening: f32,
-}
-
 /// 水-粉体連成パラメータ
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CouplingParams {
@@ -103,16 +70,6 @@ pub struct PhysicsParams {
     pub water: WaterEosParams,
     /// 変形勾配クランプ
     pub deformation: DeformationClampParams,
-    /// APIC ↔ PIC ブレンド [Eq.32, physics.md]
-    pub apic: ApicBlendParams,
-    /// 地形境界 Coulomb 摩擦 [Eq.29, physics.md]
-    pub boundary: BoundaryFrictionParams,
-    /// Drucker-Prager 土壌パラメータ
-    pub soil: DruckerPragerParams,
-    /// Drucker-Prager 砂パラメータ
-    pub sand: DruckerPragerParams,
-    /// 粉体の引張クランプ [Pa]. 0.0 = 無効. 許容: 0.0 – 1e5
-    pub granular_tensile_clamp: f32,
     /// 水-粉体連成パラメータ
     pub coupling: CouplingParams,
     /// 実行制御・検証向けランタイム調整
@@ -132,29 +89,6 @@ impl Default for PhysicsParams {
                 j_max: 1.4,
                 c_max_norm: 80.0,
             },
-            apic: ApicBlendParams {
-                water: 0.95,
-                granular: 0.78,
-            },
-            boundary: BoundaryFrictionParams {
-                water: 0.3,
-                granular: 1.6,
-            },
-            soil: DruckerPragerParams {
-                youngs_modulus_pa: 2.0e4,
-                poisson_ratio: 0.28,
-                friction_deg: 52.0,
-                cohesion_pa: 400.0,
-                hardening: 1.0,
-            },
-            sand: DruckerPragerParams {
-                youngs_modulus_pa: 1.8e4,
-                poisson_ratio: 0.25,
-                friction_deg: 48.0,
-                cohesion_pa: 120.0,
-                hardening: 0.5,
-            },
-            granular_tensile_clamp: 0.0,
             coupling: CouplingParams {
                 drag_gamma: 1.0,
                 friction: 0.45,
@@ -205,18 +139,6 @@ impl PhysicsParams {
                 self.deformation.j_min, self.deformation.j_max
             ));
         }
-        check!(self.apic.water, "apic.water", 0.0, 1.0);
-        check!(self.apic.granular, "apic.granular", 0.0, 1.0);
-        check!(self.boundary.water, "boundary.water", 0.0, 2.0);
-        check!(self.boundary.granular, "boundary.granular", 0.0, 2.0);
-        Self::validate_dp(&self.soil, "soil")?;
-        Self::validate_dp(&self.sand, "sand")?;
-        check!(
-            self.granular_tensile_clamp,
-            "granular_tensile_clamp",
-            0.0,
-            1e5
-        );
         check!(self.coupling.drag_gamma, "coupling.drag_gamma", 0.0, 100.0);
         check!(self.coupling.friction, "coupling.friction", 0.0, 2.0);
         check!(
@@ -255,25 +177,6 @@ impl PhysicsParams {
                 self.runtime.max_substeps_per_frame
             ));
         }
-        Ok(())
-    }
-
-    fn validate_dp(dp: &DruckerPragerParams, prefix: &str) -> Result<(), String> {
-        macro_rules! check {
-            ($val:expr, $name:expr, $lo:expr, $hi:expr) => {
-                if !($val >= $lo && $val <= $hi) {
-                    return Err(format!(
-                        "{}.{}: {} は [{}, {}] の範囲外",
-                        prefix, $name, $val, $lo, $hi
-                    ));
-                }
-            };
-        }
-        check!(dp.youngs_modulus_pa, "youngs_modulus_pa", 1.0, 1e8);
-        check!(dp.poisson_ratio, "poisson_ratio", 0.0, 0.45);
-        check!(dp.friction_deg, "friction_deg", 0.0, 60.0);
-        check!(dp.cohesion_pa, "cohesion_pa", 0.0, 1e6);
-        check!(dp.hardening, "hardening", 0.0, 10.0);
         Ok(())
     }
 }

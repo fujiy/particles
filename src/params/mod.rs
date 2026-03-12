@@ -6,13 +6,15 @@
 // 4 ファイル構成:
 //   camera.ron     — カメラ初期位置・操作感度
 //   interface.ron  — UI/操作/配色
-//   physics.ron    — GPU MPM 物性・境界・連成
+//   material.ron   — 材質別の物性・粒子数・変換ルール
+//   physics.ron    — GPU MPM の全体物理・連成・runtime
 //   render.ron     — 水ドット・地形ドット描画
 //   palette.ron    — 水ドット材質パレット
 //   overlay.ron    — Overlay UI / SDF 描画パラメータ
 pub mod camera;
 mod color_serde;
 pub mod interface;
+pub mod material;
 pub mod overlay;
 pub mod palette;
 pub mod physics;
@@ -24,10 +26,12 @@ use bevy::render::extract_resource::ExtractResource;
 
 use camera::{CameraParams, CameraParamsLoader};
 use interface::{InterfaceParams, InterfaceParamsLoader};
+use material::MaterialParamsLoader;
 use overlay::{OverlayParams, OverlayParamsLoader};
 use palette::{PaletteParams, PaletteParamsLoader};
 use physics::{PhysicsParams, PhysicsParamsLoader};
 use render::{RenderParams, RenderParamsLoader};
+use crate::physics::material::MaterialParams;
 
 // ---------------------------------------------------------------------------
 // Handle resources (アセットロード追跡用)
@@ -37,6 +41,8 @@ use render::{RenderParams, RenderParamsLoader};
 pub struct CameraParamsHandle(pub Handle<CameraParams>);
 #[derive(Resource, Default)]
 pub struct InterfaceParamsHandle(pub Handle<InterfaceParams>);
+#[derive(Resource, Default)]
+pub struct MaterialParamsHandle(pub Handle<MaterialParams>);
 #[derive(Resource, Default)]
 pub struct PhysicsParamsHandle(pub Handle<PhysicsParams>);
 #[derive(Resource, Default)]
@@ -53,6 +59,8 @@ pub struct OverlayParamsHandle(pub Handle<OverlayParams>);
 pub struct ActiveCameraParams(pub CameraParams);
 #[derive(Resource, Clone)]
 pub struct ActiveInterfaceParams(pub InterfaceParams);
+#[derive(Resource, Clone, ExtractResource)]
+pub struct ActiveMaterialParams(pub MaterialParams);
 #[derive(Resource)]
 pub struct ActivePhysicsParams(pub PhysicsParams);
 #[derive(Resource, Clone, ExtractResource)]
@@ -69,6 +77,11 @@ impl Default for ActiveCameraParams {
 impl Default for ActiveInterfaceParams {
     fn default() -> Self {
         Self(InterfaceParams::default())
+    }
+}
+impl Default for ActiveMaterialParams {
+    fn default() -> Self {
+        Self(MaterialParams::default())
     }
 }
 impl Default for ActivePhysicsParams {
@@ -101,24 +114,28 @@ impl Plugin for ParamsPlugin {
     fn build(&self, app: &mut App) {
         app.init_asset::<CameraParams>()
             .init_asset::<InterfaceParams>()
+            .init_asset::<MaterialParams>()
             .init_asset::<PhysicsParams>()
             .init_asset::<RenderParams>()
             .init_asset::<PaletteParams>()
             .init_asset::<OverlayParams>()
             .register_asset_loader(CameraParamsLoader)
             .register_asset_loader(InterfaceParamsLoader)
+            .register_asset_loader(MaterialParamsLoader)
             .register_asset_loader(PhysicsParamsLoader)
             .register_asset_loader(RenderParamsLoader)
             .register_asset_loader(PaletteParamsLoader)
             .register_asset_loader(OverlayParamsLoader)
             .init_resource::<CameraParamsHandle>()
             .init_resource::<InterfaceParamsHandle>()
+            .init_resource::<MaterialParamsHandle>()
             .init_resource::<PhysicsParamsHandle>()
             .init_resource::<RenderParamsHandle>()
             .init_resource::<PaletteParamsHandle>()
             .init_resource::<OverlayParamsHandle>()
             .init_resource::<ActiveCameraParams>()
             .init_resource::<ActiveInterfaceParams>()
+            .init_resource::<ActiveMaterialParams>()
             .init_resource::<ActivePhysicsParams>()
             .init_resource::<ActiveRenderParams>()
             .init_resource::<ActivePaletteParams>()
@@ -129,6 +146,7 @@ impl Plugin for ParamsPlugin {
                 (
                     hot_reload_camera,
                     hot_reload_interface,
+                    hot_reload_material,
                     hot_reload_physics,
                     hot_reload_render,
                     hot_reload_palette,
@@ -146,6 +164,7 @@ fn load_all_params(
     asset_server: Res<AssetServer>,
     mut camera_h: ResMut<CameraParamsHandle>,
     mut interface_h: ResMut<InterfaceParamsHandle>,
+    mut material_h: ResMut<MaterialParamsHandle>,
     mut physics_h: ResMut<PhysicsParamsHandle>,
     mut render_h: ResMut<RenderParamsHandle>,
     mut palette_h: ResMut<PaletteParamsHandle>,
@@ -153,6 +172,7 @@ fn load_all_params(
 ) {
     camera_h.0 = asset_server.load("params/camera.ron");
     interface_h.0 = asset_server.load("params/interface.ron");
+    material_h.0 = asset_server.load("params/material.ron");
     physics_h.0 = asset_server.load("params/physics.ron");
     render_h.0 = asset_server.load("params/render.ron");
     palette_h.0 = asset_server.load("params/palette.ron");
@@ -185,6 +205,25 @@ fn hot_reload_interface(
         &mut events,
         "interface.ron",
     );
+}
+
+fn hot_reload_material(
+    handle: Res<MaterialParamsHandle>,
+    assets: Res<Assets<MaterialParams>>,
+    mut material_params: ResMut<MaterialParams>,
+    mut active: ResMut<ActiveMaterialParams>,
+    mut events: MessageReader<AssetEvent<MaterialParams>>,
+) {
+    let mut next = *material_params;
+    apply_if_valid(
+        &handle.0,
+        &assets,
+        &mut next,
+        &mut events,
+        "material.ron",
+    );
+    *material_params = next;
+    active.0 = *material_params;
 }
 
 fn hot_reload_physics(
@@ -255,6 +294,11 @@ impl Validatable for CameraParams {
     }
 }
 impl Validatable for InterfaceParams {
+    fn validate(&self) -> Result<(), String> {
+        self.validate()
+    }
+}
+impl Validatable for MaterialParams {
     fn validate(&self) -> Result<(), String> {
         self.validate()
     }

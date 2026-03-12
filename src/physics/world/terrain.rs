@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use bevy::prelude::*;
 
+use crate::physics::material::terrain_material_from_id;
+
 pub use super::constants::{
     CELL_SIZE_M, CHUNK_SIZE, CHUNK_SIZE_I32, CHUNK_WORLD_SIZE_M, DEFAULT_SOLID_HP,
     WORLD_MAX_CHUNK_X, WORLD_MAX_CHUNK_Y, WORLD_MIN_CHUNK_X, WORLD_MIN_CHUNK_Y,
@@ -584,12 +586,9 @@ impl TerrainWorld {
 }
 
 fn material_id_to_terrain_cell(material_id: u16) -> TerrainCell {
-    match material_id {
-        1 => TerrainCell::solid(TerrainMaterial::Stone),
-        2 => TerrainCell::solid(TerrainMaterial::Soil),
-        3 => TerrainCell::solid(TerrainMaterial::Sand),
-        _ => TerrainCell::Empty,
-    }
+    terrain_material_from_id(material_id)
+        .map(TerrainCell::solid)
+        .unwrap_or(TerrainCell::Empty)
 }
 
 pub fn world_to_cell(world_position: Vec2) -> IVec2 {

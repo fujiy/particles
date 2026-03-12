@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -6,7 +6,9 @@ use bevy::window::PrimaryWindow;
 use super::*;
 use crate::params::ActiveInterfaceParams;
 use crate::physics::gpu_mpm::sync::{GpuWorldEditCommand, GpuWorldEditRequest};
-use crate::physics::material::particles_per_cell;
+use crate::physics::material::{
+    MaterialParams, particles_per_cell_with_params, terrain_break_rule,
+};
 use crate::render::TerrainGeneratedChunkCache;
 
 const TOOL_PREFETCH_RADIUS_CHUNKS: i32 = 1;
@@ -39,6 +41,7 @@ pub(super) fn handle_world_interactions(
         finalize_stone_stroke(
             &mut interaction_state.stone_stroke,
             selected_tool,
+            *material_params,
             &mut gpu_world_edit_requests,
         );
         interaction_state.last_drag_world = None;
@@ -62,8 +65,12 @@ pub(super) fn handle_world_interactions(
     } else if keyboard.just_pressed(KeyCode::Digit7) || keyboard.just_pressed(KeyCode::Numpad7) {
         select_world_tool(&mut interaction_state, Some(WorldTool::SandGranular));
     } else if keyboard.just_pressed(KeyCode::Digit8) || keyboard.just_pressed(KeyCode::Numpad8) {
-        select_world_tool(&mut interaction_state, Some(WorldTool::Break));
+        select_world_tool(&mut interaction_state, Some(WorldTool::GrassSolid));
     } else if keyboard.just_pressed(KeyCode::Digit9) || keyboard.just_pressed(KeyCode::Numpad9) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::GrassGranular));
+    } else if keyboard.just_pressed(KeyCode::Digit0) || keyboard.just_pressed(KeyCode::Numpad0) {
+        select_world_tool(&mut interaction_state, Some(WorldTool::Break));
+    } else if keyboard.just_pressed(KeyCode::Minus) {
         select_world_tool(&mut interaction_state, Some(WorldTool::Delete));
     }
 
@@ -101,6 +108,7 @@ pub(super) fn handle_world_interactions(
         finalize_stone_stroke(
             &mut interaction_state.stone_stroke,
             selected_tool,
+            *material_params,
             &mut gpu_world_edit_requests,
         );
         interaction_state.last_drag_world = None;
@@ -121,6 +129,7 @@ pub(super) fn handle_world_interactions(
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
+                *material_params,
                 &mut gpu_world_edit_requests,
             );
             let mut spawn_cells = Vec::new();
@@ -150,7 +159,10 @@ pub(super) fn handle_world_interactions(
                     cells: spawn_cells,
                     command: GpuWorldEditCommand::AddParticles {
                         material: ParticleMaterial::WaterLiquid,
-                        count_per_cell: particles_per_cell(ParticleMaterial::WaterLiquid),
+                        count_per_cell: particles_per_cell_with_params(
+                            *material_params,
+                            ParticleMaterial::WaterLiquid,
+                        ),
                     },
                 });
             }
@@ -198,7 +210,7 @@ pub(super) fn handle_world_interactions(
                         cells: spawn_cells,
                         command: GpuWorldEditCommand::AddParticles {
                             material,
-                            count_per_cell: particles_per_cell(material),
+                            count_per_cell: particles_per_cell_with_params(*material_params, material),
                         },
                     });
                 }
@@ -210,6 +222,7 @@ pub(super) fn handle_world_interactions(
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
+                *material_params,
                 &mut gpu_world_edit_requests,
             );
             let mut delete_cells = HashSet::new();
@@ -247,25 +260,40 @@ pub(super) fn handle_world_interactions(
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
+                *material_params,
                 &mut gpu_world_edit_requests,
             );
-            let mut removed_terrain_cells = HashSet::new();
+            let mut broken_solids = Vec::new();
             stroke_points(previous_world, cursor_world, step_m, |point| {
-                removed_terrain_cells.extend(break_terrain_solids_in_radius(
+                broken_solids.extend(break_terrain_solids_in_radius(
                     &mut terrain_world,
                     &mut generated_chunk_cache,
                     point,
                     break_radius_m,
                 ));
             });
-            terrain_changed |= !removed_terrain_cells.is_empty();
-            if !removed_terrain_cells.is_empty() {
-                gpu_world_edit_requests.write(GpuWorldEditRequest {
-                    cells: removed_terrain_cells.iter().copied().collect(),
-                    command: GpuWorldEditCommand::RemoveParticles {
-                        max_count: u32::MAX,
-                    },
-                });
+            terrain_changed |= !broken_solids.is_empty();
+            if !broken_solids.is_empty() {
+                let mut grouped_adds: HashMap<(ParticleMaterial, u32), Vec<IVec2>> =
+                    HashMap::default();
+                for (cell, source_material) in broken_solids {
+                    let rule = terrain_break_rule(*material_params, source_material);
+                    for output in rule.outputs.iter().copied().take(rule.output_count as usize) {
+                        grouped_adds
+                            .entry((output.material, output.count_per_cell))
+                            .or_default()
+                            .push(cell);
+                    }
+                }
+                for ((material, count_per_cell), cells) in grouped_adds {
+                    gpu_world_edit_requests.write(GpuWorldEditRequest {
+                        cells,
+                        command: GpuWorldEditCommand::AddParticles {
+                            material,
+                            count_per_cell,
+                        },
+                    });
+                }
             }
         }
         Some(_) => {}
@@ -275,6 +303,7 @@ pub(super) fn handle_world_interactions(
             finalize_stone_stroke(
                 &mut interaction_state.stone_stroke,
                 selected_tool,
+                *material_params,
                 &mut gpu_world_edit_requests,
             );
         }
@@ -329,6 +358,7 @@ pub(super) fn draw_world_tool_hover_highlight(
 fn finalize_stone_stroke(
     stroke: &mut StoneStrokeState,
     selected_tool: Option<WorldTool>,
+    material_params: MaterialParams,
     gpu_world_edit_requests: &mut MessageWriter<GpuWorldEditRequest>,
 ) {
     if !stroke.active {
@@ -352,7 +382,7 @@ fn finalize_stone_stroke(
                 cells,
                 command: GpuWorldEditCommand::AddParticles {
                     material,
-                    count_per_cell: particles_per_cell(material),
+                    count_per_cell: particles_per_cell_with_params(material_params, material),
                 },
             });
         }
@@ -463,11 +493,11 @@ fn break_terrain_solids_in_radius(
     generated_chunk_cache: &mut TerrainGeneratedChunkCache,
     center: Vec2,
     radius: f32,
-) -> HashSet<IVec2> {
+) -> Vec<(IVec2, TerrainMaterial)> {
     let min_cell = world_to_cell(center - Vec2::splat(radius));
     let max_cell = world_to_cell(center + Vec2::splat(radius));
     let radius2 = radius * radius;
-    let mut removed = HashSet::new();
+    let mut removed = Vec::new();
     let mut ready_chunks = HashSet::new();
     let mut missing_chunks = HashSet::new();
 
@@ -496,9 +526,8 @@ fn break_terrain_solids_in_radius(
             else {
                 continue;
             };
-            let _material = material;
             if terrain_world.set_cell(cell, TerrainCell::Empty) {
-                removed.insert(cell);
+                removed.push((cell, material));
             }
         }
     }

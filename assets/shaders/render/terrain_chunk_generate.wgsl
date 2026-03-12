@@ -1,7 +1,7 @@
 /// TerrainChunkGenerate compute pass.
 ///
 /// Fills a linear material-ID buffer for one chunk so the CPU can read it back.
-/// Material encoding: 0 = Empty, 1 = Stone, 2 = Soil, 3 = Sand.
+/// Material encoding: 0 = Empty, 1 = Stone, 2 = Soil, 3 = Sand, 4 = Grass.
 #import particles::terrain_gen::{material_for_cell}
 
 struct ChunkGenerateParams {

@@ -1,6 +1,6 @@
 // GPU-side chunk occupancy/resident flag maintenance for overlay and diagnostics.
 
-#import particles::mpm_types::{GpuParticle, MpmParams}
+#import particles::mpm_types::{GpuParticle, MpmParams, INVALID_PARTICLE_SLOT, particle_slot_id}
 
 struct GpuChunkMetaAtomic {
     chunk_coord_x: i32,
@@ -58,8 +58,8 @@ fn accumulate_chunk_counts(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let p = particles[pid];
-    let home_slot = p.home_chunk_slot_id;
-    if home_slot >= params.resident_chunk_count || home_slot == INVALID_SLOT {
+    let home_slot = particle_slot_id(p);
+    if home_slot >= params.resident_chunk_count || home_slot == INVALID_PARTICLE_SLOT {
         return;
     }
 

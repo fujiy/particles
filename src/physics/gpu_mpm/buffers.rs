@@ -5,6 +5,10 @@
 use bevy::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
+use crate::physics::material::{
+    INVALID_PACKED_PARTICLE_SLOT, ParticleMaterial, pack_particle_home_slot,
+};
+
 pub const INVALID_CHUNK_SLOT_ID: u32 = u32::MAX;
 pub const CHUNK_EVENT_KIND_NEWLY_OCCUPIED: u32 = 1;
 pub const CHUNK_EVENT_KIND_NEWLY_EMPTY: u32 = 2;
@@ -62,7 +66,7 @@ const _: () = assert!(std::mem::size_of::<GpuActiveTileRecord>() == 8);
 
 // ---------------------------------------------------------------------------
 // GPU-side particle layout (matches mpm_types.wgsl::GpuParticle, 72 bytes)
-// Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) v_vol(4) phase_id(4) phi_p(4) home_slot(4) = 72
+// Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) v_vol(4) phase_id(4) phi_p(4) home_slot+material(4) = 72
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -98,6 +102,7 @@ impl GpuParticle {
         c: Mat2,
         v_vol: f32,
         phase_id: u8,
+        material: ParticleMaterial,
     ) -> Self {
         Self {
             x: pos.to_array(),
@@ -110,7 +115,7 @@ impl GpuParticle {
             v_vol,
             phase_id: phase_id as u32,
             phi_p: 1.0,
-            home_chunk_slot_id: INVALID_CHUNK_SLOT_ID,
+            home_chunk_slot_id: pack_particle_home_slot(INVALID_PACKED_PARTICLE_SLOT, material),
         }
     }
 }
@@ -150,11 +155,12 @@ pub struct GpuWorldEditAddOp {
     pub count_per_cell: u32,
     pub particle_offset: u32,
     pub phase_id: u32,
+    pub material_id: u32,
     pub mass: f32,
     pub v0: f32,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuWorldEditAddOp>() == 32);
+const _: () = assert!(std::mem::size_of::<GpuWorldEditAddOp>() == 36);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]

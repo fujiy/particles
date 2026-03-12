@@ -298,6 +298,40 @@
 - 完了条件:
   - chunk構造が長時間実行で安定し、異常時の挙動が定義どおりになる。
 
+### [MAT-BLOCK-01] ブロック材質拡張（stone granular / grass）と break 変換の GPU 化
+
+- Status: `In Progress`
+- 背景:
+  - 現行の材質実装は `phase_id` 中心で、`stone granular` / `grass granular` のような「同一 phase 内の別材質」を保持できない。
+  - world edit の `Break` ツールは `Delete` と同じ remove-only 動作で、solid cell を対応 granular へ変換する仕様になっていない。
+  - `physics.ron` には材質ごとの物性・粒子数などが混在しており、「全体物理」と「材質定義」の責務分離が不足している。
+- スコープ:
+  - `material.ron` を導入し、材質ごとの粒子数、描画パレット、phase/material 対応、破壊変換ルール、Drucker-Prager 物性を移管する。
+  - `stone granular` を world edit / save-load / autoverify / render 経路で識別可能にする。
+  - `grass solid` / `grass granular` を追加し、`grass solid` は soil と同物性、破壊時は `grass:soil = 1:3` 比率で粒子化する。
+  - `Break` ツールを「solid cell を消して granular を GPU add/remove queue で生成する」挙動へ更新する。
+  - terrain 描画に grass edge ルールを追加し、隣接 solid が無い辺へ grass palette を約 2 dot 深さで適用する。
+- Subtasks:
+  - [x] `docs/tasks.md` に本 Work Unit を追加し、設計前提と検証artifactを明記する。
+  - [x] `assets/params/material.ron` と対応 asset loader / active params を追加し、材質別パラメータを `physics.ron` から移管する。
+  - [x] `TerrainMaterial` / `ParticleMaterial` / save-load / UI / autoverify を stone granular / grass solid / grass granular 対応へ拡張する。
+  - [x] GPU 粒子が material id を保持できるようにし、water/terrain render で stone granular / grass granular を描き分ける。
+  - [ ] `Break` ツールを solid->granular 変換へ更新し、粒子追加は GPU world edit queue 経路で処理する。
+  - [x] terrain compose / far update に grass edge 描画を追加し、screenshot artifact で見た目を確認する。
+  - [x] `cargo check` / `cargo test --lib` と runtime autoverify artifact で回帰確認する。
+- 完了条件:
+  - stone granular / grass solid / grass granular が UI 編集、save-load、autoverify、描画で一貫して扱える。
+  - `Break` ツールが `Delete` と異なる変換動作を行い、solid cell ごとに設定材質の granular が GPU queue で生成される。
+  - `physics.ron` には全体物理パラメータのみが残り、材質別設定は `material.ron` に集約される。
+  - grass solid の露出辺に grass palette が適用され、破壊時の 1:3 変換比率が params で調整可能になる。
+- Progress:
+  - 2026-03-12: Work Unit を追加。`material.ron` 導入、GPU material id 保持、break 変換、grass edge 描画、artifact 検証を一括で進める方針を確定。
+  - 2026-03-12: `material.ron` / `MaterialParams` asset を追加し、材質別の APIC・境界摩擦・Drucker-Prager 物性・粒子数・break 出力を `physics.ron` から分離。grass の break を `GrassGranular x4 + SoilGranular x12` で params 化した。
+  - 2026-03-12: `TerrainMaterial::Grass`, `ParticleMaterial::{StoneGranular,GrassSolid,GrassGranular}` を save/load・UI・scenario 表示・GPU packed material id 経路へ接続し、水ドット描画で stone/soil/sand/grass granular を分離表示できるよう更新した。
+  - 2026-03-12: terrain compose / far update を更新し、grass solid は fill を soil ベースに保ちつつ、露出辺のみ grass palette を約 2 dot 幅で描くよう変更。runtime screenshot artifact `/Users/yuuki.fj/Develop/particles/artifacts/autoverify/terrain_edit_grass_edge_verify.png` で上面の grass edge 表示を確認した。
+  - 2026-03-12: `cargo check` / `cargo test --lib`（51件 pass）を再実行。runtime 検証で見つかった `material.ron` の fixed-array 記法、`mpm_types.wgsl` の packed slot mask literal、`water_dot_gpu` render bind group 本数不整合も修正した。
+  - 2026-03-12: 地形差分の正本は `TerrainWorld`（CPU）とする前提で確定。`Delete` / `Break` とも terrain cell 更新は CPU 側 `set_cell` を正本とし、GPU は粒子編集と描画キャッシュ更新先として扱う。
+
 ### [PARAM-HEX-01] RONカラー記法をhex形式へ拡張
 
 - Status: `Done`

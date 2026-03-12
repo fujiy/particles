@@ -7,7 +7,7 @@
 /// Texture layout: one texel == one world cell. `texel (tx, ty)` corresponds to
 /// world cell `(cache_origin_x + tx, cache_origin_y + ty)`.
 ///
-/// Material encoding: 0 = Empty, 1 = Stone, 2 = Soil, 3 = Sand.
+/// Material encoding: 0 = Empty, 1 = Stone, 2 = Soil, 3 = Sand, 4 = Grass.
 #import particles::terrain_gen::{material_for_cell}
 
 struct NearParams {

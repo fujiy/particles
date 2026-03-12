@@ -982,6 +982,12 @@ fn terrain_palette(material: TerrainMaterial) -> [[u8; 4]; 4] {
             [201, 181, 137, 255],
             [216, 196, 150, 255],
         ],
+        TerrainMaterial::Grass => [
+            [105, 79, 56, 255],
+            [119, 91, 67, 255],
+            [133, 103, 78, 255],
+            [147, 115, 88, 255],
+        ],
     }
 }
 
@@ -1001,6 +1007,9 @@ fn particle_palette(material: ParticleMaterial) -> [[u8; 4]; 4] {
         }
         ParticleMaterial::SandSolid | ParticleMaterial::SandGranular => {
             terrain_palette(TerrainMaterial::Sand)
+        }
+        ParticleMaterial::GrassSolid | ParticleMaterial::GrassGranular => {
+            terrain_palette(TerrainMaterial::Grass)
         }
     }
 }
@@ -1064,6 +1073,8 @@ fn particle_material_label(material: ParticleMaterial) -> &'static str {
         ParticleMaterial::SoilGranular => "SoilGranular",
         ParticleMaterial::SandSolid => "SandSolid",
         ParticleMaterial::SandGranular => "SandGranular",
+        ParticleMaterial::GrassSolid => "GrassSolid",
+        ParticleMaterial::GrassGranular => "GrassGranular",
     }
 }
 
@@ -1072,6 +1083,7 @@ fn terrain_material_label(material: TerrainMaterial) -> &'static str {
         TerrainMaterial::Stone => "Stone",
         TerrainMaterial::Soil => "Soil",
         TerrainMaterial::Sand => "Sand",
+        TerrainMaterial::Grass => "Grass",
     }
 }
 

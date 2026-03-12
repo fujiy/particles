@@ -1,7 +1,7 @@
 // Apply CPU-resolved mover results to particle home slots.
 // One thread per mover result record.
 
-#import particles::mpm_types::{GpuParticle, MpmParams}
+#import particles::mpm_types::{GpuParticle, MpmParams, repack_particle_home_slot}
 
 struct GpuMoverResult {
     particle_id: u32,
@@ -26,5 +26,7 @@ fn apply_mover_results(@builtin(global_invocation_id) gid: vec3<u32>) {
     if record.particle_id >= params.particle_count {
         return;
     }
-    particles[record.particle_id].home_chunk_slot_id = record.new_home_slot_id;
+    let packed_home = particles[record.particle_id].home_chunk_slot_id;
+    particles[record.particle_id].home_chunk_slot_id =
+        repack_particle_home_slot(packed_home, record.new_home_slot_id);
 }

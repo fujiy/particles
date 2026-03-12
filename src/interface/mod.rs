@@ -5,7 +5,7 @@ use bevy::prelude::*;
 use crate::params::interface::InterfaceColorParams;
 use crate::physics::cell_to_world_center;
 use crate::physics::material::ParticleMaterial;
-use crate::physics::material::{MaterialParams, terrain_boundary_radius_m};
+use crate::physics::material::terrain_boundary_radius_m;
 use crate::physics::profiler::{
     RuntimeProfileLane, RuntimeProfileSnapshot, RuntimeProfileSegment, update_runtime_profile_snapshot,
 };
@@ -60,7 +60,7 @@ const MATERIAL_PATTERN_GRANULAR: MaterialPattern8 = [
     [true, true, true, true, true, true, true, true],
 ];
 
-const WORLD_TOOLBAR_TOOLS: [WorldTool; 9] = [
+const WORLD_TOOLBAR_TOOLS: [WorldTool; 11] = [
     WorldTool::WaterLiquid,
     WorldTool::StoneSolid,
     WorldTool::StoneGranular,
@@ -68,6 +68,8 @@ const WORLD_TOOLBAR_TOOLS: [WorldTool; 9] = [
     WorldTool::SoilGranular,
     WorldTool::SandSolid,
     WorldTool::SandGranular,
+    WorldTool::GrassSolid,
+    WorldTool::GrassGranular,
     WorldTool::Break,
     WorldTool::Delete,
 ];
@@ -198,6 +200,8 @@ enum WorldTool {
     SoilGranular,
     SandSolid,
     SandGranular,
+    GrassSolid,
+    GrassGranular,
     Break,
     Delete,
 }
@@ -212,6 +216,8 @@ impl WorldTool {
             Self::SoilGranular => "Soil Granular",
             Self::SandSolid => "Sand Solid",
             Self::SandGranular => "Sand Granular",
+            Self::GrassSolid => "Grass Solid",
+            Self::GrassGranular => "Grass Granular",
             Self::Break => "Break",
             Self::Delete => "Delete",
         }
@@ -226,6 +232,8 @@ impl WorldTool {
             Self::SoilGranular => Some(ParticleMaterial::SoilGranular),
             Self::SandSolid => Some(ParticleMaterial::SandSolid),
             Self::SandGranular => Some(ParticleMaterial::SandGranular),
+            Self::GrassSolid => Some(ParticleMaterial::GrassSolid),
+            Self::GrassGranular => Some(ParticleMaterial::GrassGranular),
             Self::Break => None,
             Self::Delete => None,
         }
@@ -236,6 +244,7 @@ impl WorldTool {
             Self::StoneSolid => Some(TerrainMaterial::Stone),
             Self::SoilSolid => Some(TerrainMaterial::Soil),
             Self::SandSolid => Some(TerrainMaterial::Sand),
+            Self::GrassSolid => Some(TerrainMaterial::Grass),
             _ => None,
         }
     }
@@ -243,7 +252,10 @@ impl WorldTool {
     fn is_granular(self) -> bool {
         matches!(
             self,
-            Self::StoneGranular | Self::SoilGranular | Self::SandGranular
+            Self::StoneGranular
+                | Self::SoilGranular
+                | Self::SandGranular
+                | Self::GrassGranular
         )
     }
 
@@ -288,6 +300,8 @@ struct WorldToolIconSet {
     soil_granular: Handle<Image>,
     sand_solid: Handle<Image>,
     sand_granular: Handle<Image>,
+    grass_solid: Handle<Image>,
+    grass_granular: Handle<Image>,
     break_icon: Handle<Image>,
     delete: Handle<Image>,
 }

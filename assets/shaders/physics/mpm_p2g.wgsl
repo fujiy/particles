@@ -4,7 +4,7 @@
 // Uses MLS-MPM with quadratic B-spline kernel.
 // Atomic float additions via atomicAdd on bitcast u32.
 
-#import particles::mpm_types::{GpuParticle, MpmParams, PHASE_WATER, PHASE_GRANULAR_SOIL, phase_is_granular, bspline_w_dw, mat2_det}
+#import particles::mpm_types::{GpuParticle, MpmParams, PHASE_WATER, PHASE_GRANULAR_SOIL, phase_is_granular, particle_slot_id, bspline_w_dw, mat2_det}
 
 // Fill-fraction thresholds for tension suppression [Eqs.10-11, physics.md].
 // Below PHI_MIN: tension fully suppressed (s=0); above PHI_MAX: full tension (s=1).
@@ -99,7 +99,7 @@ fn p2g(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let p = particles[pid];
-    let home_slot = p.home_chunk_slot_id;
+    let home_slot = particle_slot_id(p);
     if home_slot >= params.resident_chunk_count || home_slot == INVALID_SLOT {
         return;
     }

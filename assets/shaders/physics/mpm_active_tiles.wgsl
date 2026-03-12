@@ -1,6 +1,6 @@
 // Active-tile reconstruction for sparse clear/grid-update dispatch.
 
-#import particles::mpm_types::{GpuParticle, MpmParams}
+#import particles::mpm_types::{GpuParticle, MpmParams, INVALID_PARTICLE_SLOT, particle_slot_id}
 
 struct GpuChunkMetaAtomic {
     chunk_coord_x: i32,
@@ -79,8 +79,8 @@ fn mark_active_tiles(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let p = particles[pid];
-    let home_slot = p.home_chunk_slot_id;
-    if home_slot >= params_mark.resident_chunk_count || home_slot == INVALID_SLOT {
+    let home_slot = particle_slot_id(p);
+    if home_slot >= params_mark.resident_chunk_count || home_slot == INVALID_PARTICLE_SLOT {
         return;
     }
     let cdim_i = i32(params_mark.chunk_node_dim);

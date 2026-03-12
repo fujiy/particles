@@ -31,12 +31,26 @@ struct ComposeParams {
     _pad2:         f32,
 }
 
+struct TerrainPalette {
+    stone: array<vec4<f32>, 4>,
+    soil:  array<vec4<f32>, 4>,
+    sand:  array<vec4<f32>, 4>,
+    grass: array<vec4<f32>, 4>,
+}
+
 @group(0) @binding(0) var<uniform> view:    View;
 @group(0) @binding(1) var<uniform> params:  ComposeParams;
-@group(0) @binding(2) var          near_base_tex: texture_2d<u32>;
-@group(0) @binding(3) var          near_override_tex: texture_2d<u32>;
-@group(0) @binding(4) var          far_tex:  texture_2d<u32>;
-@group(0) @binding(5) var          back_tex: texture_2d<u32>;
+@group(0) @binding(2) var<uniform> palette: TerrainPalette;
+@group(0) @binding(3) var          near_base_tex: texture_2d<u32>;
+@group(0) @binding(4) var          near_override_tex: texture_2d<u32>;
+@group(0) @binding(5) var          far_tex:  texture_2d<u32>;
+@group(0) @binding(6) var          back_tex: texture_2d<u32>;
+
+const NEAR_OVERRIDE_EMPTY_SENTINEL: u32 = 65535u;
+const GRASS_EDGE_DEPTH_BASE_DOTS: i32 = 4;
+const GRASS_EDGE_DEPTH_VARIATION_DOTS: i32 = 1;
+const SURFACE_NOISE_PERIOD_DOTS: f32 = 3.0;
+const SURFACE_HOLE_THRESHOLD: f32 = 0.72;
 
 // ── Vertex (full-screen quad) ─────────────────────────────────────────────────
 
@@ -71,13 +85,7 @@ fn srgb_to_linear(x: f32) -> f32 {
     return pow((x + 0.055) / 1.055, 2.4);
 }
 
-fn srgb8(r: f32, g: f32, b: f32) -> vec3<f32> {
-    return vec3<f32>(srgb_to_linear(r / 255.0),
-                     srgb_to_linear(g / 255.0),
-                     srgb_to_linear(b / 255.0));
-}
-
-fn deterministic_palette_index(x: i32, y: i32, seed: u32) -> u32 {
+fn deterministic_hash_u32(x: i32, y: i32, seed: u32) -> u32 {
     var s = u32(x) * 0x45d9f3bu;
     s = s ^ (u32(y) * 0x27d4eb2du);
     s = s ^ seed;
@@ -86,35 +94,116 @@ fn deterministic_palette_index(x: i32, y: i32, seed: u32) -> u32 {
     s = s ^ (s >> 15u);
     s = s * 0x846ca68bu;
     s = s ^ (s >> 16u);
-    return s & 0x3u;
+    return s;
+}
+
+fn deterministic_palette_index(x: i32, y: i32, seed: u32) -> u32 {
+    return deterministic_hash_u32(x, y, seed) & 0x3u;
+}
+
+fn hash_to_unit01(h: u32) -> f32 {
+    return f32(h & 0x00ffffffu) / f32(0x01000000u);
+}
+
+fn smoothstep01(t: f32) -> f32 {
+    let c = clamp(t, 0.0, 1.0);
+    return c * c * (3.0 - 2.0 * c);
+}
+
+fn value_noise_2d(p: vec2<f32>, seed: u32) -> f32 {
+    let x0 = i32(floor(p.x));
+    let y0 = i32(floor(p.y));
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
+
+    let tx = smoothstep01(p.x - f32(x0));
+    let ty = smoothstep01(p.y - f32(y0));
+
+    let v00 = hash_to_unit01(deterministic_hash_u32(x0, y0, seed));
+    let v10 = hash_to_unit01(deterministic_hash_u32(x1, y0, seed));
+    let v01 = hash_to_unit01(deterministic_hash_u32(x0, y1, seed));
+    let v11 = hash_to_unit01(deterministic_hash_u32(x1, y1, seed));
+
+    let vx0 = mix(v00, v10, tx);
+    let vx1 = mix(v01, v11, tx);
+    return mix(vx0, vx1, ty);
 }
 
 fn stone_color(idx: u32) -> vec3<f32> {
-    if idx == 0u { return srgb8( 70.0,  67.0,  63.0); }
-    if idx == 1u { return srgb8( 83.0,  79.0,  74.0); }
-    if idx == 2u { return srgb8( 95.0,  90.0,  84.0); }
-    return          srgb8(108.0, 103.0,  96.0);
+    return palette.stone[idx].rgb;
 }
 
 fn soil_color(idx: u32) -> vec3<f32> {
-    if idx == 0u { return srgb8(105.0,  79.0,  56.0); }
-    if idx == 1u { return srgb8(119.0,  91.0,  67.0); }
-    if idx == 2u { return srgb8(133.0, 103.0,  78.0); }
-    return          srgb8(147.0, 115.0,  88.0);
+    return palette.soil[idx].rgb;
 }
 
 fn sand_color(idx: u32) -> vec3<f32> {
-    if idx == 0u { return srgb8(170.0, 150.0, 110.0); }
-    if idx == 1u { return srgb8(186.0, 166.0, 124.0); }
-    if idx == 2u { return srgb8(201.0, 181.0, 137.0); }
-    return          srgb8(216.0, 196.0, 150.0);
+    return palette.sand[idx].rgb;
 }
 
-fn terrain_color(material: u32, dot_x: i32, dot_y: i32, seed: u32) -> vec3<f32> {
-    let shade = deterministic_palette_index(dot_x, dot_y, seed);
+fn grass_color(idx: u32) -> vec3<f32> {
+    return palette.grass[idx].rgb;
+}
+
+fn fill_palette_index(dot_x: i32, dot_y: i32, seed: u32) -> u32 {
+    return deterministic_palette_index(dot_x, dot_y, seed);
+}
+
+fn grass_palette_index(dot_x: i32, dot_y: i32, seed: u32) -> u32 {
+    return deterministic_palette_index(dot_x - 7, dot_y + 41, seed ^ 0x4c91u);
+}
+
+fn terrain_fill_color(material: u32, dot_x: i32, dot_y: i32, seed: u32) -> vec3<f32> {
+    let shade = fill_palette_index(dot_x, dot_y, seed);
     if material == 1u { return stone_color(shade); }
     if material == 2u { return soil_color(shade); }
-    return sand_color(shade);
+    if material == 3u { return sand_color(shade); }
+    return soil_color(shade);
+}
+
+fn grass_edge_color(dot_x: i32, dot_y: i32, seed: u32) -> vec3<f32> {
+    return grass_color(grass_palette_index(dot_x, dot_y, seed));
+}
+
+fn grass_depth_from_noise(noise: f32, dots_per_cell: i32) -> i32 {
+    let centered = noise * 2.0 - 1.0;
+    let offset = select(select(0, 1, centered > 0.35), -1, centered < -0.35);
+    return clamp(
+        GRASS_EDGE_DEPTH_BASE_DOTS + offset * GRASS_EDGE_DEPTH_VARIATION_DOTS,
+        1,
+        dots_per_cell,
+    );
+}
+
+fn surface_hole_alpha(
+    dot: vec2<i32>,
+    left_surface: bool,
+    right_surface: bool,
+    bottom_surface: bool,
+    top_surface: bool,
+    seed: u32,
+) -> f32 {
+    if !(left_surface || right_surface || bottom_surface || top_surface) {
+        return 1.0;
+    }
+    if (left_surface && top_surface)
+        || (right_surface && top_surface)
+        || (left_surface && bottom_surface)
+        || (right_surface && bottom_surface)
+    {
+        return 0.0;
+    }
+    let noise = value_noise_2d(
+        vec2<f32>(
+            f32(dot.x) / SURFACE_NOISE_PERIOD_DOTS + 17.3,
+            f32(dot.y) / SURFACE_NOISE_PERIOD_DOTS - 11.7,
+        ),
+        seed ^ 0x61c7u,
+    );
+    if noise >= SURFACE_HOLE_THRESHOLD {
+        return 0.0;
+    }
+    return 1.0;
 }
 
 fn positive_mod(x: i32, m: i32) -> i32 {
@@ -141,7 +230,7 @@ fn sample_weighted_color(
         return;
     }
     let weighted = w * a;
-    (*inout_color) = (*inout_color) + terrain_color(material, dot.x, dot.y, seed) * weighted;
+    (*inout_color) = (*inout_color) + terrain_fill_color(material, dot.x, dot.y, seed) * weighted;
     (*inout_alpha) = (*inout_alpha) + weighted;
 }
 
@@ -226,6 +315,129 @@ fn layer_over(bg: vec3<f32>, fg: vec3<f32>, fg_alpha: f32) -> vec3<f32> {
     return bg * (1.0 - a) + fg * a;
 }
 
+fn near_material_at(world_cell: vec2<i32>) -> u32 {
+    if params.near_enabled == 0u {
+        return 0u;
+    }
+    let near_size = vec2<i32>(textureDimensions(near_base_tex));
+    let near_logical = world_cell - vec2<i32>(params.near_origin_x, params.near_origin_y);
+    if near_logical.x < 0
+        || near_logical.y < 0
+        || near_logical.x >= near_size.x
+        || near_logical.y >= near_size.y
+    {
+        return 0u;
+    }
+    let tc = vec2<i32>(
+        positive_mod(near_logical.x + params.ring_offset_x, near_size.x),
+        positive_mod(near_logical.y + params.ring_offset_y, near_size.y),
+    );
+    let near_override = textureLoad(near_override_tex, tc, 0).r;
+    if near_override != NEAR_OVERRIDE_EMPTY_SENTINEL {
+        return near_override;
+    }
+    return textureLoad(near_base_tex, tc, 0).r;
+}
+
+fn near_contains_world_cell(world_cell: vec2<i32>) -> bool {
+    if params.near_enabled == 0u {
+        return false;
+    }
+    let near_size = vec2<i32>(textureDimensions(near_base_tex));
+    let near_logical = world_cell - vec2<i32>(params.near_origin_x, params.near_origin_y);
+    return near_logical.x >= 0
+        && near_logical.y >= 0
+        && near_logical.x < near_size.x
+        && near_logical.y < near_size.y;
+}
+
+fn terrain_near_color(
+    material: u32,
+    world_cell: vec2<i32>,
+    dot: vec2<i32>,
+    seed: u32,
+) -> vec4<f32> {
+    let dots_per_cell = max(i32(params.dots_per_cell), 1);
+    let cell_dot = vec2<i32>(
+        positive_mod(dot.x, dots_per_cell),
+        positive_mod(dot.y, dots_per_cell),
+    );
+    let left_neighbor_empty = near_material_at(world_cell + vec2<i32>(-1, 0)) == 0u;
+    let right_neighbor_empty = near_material_at(world_cell + vec2<i32>(1, 0)) == 0u;
+    let bottom_neighbor_empty = near_material_at(world_cell + vec2<i32>(0, -1)) == 0u;
+    let top_neighbor_empty = near_material_at(world_cell + vec2<i32>(0, 1)) == 0u;
+    let left_surface = left_neighbor_empty && cell_dot.x == 0;
+    let right_surface = right_neighbor_empty && cell_dot.x == dots_per_cell - 1;
+    let bottom_surface = bottom_neighbor_empty && cell_dot.y == 0;
+    let top_surface = top_neighbor_empty && cell_dot.y == dots_per_cell - 1;
+    let alpha = surface_hole_alpha(
+        dot,
+        left_surface,
+        right_surface,
+        bottom_surface,
+        top_surface,
+        seed,
+    );
+    if alpha <= 0.0 {
+        return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
+    if material != 4u {
+        return vec4<f32>(terrain_fill_color(material, dot.x, dot.y, seed), alpha);
+    }
+
+    let left_edge_depth = grass_depth_from_noise(
+        value_noise_2d(
+            vec2<f32>(
+                f32(dot.y) / SURFACE_NOISE_PERIOD_DOTS + 2.1,
+                f32(world_cell.x) * 0.5 - 7.3,
+            ),
+            seed ^ 0x11a9u,
+        ),
+        dots_per_cell,
+    );
+    let right_edge_depth = grass_depth_from_noise(
+        value_noise_2d(
+            vec2<f32>(
+                f32(dot.y) / SURFACE_NOISE_PERIOD_DOTS - 4.7,
+                f32(world_cell.x) * 0.5 + 9.1,
+            ),
+            seed ^ 0x2f53u,
+        ),
+        dots_per_cell,
+    );
+    let bottom_edge_depth = grass_depth_from_noise(
+        value_noise_2d(
+            vec2<f32>(
+                f32(dot.x) / SURFACE_NOISE_PERIOD_DOTS + 5.4,
+                f32(world_cell.y) * 0.5 - 3.9,
+            ),
+            seed ^ 0x45d1u,
+        ),
+        dots_per_cell,
+    );
+    let top_edge_depth = grass_depth_from_noise(
+        value_noise_2d(
+            vec2<f32>(
+                f32(dot.x) / SURFACE_NOISE_PERIOD_DOTS - 6.2,
+                f32(world_cell.y) * 0.5 + 8.6,
+            ),
+            seed ^ 0x5b7du,
+        ),
+        dots_per_cell,
+    );
+
+    let left_exposed = left_neighbor_empty && cell_dot.x < left_edge_depth;
+    let right_exposed =
+        right_neighbor_empty && cell_dot.x >= dots_per_cell - right_edge_depth;
+    let bottom_exposed = bottom_neighbor_empty && cell_dot.y < bottom_edge_depth;
+    let top_exposed = top_neighbor_empty && cell_dot.y >= dots_per_cell - top_edge_depth;
+
+    if left_exposed || right_exposed || bottom_exposed || top_exposed {
+        return vec4<f32>(grass_edge_color(dot.x, dot.y, seed), alpha);
+    }
+    return vec4<f32>(soil_color(fill_palette_index(dot.x, dot.y, seed)), alpha);
+}
+
 // ── Fragment ──────────────────────────────────────────────────────────────────
 
 @fragment
@@ -241,7 +453,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Continuous cell-space coordinate (not quantized to integer cell centers).
     // This avoids visible cell-step jitter in distant layers while keeping dot pattern stable.
     let world_cell_coord = cell_f;
-    let far_layer = select(
+    let near_contains_cell = near_contains_world_cell(world_cell);
+    var far_layer = select(
         sample_layer(
             far_tex,
             vec2<i32>(params.far_origin_x, params.far_origin_y),
@@ -260,6 +473,9 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         ),
         params.near_enabled != 0u,
     );
+    if near_contains_cell {
+        far_layer = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    }
     let front_mpp_cells_per_px = max(params.front_mpp_cells_per_px, 1.0e-6);
     let scale_excess =
         params.back_scale_multiplier
@@ -289,7 +505,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         params.palette_seed,
     );
 
-    let sky_color = srgb8(params.sky_color_r, params.sky_color_g, params.sky_color_b);
+    let sky_color = vec3<f32>(
+        srgb_to_linear(params.sky_color_r / 255.0),
+        srgb_to_linear(params.sky_color_g / 255.0),
+        srgb_to_linear(params.sky_color_b / 255.0),
+    );
     var color = sky_color;
     // Air-perspective tint for distant backdrop.
     let back_tinted = layer_over(back_layer.rgb, sky_color, params.back_atmosphere_tint);
@@ -310,18 +530,22 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             let near_material = select(
                 textureLoad(near_base_tex, tc, 0).r,
                 near_override,
-                near_override != 65535u,
+                near_override != NEAR_OVERRIDE_EMPTY_SENTINEL,
             );
-            let has_override = near_override != 65535u;
+            let has_override = near_override != NEAR_OVERRIDE_EMPTY_SENTINEL;
             // Priority:
             // 1) override exists: authoritative for solid; empty keeps Back/Far visible.
             // 2) no override: draw base Near only when solid; empty keeps Back/Far.
             if has_override {
                 if near_material != 0u {
-                    color = terrain_color(near_material, dot.x, dot.y, params.palette_seed);
+                    let near_layer =
+                        terrain_near_color(near_material, world_cell, dot, params.palette_seed);
+                    color = layer_over(color, near_layer.rgb, near_layer.a);
                 }
             } else if near_material != 0u {
-                color = terrain_color(near_material, dot.x, dot.y, params.palette_seed);
+                let near_layer =
+                    terrain_near_color(near_material, world_cell, dot, params.palette_seed);
+                color = layer_over(color, near_layer.rgb, near_layer.a);
             }
         }
     }

@@ -4,15 +4,15 @@ use bevy::prelude::*;
 use crate::params::ActivePhysicsParams;
 use crate::physics::gpu_mpm::buffers::GpuParticle;
 use crate::physics::gpu_mpm::gpu_resources::{MpmGpuControl, MpmGpuUploadRequest};
-use crate::physics::gpu_mpm::phase::{
-    MPM_PHASE_ID_GRANULAR_SAND, MPM_PHASE_ID_GRANULAR_SOIL, MPM_PHASE_ID_WATER,
-    mpm_phase_id_for_particle,
-};
+use crate::physics::gpu_mpm::phase::mpm_phase_id_for_particle;
 use crate::physics::gpu_mpm::sync::{
     MpmFullParticleReadbackCache, MpmFullParticleReadbackRequest, MpmParticleReadbackStatus,
     PendingGpuParticleAdds,
 };
-use crate::physics::material::{MaterialParams, ParticleMaterial, terrain_boundary_radius_m};
+use crate::physics::material::{
+    MaterialParams, particle_material_from_id, terrain_boundary_radius_m,
+    unpack_particle_material_id,
+};
 use crate::physics::save_load;
 use crate::physics::scenario::{
     apply_scenario_spec_to_terrain, count_solid_cells, default_scenario_spec_by_name,
@@ -24,15 +24,6 @@ use crate::physics::state::{
 };
 use crate::physics::world::terrain::TerrainWorld;
 
-fn material_from_phase(phase_id: u32) -> Option<ParticleMaterial> {
-    match phase_id as u8 {
-        MPM_PHASE_ID_WATER => Some(ParticleMaterial::WaterLiquid),
-        MPM_PHASE_ID_GRANULAR_SOIL => Some(ParticleMaterial::SoilGranular),
-        MPM_PHASE_ID_GRANULAR_SAND => Some(ParticleMaterial::SandGranular),
-        _ => None,
-    }
-}
-
 fn snapshot_particles_from_gpu_readback(
     particles: &[GpuParticle],
 ) -> Result<Vec<save_load::SnapshotParticle>, String> {
@@ -42,7 +33,9 @@ fn snapshot_particles_from_gpu_readback(
             Some(save_load::SnapshotParticle {
                 position: Vec2::from_array(p.x),
                 velocity: Vec2::from_array(p.v),
-                material: material_from_phase(p.phase_id)?,
+                material: particle_material_from_id(unpack_particle_material_id(
+                    p.home_chunk_slot_id,
+                ))?,
             })
         })
         .collect();
@@ -70,6 +63,7 @@ fn gpu_particles_from_snapshot(
                 Mat2::ZERO,
                 0.0,
                 phase_id,
+                particle.material,
             ))
         })
         .collect()

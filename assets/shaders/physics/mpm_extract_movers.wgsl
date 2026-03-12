@@ -1,7 +1,7 @@
 // Extract moved particles by comparing previous home slot's chunk coord and current position.
 // One thread per particle.
 
-#import particles::mpm_types::{GpuParticle, MpmParams}
+#import particles::mpm_types::{GpuParticle, MpmParams, INVALID_PARTICLE_SLOT, particle_slot_id, repack_particle_home_slot}
 
 struct GpuChunkMeta {
     chunk_coord_x: i32,
@@ -48,8 +48,8 @@ fn extract_movers(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     let p = particles[pid];
-    let old_slot = p.home_chunk_slot_id;
-    if old_slot >= params.resident_chunk_count || old_slot == INVALID_SLOT {
+    let old_slot = particle_slot_id(p);
+    if old_slot >= params.resident_chunk_count || old_slot == INVALID_PARTICLE_SLOT {
         let idx = atomicAdd(&mover_count, 1u);
         if idx < params.particle_count {
             let inv_h = 1.0 / max(params.h, 1.0e-6);
@@ -90,7 +90,8 @@ fn extract_movers(@builtin(global_invocation_id) gid: vec3<u32>) {
         if neighbor_index != 0xffffffffu {
             let next_slot = old_chunk.neighbor_slot_id[neighbor_index];
             if next_slot != INVALID_SLOT {
-                particles[pid].home_chunk_slot_id = next_slot;
+                particles[pid].home_chunk_slot_id =
+                    repack_particle_home_slot(p.home_chunk_slot_id, next_slot);
                 return;
             }
         }

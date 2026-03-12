@@ -2,7 +2,7 @@
 ///
 /// Evaluates aggregated terrain materials directly from procedural world generation.
 /// Output texel layout (RGBA8Uint):
-///   R = top1 material id (0..3)
+///   R = top1 material id (0..4)
 ///   G = top1 weight in solid samples (0..255)
 ///   B = solid fraction (0..255)
 ///   A = reserved
@@ -155,6 +155,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     var count_stone: u32 = 0u;
     var count_soil: u32 = 0u;
     var count_sand: u32 = 0u;
+    var count_grass: u32 = 0u;
     var solid_count: u32 = 0u;
 
     let sample_span = f32(downsample) / f32(FAR_AGGREGATE_SAMPLES_AXIS);
@@ -176,6 +177,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                 count_soil = count_soil + 1u;
             } else if material == 3u {
                 count_sand = count_sand + 1u;
+            } else if material == 4u {
+                count_grass = count_grass + 1u;
             }
         }
     }
@@ -193,6 +196,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if count_sand > top1_count {
         top1_count = count_sand;
         top1_id = 3u;
+    }
+    if count_grass > top1_count {
+        top1_count = count_grass;
+        top1_id = 4u;
     }
 
     var top1_weight: u32 = 0u;

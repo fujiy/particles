@@ -1,7 +1,7 @@
 // G2P pass: gather grid velocity to particles, update v, x, C, F.
 // One thread per particle.
 
-#import particles::mpm_types::{GpuParticle, GpuGridNode, MpmParams, PHASE_WATER, PHASE_GRANULAR_SOIL, phase_is_granular, bspline_w_dw, mat2_det}
+#import particles::mpm_types::{GpuParticle, GpuGridNode, MpmParams, PHASE_WATER, PHASE_GRANULAR_SOIL, INVALID_PARTICLE_SLOT, phase_is_granular, particle_slot_id, bspline_w_dw, mat2_det}
 
 struct GpuChunkMeta {
     chunk_coord_x: i32,
@@ -302,8 +302,8 @@ fn g2p(@builtin(global_invocation_id) gid: vec3<u32>) {
     let dt = params.dt;
 
     let p = particles[pid];
-    let home_slot = p.home_chunk_slot_id;
-    if home_slot >= params.resident_chunk_count || home_slot == INVALID_SLOT {
+    let home_slot = particle_slot_id(p);
+    if home_slot >= params.resident_chunk_count || home_slot == INVALID_PARTICLE_SLOT {
         return;
     }
     let home_chunk = chunk_meta[home_slot];

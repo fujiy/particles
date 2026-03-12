@@ -157,6 +157,7 @@ pub struct InterfaceIconPaletteParams {
     pub stone: [UiColor8; 4],
     pub sand: [UiColor8; 4],
     pub soil: [UiColor8; 4],
+    pub grass: [UiColor8; 4],
 }
 
 #[derive(Asset, TypePath, Debug, Clone, Serialize, Deserialize)]
@@ -420,6 +421,32 @@ impl Default for InterfaceParams {
                         r: 147,
                         g: 115,
                         b: 88,
+                        a: 255,
+                    },
+                ],
+                grass: [
+                    UiColor8 {
+                        r: 92,
+                        g: 136,
+                        b: 54,
+                        a: 255,
+                    },
+                    UiColor8 {
+                        r: 108,
+                        g: 154,
+                        b: 64,
+                        a: 255,
+                    },
+                    UiColor8 {
+                        r: 124,
+                        g: 171,
+                        b: 75,
+                        a: 255,
+                    },
+                    UiColor8 {
+                        r: 141,
+                        g: 188,
+                        b: 87,
                         a: 255,
                     },
                 ],

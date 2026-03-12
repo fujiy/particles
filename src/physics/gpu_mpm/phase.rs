@@ -9,6 +9,7 @@ pub fn mpm_phase_id_for_particle(material: ParticleMaterial) -> Option<u8> {
         ParticleMaterial::WaterLiquid => Some(MPM_PHASE_ID_WATER),
         ParticleMaterial::StoneGranular => Some(MPM_PHASE_ID_GRANULAR_SOIL),
         ParticleMaterial::SoilGranular => Some(MPM_PHASE_ID_GRANULAR_SOIL),
+        ParticleMaterial::GrassGranular => Some(MPM_PHASE_ID_GRANULAR_SOIL),
         ParticleMaterial::SandGranular => Some(MPM_PHASE_ID_GRANULAR_SAND),
         _ => None,
     }

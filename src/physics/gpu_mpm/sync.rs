@@ -23,7 +23,10 @@ use super::readback::{
     GpuReadbackResult, GpuStatisticsReadbackResult,
 };
 use crate::params::ActivePhysicsParams;
-use crate::physics::material::{ParticleMaterial, particle_properties};
+use crate::physics::material::{
+    INVALID_PACKED_PARTICLE_SLOT, MaterialParams, ParticleMaterial, particle_material_id,
+    particle_properties, repack_particle_home_slot, unpack_particle_home_slot,
+};
 use crate::physics::profiler::cpu_profile_span;
 use crate::physics::state::{ReplayState, SimulationState};
 use crate::physics::world::constants::{CELL_SIZE_M, CHUNK_SIZE_I32};
@@ -696,6 +699,7 @@ pub fn apply_world_edit_requests(
             count_per_cell: op.count_per_cell,
             particle_offset,
             phase_id: phase_id as u32,
+            material_id: particle_material_id(op.material) as u32,
             mass: props.mass,
             v0: props.mass.max(0.0) / rho0,
         });
@@ -956,7 +960,7 @@ pub fn prepare_terrain_upload(
             .enumerate()
             .map(|(pid, particle)| GpuMoverResult {
                 particle_id: pid as u32,
-                new_home_slot_id: particle.home_chunk_slot_id,
+                new_home_slot_id: unpack_particle_home_slot(particle.home_chunk_slot_id),
                 _pad_a: 0,
                 _pad_b: 0,
             })
@@ -1032,6 +1036,7 @@ pub fn prepare_aux_upload_frames(mut upload: ResMut<MpmGpuUploadRequest>) {
 pub fn prepare_gpu_params(
     control: Res<MpmGpuControl>,
     active_params: Res<ActivePhysicsParams>,
+    material_params: Res<MaterialParams>,
     upload: Res<MpmGpuUploadRequest>,
     readback_status: Res<MpmParticleReadbackStatus>,
     residency: Res<MpmChunkResidencyState>,
@@ -1049,19 +1054,20 @@ pub fn prepare_gpu_params(
     };
     let h = MPM_NODE_SPACING_M;
     let p = &active_params.0;
+    let materials = &*material_params;
     let soil = drucker_prager_params(
-        p.soil.youngs_modulus_pa,
-        p.soil.poisson_ratio,
-        p.soil.friction_deg,
-        p.soil.cohesion_pa,
-        p.soil.hardening,
+        materials.soil_family.youngs_modulus_pa,
+        materials.soil_family.poisson_ratio,
+        materials.soil_family.friction_deg,
+        materials.soil_family.cohesion_pa,
+        materials.soil_family.hardening,
     );
     let sand = drucker_prager_params(
-        p.sand.youngs_modulus_pa,
-        p.sand.poisson_ratio,
-        p.sand.friction_deg,
-        p.sand.cohesion_pa,
-        p.sand.hardening,
+        materials.sand_family.youngs_modulus_pa,
+        materials.sand_family.poisson_ratio,
+        materials.sand_family.friction_deg,
+        materials.sand_family.cohesion_pa,
+        materials.sand_family.hardening,
     );
     let boundary_threshold_m = h * p.runtime.boundary_velocity_sdf_threshold_h;
     let particle_count = if upload.upload_particles_frame {
@@ -1087,8 +1093,8 @@ pub fn prepare_gpu_params(
         c_max_norm: p.deformation.c_max_norm,
         sdf_velocity_threshold_m: boundary_threshold_m,
         boundary_normal_projection_scale: p.runtime.boundary_velocity_normal_projection_scale,
-        boundary_friction_water: p.boundary.water,
-        boundary_friction_granular: p.boundary.granular,
+        boundary_friction_water: materials.water.boundary_friction,
+        boundary_friction_granular: materials.soil_family.boundary_friction,
         dp_lambda_soil: soil.lambda,
         dp_mu_soil: soil.mu,
         dp_alpha_soil: soil.alpha,
@@ -1099,13 +1105,13 @@ pub fn prepare_gpu_params(
         dp_alpha_sand: sand.alpha,
         dp_k_sand: sand.k,
         dp_hardening_sand: sand.hardening,
-        granular_tensile_clamp: p.granular_tensile_clamp,
+        granular_tensile_clamp: materials.granular_tensile_clamp,
         coupling_drag_gamma: p.coupling.drag_gamma,
         coupling_friction: p.coupling.friction,
         coupling_interface_min_grad: p.coupling.interface_min_grad,
         coupling_interface_normal_eps: p.coupling.interface_normal_eps,
-        alpha_apic_water: p.apic.water,
-        alpha_apic_granular: p.apic.granular,
+        alpha_apic_water: materials.water.alpha_apic,
+        alpha_apic_granular: materials.soil_family.alpha_apic,
         stats_tracked_phase_id: stats_status.tracked_phase_id,
         stats_repose_phase_id: stats_status.repose_phase_id,
         stats_interaction_primary_phase_id: stats_status.interaction_primary_phase_id,
@@ -1283,6 +1289,7 @@ fn build_gpu_add_queue_from_batch(
             count_per_cell: op.count_per_cell,
             particle_offset,
             phase_id: phase_id as u32,
+            material_id: particle_material_id(op.material) as u32,
             mass: props.mass,
             v0: props.mass.max(0.0) / rho0.max(1.0e-6),
         });
@@ -1656,7 +1663,7 @@ fn bootstrap_residency_from_particles(
         .enumerate()
         .map(|(pid, particle)| GpuMoverResult {
             particle_id: pid as u32,
-            new_home_slot_id: particle.home_chunk_slot_id,
+            new_home_slot_id: unpack_particle_home_slot(particle.home_chunk_slot_id),
             _pad_a: 0,
             _pad_b: 0,
         })
@@ -2128,6 +2135,7 @@ fn append_particles_in_cell(
                 Mat2::ZERO,
                 0.0,
                 phase_id,
+                material,
             ));
             spawned += 1;
         }
@@ -2163,10 +2171,14 @@ fn assign_home_slot_ids(particles: &mut [GpuParticle], chunk_to_slot: &HashMap<I
     for particle in particles.iter_mut() {
         let chunk = chunk_coord_from_world_pos(Vec2::from_array(particle.x));
         if let Some(slot_id) = slot_id_from_chunk_coord(chunk, chunk_to_slot) {
-            particle.home_chunk_slot_id = slot_id;
+            particle.home_chunk_slot_id =
+                repack_particle_home_slot(particle.home_chunk_slot_id, slot_id);
         } else {
             unresolved = unresolved.saturating_add(1);
-            particle.home_chunk_slot_id = INVALID_CHUNK_SLOT_ID;
+            particle.home_chunk_slot_id = repack_particle_home_slot(
+                particle.home_chunk_slot_id,
+                INVALID_PACKED_PARTICLE_SLOT,
+            );
         }
     }
     unresolved
@@ -2189,8 +2201,9 @@ fn active_tile_mask_for_particles(
     }
 
     for particle in particles {
-        let home_slot = particle.home_chunk_slot_id as usize;
-        if particle.home_chunk_slot_id == INVALID_CHUNK_SLOT_ID
+        let home_slot_id = unpack_particle_home_slot(particle.home_chunk_slot_id);
+        let home_slot = home_slot_id as usize;
+        if home_slot_id == INVALID_PACKED_PARTICLE_SLOT
             || home_slot >= residency.slot_to_chunk.len()
             || !residency
                 .slot_allocated
@@ -3049,6 +3062,7 @@ mod tests {
             Mat2::ZERO,
             0.0,
             MPM_PHASE_ID_WATER,
+            ParticleMaterial::WaterLiquid,
         );
         {
             let world = app.world_mut();
@@ -3243,6 +3257,7 @@ mod tests {
                 Mat2::ZERO,
                 0.0,
                 MPM_PHASE_ID_WATER,
+                ParticleMaterial::WaterLiquid,
             ));
         }
         {
@@ -3285,6 +3300,7 @@ mod tests {
             Mat2::ZERO,
             0.0,
             MPM_PHASE_ID_WATER,
+            ParticleMaterial::WaterLiquid,
         );
         let latest_particle = GpuParticle::from_cpu(
             cell_to_world_center(IVec2::new(CHUNK_SIZE_I32 * 4, 0)),
@@ -3295,6 +3311,7 @@ mod tests {
             Mat2::ZERO,
             0.0,
             MPM_PHASE_ID_WATER,
+            ParticleMaterial::WaterLiquid,
         );
         {
             let world = app.world_mut();
@@ -3357,6 +3374,7 @@ mod tests {
             Mat2::ZERO,
             0.0,
             MPM_PHASE_ID_WATER,
+            ParticleMaterial::WaterLiquid,
         );
         let stale_particle = GpuParticle::from_cpu(
             cell_to_world_center(IVec2::new(1, 1)),
@@ -3367,6 +3385,7 @@ mod tests {
             Mat2::ZERO,
             0.0,
             MPM_PHASE_ID_WATER,
+            ParticleMaterial::WaterLiquid,
         );
         {
             let world = app.world_mut();
@@ -3509,6 +3528,7 @@ mod tests {
         let mut app = App::new();
         app.insert_resource(MpmGpuControl::default())
             .insert_resource(ActivePhysicsParams::default())
+            .insert_resource(MaterialParams::default())
             .insert_resource(MpmGpuUploadRequest {
                 particles: vec![
                     GpuParticle::from_cpu(
@@ -3520,6 +3540,7 @@ mod tests {
                         Mat2::ZERO,
                         0.0,
                         MPM_PHASE_ID_WATER,
+                        ParticleMaterial::WaterLiquid,
                     );
                     3
                 ],
@@ -3604,6 +3625,7 @@ mod tests {
                     Mat2::ZERO,
                     0.0,
                     MPM_PHASE_ID_WATER,
+                    ParticleMaterial::WaterLiquid,
                 )],
                 particle_revision: 1,
             });
@@ -3625,6 +3647,7 @@ mod tests {
             Mat2::ZERO,
             0.0,
             MPM_PHASE_ID_WATER,
+            ParticleMaterial::WaterLiquid,
         );
 
         let mut app = App::new();
@@ -3664,6 +3687,7 @@ mod tests {
             Mat2::ZERO,
             0.0,
             MPM_PHASE_ID_WATER,
+            ParticleMaterial::WaterLiquid,
         );
 
         let mut app = App::new();
@@ -3822,6 +3846,7 @@ mod tests {
                 Mat2::ZERO,
                 0.0,
                 MPM_PHASE_ID_WATER,
+                ParticleMaterial::WaterLiquid,
             )
         };
 

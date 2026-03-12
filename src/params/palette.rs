@@ -45,8 +45,10 @@ pub struct MaterialPalette4 {
 #[derive(Asset, TypePath, Debug, Clone, Serialize, Deserialize)]
 pub struct PaletteParams {
     pub water: MaterialPalette4,
+    pub stone: MaterialPalette4,
     pub soil: MaterialPalette4,
     pub sand: MaterialPalette4,
+    pub grass: MaterialPalette4,
 }
 
 impl Default for PaletteParams {
@@ -73,6 +75,30 @@ impl Default for PaletteParams {
                         r: 78,
                         g: 167,
                         b: 238,
+                    },
+                ],
+            },
+            stone: MaterialPalette4 {
+                colors: [
+                    PaletteColor {
+                        r: 70,
+                        g: 67,
+                        b: 63,
+                    },
+                    PaletteColor {
+                        r: 83,
+                        g: 79,
+                        b: 74,
+                    },
+                    PaletteColor {
+                        r: 95,
+                        g: 90,
+                        b: 84,
+                    },
+                    PaletteColor {
+                        r: 108,
+                        g: 103,
+                        b: 96,
                     },
                 ],
             },
@@ -121,6 +147,30 @@ impl Default for PaletteParams {
                         r: 205,
                         g: 178,
                         b: 126,
+                    },
+                ],
+            },
+            grass: MaterialPalette4 {
+                colors: [
+                    PaletteColor {
+                        r: 92,
+                        g: 136,
+                        b: 54,
+                    },
+                    PaletteColor {
+                        r: 108,
+                        g: 154,
+                        b: 64,
+                    },
+                    PaletteColor {
+                        r: 124,
+                        g: 171,
+                        b: 75,
+                    },
+                    PaletteColor {
+                        r: 141,
+                        g: 188,
+                        b: 87,
                     },
                 ],
             },

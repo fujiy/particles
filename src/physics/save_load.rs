@@ -71,6 +71,7 @@ enum SaveTerrainMaterial {
     Stone,
     Soil,
     Sand,
+    Grass,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -87,6 +88,9 @@ enum SaveParticleMaterial {
     SandSolid,
     #[serde(alias = "Sand")]
     SandGranular,
+    GrassSolid,
+    #[serde(alias = "Grass")]
+    GrassGranular,
 }
 
 impl From<TerrainMaterial> for SaveTerrainMaterial {
@@ -95,6 +99,7 @@ impl From<TerrainMaterial> for SaveTerrainMaterial {
             TerrainMaterial::Stone => SaveTerrainMaterial::Stone,
             TerrainMaterial::Soil => SaveTerrainMaterial::Soil,
             TerrainMaterial::Sand => SaveTerrainMaterial::Sand,
+            TerrainMaterial::Grass => SaveTerrainMaterial::Grass,
         }
     }
 }
@@ -105,6 +110,7 @@ impl From<SaveTerrainMaterial> for TerrainMaterial {
             SaveTerrainMaterial::Stone => TerrainMaterial::Stone,
             SaveTerrainMaterial::Soil => TerrainMaterial::Soil,
             SaveTerrainMaterial::Sand => TerrainMaterial::Sand,
+            SaveTerrainMaterial::Grass => TerrainMaterial::Grass,
         }
     }
 }
@@ -119,6 +125,8 @@ impl From<ParticleMaterial> for SaveParticleMaterial {
             ParticleMaterial::SoilGranular => SaveParticleMaterial::SoilGranular,
             ParticleMaterial::SandSolid => SaveParticleMaterial::SandSolid,
             ParticleMaterial::SandGranular => SaveParticleMaterial::SandGranular,
+            ParticleMaterial::GrassSolid => SaveParticleMaterial::GrassSolid,
+            ParticleMaterial::GrassGranular => SaveParticleMaterial::GrassGranular,
         }
     }
 }
@@ -133,6 +141,8 @@ impl From<SaveParticleMaterial> for ParticleMaterial {
             SaveParticleMaterial::SoilGranular => ParticleMaterial::SoilGranular,
             SaveParticleMaterial::SandSolid => ParticleMaterial::SandSolid,
             SaveParticleMaterial::SandGranular => ParticleMaterial::SandGranular,
+            SaveParticleMaterial::GrassSolid => ParticleMaterial::GrassSolid,
+            SaveParticleMaterial::GrassGranular => ParticleMaterial::GrassGranular,
         }
     }
 }

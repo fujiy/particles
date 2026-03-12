@@ -15,6 +15,8 @@ impl WorldToolIconSet {
             WorldTool::SoilGranular => self.soil_granular.clone(),
             WorldTool::SandSolid => self.sand_solid.clone(),
             WorldTool::SandGranular => self.sand_granular.clone(),
+            WorldTool::GrassSolid => self.grass_solid.clone(),
+            WorldTool::GrassGranular => self.grass_granular.clone(),
             WorldTool::Break => self.break_icon.clone(),
             WorldTool::Delete => self.delete.clone(),
         }
@@ -29,6 +31,7 @@ pub(super) fn create_world_tool_icon_set(
     let stone_palette = to_material_palette(icon_palette.stone);
     let sand_palette = to_material_palette(icon_palette.sand);
     let soil_palette = to_material_palette(icon_palette.soil);
+    let grass_palette = to_material_palette(icon_palette.grass);
 
     let water_liquid = images.add(build_material_icon_image(
         water_palette,
@@ -65,6 +68,16 @@ pub(super) fn create_world_tool_icon_set(
         &MATERIAL_PATTERN_GRANULAR,
         0x9133_257e,
     ));
+    let grass_solid = images.add(build_material_icon_image(
+        grass_palette,
+        &MATERIAL_PATTERN_SOLID,
+        0x8cf1_3157,
+    ));
+    let grass_granular = images.add(build_material_icon_image(
+        grass_palette,
+        &MATERIAL_PATTERN_GRANULAR,
+        0x2ca7_b5de,
+    ));
     let break_icon = images.add(build_break_icon_image());
     let delete = images.add(build_delete_icon_image());
     WorldToolIconSet {
@@ -75,6 +88,8 @@ pub(super) fn create_world_tool_icon_set(
         soil_granular,
         sand_solid,
         sand_granular,
+        grass_solid,
+        grass_granular,
         break_icon,
         delete,
     }

@@ -50,7 +50,8 @@ use bevy::window::PrimaryWindow;
 use bytemuck::{Pod, Zeroable, cast_slice};
 
 use crate::camera_controller::MainCamera;
-use crate::params::ActiveRenderParams;
+use crate::params::palette::{MaterialPalette4, PaletteColor, PaletteParams};
+use crate::params::{ActivePaletteParams, ActiveRenderParams};
 use crate::physics::material::TerrainMaterial;
 use crate::physics::profiler::{
     begin_gpu_pass_query, cpu_profile_span, end_gpu_pass_query, resolve_gpu_profiler_queries,
@@ -759,6 +760,52 @@ struct TerrainComposeParams {
 }
 const _: () = assert!(std::mem::size_of::<TerrainComposeParams>() == 96);
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct TerrainPaletteParams {
+    stone: [[f32; 4]; 4],
+    soil: [[f32; 4]; 4],
+    sand: [[f32; 4]; 4],
+    grass: [[f32; 4]; 4],
+}
+const _: () = assert!(std::mem::size_of::<TerrainPaletteParams>() == 256);
+
+fn srgb_u8_to_linear(c: u8) -> f32 {
+    let x = c as f32 / 255.0;
+    if x <= 0.04045 {
+        x / 12.92
+    } else {
+        ((x + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn palette4_to_linear_rows(palette: &MaterialPalette4) -> [[f32; 4]; 4] {
+    palette.colors.map(|PaletteColor { r, g, b }| {
+        [
+            srgb_u8_to_linear(r),
+            srgb_u8_to_linear(g),
+            srgb_u8_to_linear(b),
+            1.0,
+        ]
+    })
+}
+
+fn terrain_palette_uniform_from_active(active: Option<&ActivePaletteParams>) -> TerrainPaletteParams {
+    let fallback;
+    let source = if let Some(active) = active {
+        &active.0
+    } else {
+        fallback = PaletteParams::default();
+        &fallback
+    };
+    TerrainPaletteParams {
+        stone: palette4_to_linear_rows(&source.stone),
+        soil: palette4_to_linear_rows(&source.soil),
+        sand: palette4_to_linear_rows(&source.sand),
+        grass: palette4_to_linear_rows(&source.grass),
+    }
+}
+
 // ── GPU resources (render world) ──────────────────────────────────────────────
 
 pub(crate) struct TerrainNearGpuCache {
@@ -812,6 +859,8 @@ pub(crate) struct TerrainNearGpuResources {
     back_params_buf: Buffer,
     /// Uniform buffer for fragment pass (TerrainComposeParams).
     pub(crate) compose_params_buf: Buffer,
+    /// Uniform buffer for terrain material palettes used by compose.
+    pub(crate) compose_palette_buf: Buffer,
     /// How many more frames to keep the dirty flag set, used to retry when the
     /// pipeline is still compiling on the first frame data arrives.
     pending_dispatch_frames: u32,
@@ -1564,6 +1613,7 @@ impl ViewNode for TerrainComposeNode {
             &BindGroupEntries::sequential((
                 view_binding,
                 resources.compose_params_buf.as_entire_binding(),
+                resources.compose_palette_buf.as_entire_binding(),
                 BindingResource::TextureView(&resources.near_cache.near_texture_view),
                 BindingResource::TextureView(&resources.override_cache.near_texture_view),
                 BindingResource::TextureView(&resources.far_cache.far_texture_view),
@@ -1716,6 +1766,10 @@ fn encode_terrain_cell(cell: TerrainCell) -> u32 {
             material: TerrainMaterial::Sand,
             ..
         } => 3,
+        TerrainCell::Solid {
+            material: TerrainMaterial::Grass,
+            ..
+        } => 4,
     }
 }
 
@@ -2524,6 +2578,14 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         },
     );
+    let compose_palette = terrain_palette_uniform_from_active(None);
+    let compose_palette_buf = render_device.create_buffer_with_data(
+        &bevy::render::render_resource::BufferInitDescriptor {
+            label: Some("terrain_compose_palette"),
+            contents: bytemuck::bytes_of(&compose_palette),
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        },
+    );
     let chunk_params = TerrainChunkGenerateParams {
         chunk_x: 0,
         chunk_y: 0,
@@ -2558,6 +2620,7 @@ fn init_terrain_near_gpu_resources(mut commands: Commands, render_device: Res<Re
         far_params_buf,
         back_params_buf,
         compose_params_buf,
+        compose_palette_buf,
         pending_dispatch_frames: 0,
         pending_dispatch_cells: 0,
         pending_override_dispatch_frames: 0,
@@ -2743,6 +2806,10 @@ fn init_terrain_compose_pipeline(mut commands: Commands, asset_server: Res<Asset
                     false,
                     core::num::NonZeroU64::new(std::mem::size_of::<TerrainComposeParams>() as u64),
                 ),
+                uniform_buffer_sized(
+                    false,
+                    core::num::NonZeroU64::new(std::mem::size_of::<TerrainPaletteParams>() as u64),
+                ),
                 texture_2d(TextureSampleType::Uint),
                 texture_2d(TextureSampleType::Uint),
                 texture_2d(TextureSampleType::Uint),
@@ -2768,6 +2835,7 @@ fn link_terrain_and_water_graph(mut graph: ResMut<RenderGraph>) {
 
 fn prepare_terrain_near_uploads(
     upload: Res<TerrainNearUpdateRequest>,
+    active_palette: Option<Res<ActivePaletteParams>>,
     mut resources: ResMut<TerrainNearGpuResources>,
     render_device: Res<RenderDevice>,
     queue: Res<RenderQueue>,
@@ -3048,6 +3116,12 @@ fn prepare_terrain_near_uploads(
         &resources.compose_params_buf,
         0,
         bytemuck::bytes_of(&compose_params),
+    );
+    let compose_palette = terrain_palette_uniform_from_active(active_palette.as_deref());
+    queue.write_buffer(
+        &resources.compose_palette_buf,
+        0,
+        bytemuck::bytes_of(&compose_palette),
     );
     if resources.pending_dispatch_frames > 0 && resources.pending_dispatch_cells > 0 {
         dirty.0 = true;

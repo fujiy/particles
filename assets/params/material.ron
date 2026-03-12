@@ -1,0 +1,98 @@
+// 材質別パラメータ
+// 対応 Rust 型: particles::physics::material::MaterialParams
+(
+    rest_density: 1000.0,
+    particle_speed_limit_mps: 20.0,
+    h_water_over_dx: 2.0,
+
+    water: (
+        alpha_apic: 1.0,
+        boundary_friction: 0.1,
+    ),
+
+    soil_family: (
+        alpha_apic: 0.5,
+        boundary_friction: 1.0,
+        youngs_modulus_pa: 1000000.0,
+        poisson_ratio: 0.4,
+        friction_deg: 58.0,
+        cohesion_pa: 400.0,
+        hardening: 1.0,
+    ),
+
+    sand_family: (
+        alpha_apic: 0.5,
+        boundary_friction: 1.0,
+        youngs_modulus_pa: 90000.0,
+        poisson_ratio: 0.25,
+        friction_deg: 55.0,
+        cohesion_pa: 120.0,
+        hardening: 0.5,
+    ),
+
+    particle_counts: (
+        water_liquid: 16,
+        stone_solid: 1,
+        stone_granular: 16,
+        soil_solid: 1,
+        soil_granular: 16,
+        sand_solid: 1,
+        sand_granular: 16,
+        grass_solid: 1,
+        grass_granular: 16,
+    ),
+
+    particle_mass_scales: (
+        water_liquid: 1.0,
+        stone_solid: 3.0,
+        stone_granular: 1.8,
+        soil_solid: 1.9,
+        soil_granular: 1.5,
+        sand_solid: 1.7,
+        sand_granular: 2.6,
+        grass_solid: 1.9,
+        grass_granular: 1.5,
+    ),
+
+    granular_tensile_clamp: 0.0,
+    enable_granular_to_solid_reconversion: false,
+
+    terrain_break: (
+        stone: (
+            output_count: 1,
+            outputs: (
+                (material: StoneGranular, count_per_cell: 16),
+                (material: StoneGranular, count_per_cell: 1),
+                (material: StoneGranular, count_per_cell: 1),
+                (material: StoneGranular, count_per_cell: 1),
+            ),
+        ),
+        soil: (
+            output_count: 1,
+            outputs: (
+                (material: SoilGranular, count_per_cell: 16),
+                (material: SoilGranular, count_per_cell: 1),
+                (material: SoilGranular, count_per_cell: 1),
+                (material: SoilGranular, count_per_cell: 1),
+            ),
+        ),
+        sand: (
+            output_count: 1,
+            outputs: (
+                (material: SandGranular, count_per_cell: 16),
+                (material: SandGranular, count_per_cell: 1),
+                (material: SandGranular, count_per_cell: 1),
+                (material: SandGranular, count_per_cell: 1),
+            ),
+        ),
+        grass: (
+            output_count: 2,
+            outputs: (
+                (material: GrassGranular, count_per_cell: 4),
+                (material: SoilGranular, count_per_cell: 12),
+                (material: GrassGranular, count_per_cell: 1),
+                (material: GrassGranular, count_per_cell: 1),
+            ),
+        ),
+    ),
+)

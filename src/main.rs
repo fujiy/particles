@@ -15,8 +15,7 @@ use particles::physics::gpu_mpm::{GpuMpmPlugin, MpmRenderDiagnostics};
 use particles::physics::gpu_mpm::buffers::GpuParticle;
 use particles::physics::gpu_mpm::gpu_resources::{MpmGpuControl, MpmGpuUploadRequest};
 use particles::physics::gpu_mpm::phase::{
-    MPM_PHASE_ID_GRANULAR_SAND, MPM_PHASE_ID_GRANULAR_SOIL, MPM_PHASE_ID_WATER,
-    mpm_phase_id_for_particle,
+    MPM_PHASE_ID_GRANULAR_SAND, MPM_PHASE_ID_GRANULAR_SOIL, mpm_phase_id_for_particle,
 };
 use particles::physics::gpu_mpm::sync::{
     GpuWorldEditCommand, GpuWorldEditRequest, MpmChunkResidencyState,
@@ -25,7 +24,8 @@ use particles::physics::gpu_mpm::sync::{
     apply_world_edit_requests,
 };
 use particles::physics::material::{
-    DEFAULT_MATERIAL_PARAMS, ParticleMaterial, terrain_boundary_radius_m,
+    DEFAULT_MATERIAL_PARAMS, MaterialParams, ParticleMaterial, particle_material_from_id,
+    terrain_boundary_radius_m, unpack_particle_material_id,
 };
 use particles::physics::profiler::build_profiling_layer;
 use particles::physics::save_load;
@@ -613,7 +613,7 @@ fn p99_and_max(values: &[f32]) -> (f32, f32) {
 
 fn collect_granular_elastic_diagnostics(
     particles: &[GpuParticle],
-    active_physics_params: &ActivePhysicsParams,
+    material_params: &MaterialParams,
 ) -> GranularElasticDiagnostics {
     let mut det_values = Vec::<f32>::new();
     let mut p_norm_values = Vec::<f32>::new();
@@ -621,12 +621,12 @@ fn collect_granular_elastic_diagnostics(
     let mut invalid_f_count = 0usize;
 
     let (lambda_soil, mu_soil) = lame_from_e_nu(
-        active_physics_params.0.soil.youngs_modulus_pa,
-        active_physics_params.0.soil.poisson_ratio,
+        material_params.soil_family.youngs_modulus_pa,
+        material_params.soil_family.poisson_ratio,
     );
     let (lambda_sand, mu_sand) = lame_from_e_nu(
-        active_physics_params.0.sand.youngs_modulus_pa,
-        active_physics_params.0.sand.poisson_ratio,
+        material_params.sand_family.youngs_modulus_pa,
+        material_params.sand_family.poisson_ratio,
     );
 
     for particle in particles {
@@ -704,6 +704,8 @@ fn parse_particle_material_name(raw: &str) -> Option<ParticleMaterial> {
         "soilgranular" | "soil_granular" | "soil" => Some(ParticleMaterial::SoilGranular),
         "sandsolid" | "sand_solid" => Some(ParticleMaterial::SandSolid),
         "sandgranular" | "sand_granular" | "sand" => Some(ParticleMaterial::SandGranular),
+        "grasssolid" | "grass_solid" => Some(ParticleMaterial::GrassSolid),
+        "grassgranular" | "grass_granular" | "grass" => Some(ParticleMaterial::GrassGranular),
         _ => None,
     }
 }
@@ -711,7 +713,9 @@ fn parse_particle_material_name(raw: &str) -> Option<ParticleMaterial> {
 fn phase_id_for_material(material: ParticleMaterial) -> Option<u32> {
     match material {
         ParticleMaterial::WaterLiquid => Some(0),
+        ParticleMaterial::StoneGranular => Some(1),
         ParticleMaterial::SoilGranular => Some(1),
+        ParticleMaterial::GrassGranular => Some(1),
         ParticleMaterial::SandGranular => Some(2),
         _ => None,
     }
@@ -723,6 +727,7 @@ fn parse_terrain_material_name(raw: &str) -> Option<TerrainMaterial> {
         "stone" | "rock" => Some(TerrainMaterial::Stone),
         "soil" | "dirt" => Some(TerrainMaterial::Soil),
         "sand" => Some(TerrainMaterial::Sand),
+        "grass" => Some(TerrainMaterial::Grass),
         _ => None,
     }
 }
@@ -851,6 +856,7 @@ fn run_mpm_autoverify(
     full_readback_cache: Res<MpmFullParticleReadbackCache>,
     readback_status: Res<MpmParticleReadbackStatus>,
     active_physics_params: Res<ActivePhysicsParams>,
+    material_params: Res<MaterialParams>,
     terrain_world: Res<TerrainWorld>,
     mut sim_state: ResMut<SimulationState>,
     mut gpu_control: ResMut<MpmGpuControl>,
@@ -1294,8 +1300,7 @@ fn run_mpm_autoverify(
     };
     let (readback_min_x, readback_max_x, readback_min_y, readback_max_y, readback_unique_chunk_count) =
         readback_particle_extent(&payload.particles);
-    let granular_diag =
-        collect_granular_elastic_diagnostics(&payload.particles, &active_physics_params);
+    let granular_diag = collect_granular_elastic_diagnostics(&payload.particles, &material_params);
 
     let fps_ok = avg_fps >= state.min_avg_fps;
     let drop_ok = mean_drop >= state.min_mean_drop;
@@ -1543,15 +1548,6 @@ fn apply_terrain_autoverify_ops(
     gpu_control: &mut MpmGpuControl,
     active_params: &ActivePhysicsParams,
 ) -> Result<bool, String> {
-    fn material_from_phase_id(phase_id: u32) -> Option<ParticleMaterial> {
-        match phase_id as u8 {
-            MPM_PHASE_ID_WATER => Some(ParticleMaterial::WaterLiquid),
-            MPM_PHASE_ID_GRANULAR_SOIL => Some(ParticleMaterial::SoilGranular),
-            MPM_PHASE_ID_GRANULAR_SAND => Some(ParticleMaterial::SandGranular),
-            _ => None,
-        }
-    }
-
     fn snapshot_particles_from_readback(
         particles: &[GpuParticle],
     ) -> Result<Vec<save_load::SnapshotParticle>, String> {
@@ -1561,7 +1557,9 @@ fn apply_terrain_autoverify_ops(
                 Some(save_load::SnapshotParticle {
                     position: Vec2::from_array(particle.x),
                     velocity: Vec2::from_array(particle.v),
-                    material: material_from_phase_id(particle.phase_id)?,
+                    material: particle_material_from_id(unpack_particle_material_id(
+                        particle.home_chunk_slot_id,
+                    ))?,
                 })
             })
             .collect();
@@ -1590,6 +1588,7 @@ fn apply_terrain_autoverify_ops(
                     Mat2::ZERO,
                     0.0,
                     phase_id,
+                    particle.material,
                 ))
             })
             .collect()

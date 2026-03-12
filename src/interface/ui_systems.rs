@@ -18,7 +18,9 @@ use crate::physics::scenario::{ScenarioStatisticsInput, evaluate_scenario_state_
 fn phase_id_for_material(material: ParticleMaterial) -> Option<u32> {
     match material {
         ParticleMaterial::WaterLiquid => Some(0),
+        ParticleMaterial::StoneGranular => Some(1),
         ParticleMaterial::SoilGranular => Some(1),
+        ParticleMaterial::GrassGranular => Some(1),
         ParticleMaterial::SandGranular => Some(2),
         _ => None,
     }

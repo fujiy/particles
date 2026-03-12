@@ -21,8 +21,10 @@ struct WaterDotParams {
 
 struct WaterDotPalette {
     water: array<vec4<f32>, 4>,
+    stone: array<vec4<f32>, 4>,
     soil: array<vec4<f32>, 4>,
     sand: array<vec4<f32>, 4>,
+    grass: array<vec4<f32>, 4>,
 }
 
 struct TerrainComposeParams {
@@ -55,12 +57,14 @@ struct TerrainComposeParams {
 @group(0) @binding(0) var<uniform> view: View;
 @group(0) @binding(1) var<uniform> params: WaterDotParams;
 @group(0) @binding(2) var<storage, read> blurred_density_water: array<f32>;
-@group(0) @binding(3) var<storage, read> blurred_density_soil: array<f32>;
-@group(0) @binding(4) var<storage, read> blurred_density_sand: array<f32>;
-@group(0) @binding(5) var<uniform> palette: WaterDotPalette;
-@group(0) @binding(6) var<uniform> terrain_params: TerrainComposeParams;
-@group(0) @binding(7) var near_base_tex: texture_2d<u32>;
-@group(0) @binding(8) var near_override_tex: texture_2d<u32>;
+@group(0) @binding(3) var<storage, read> blurred_density_stone: array<f32>;
+@group(0) @binding(4) var<storage, read> blurred_density_soil: array<f32>;
+@group(0) @binding(5) var<storage, read> blurred_density_sand: array<f32>;
+@group(0) @binding(6) var<storage, read> blurred_density_grass: array<f32>;
+@group(0) @binding(7) var<uniform> palette: WaterDotPalette;
+@group(0) @binding(8) var<uniform> terrain_params: TerrainComposeParams;
+@group(0) @binding(9) var near_base_tex: texture_2d<u32>;
+@group(0) @binding(10) var near_override_tex: texture_2d<u32>;
 
 const NEAR_OVERRIDE_EMPTY_SENTINEL: u32 = 65535u;
 
@@ -118,6 +122,12 @@ fn sample_density_water(dot_cell: vec2<i32>) -> f32 {
     return blurred_density_water[dot_index(x, y)];
 }
 
+fn sample_density_stone(dot_cell: vec2<i32>) -> f32 {
+    let x = clamp(dot_cell.x, 0, i32(params.width) - 1);
+    let y = clamp(dot_cell.y, 0, i32(params.height) - 1);
+    return blurred_density_stone[dot_index(x, y)];
+}
+
 fn sample_density_soil(dot_cell: vec2<i32>) -> f32 {
     let x = clamp(dot_cell.x, 0, i32(params.width) - 1);
     let y = clamp(dot_cell.y, 0, i32(params.height) - 1);
@@ -128,6 +138,12 @@ fn sample_density_sand(dot_cell: vec2<i32>) -> f32 {
     let x = clamp(dot_cell.x, 0, i32(params.width) - 1);
     let y = clamp(dot_cell.y, 0, i32(params.height) - 1);
     return blurred_density_sand[dot_index(x, y)];
+}
+
+fn sample_density_grass(dot_cell: vec2<i32>) -> f32 {
+    let x = clamp(dot_cell.x, 0, i32(params.width) - 1);
+    let y = clamp(dot_cell.y, 0, i32(params.height) - 1);
+    return blurred_density_grass[dot_index(x, y)];
 }
 
 fn deterministic_palette_index(x: i32, y: i32, seed: u32) -> u32 {
@@ -159,6 +175,11 @@ fn water_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
     return palette.water[idx].rgb;
 }
 
+fn stone_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
+    let idx = deterministic_palette_index(x + 13, y + 29, seed ^ 0x2b1du);
+    return palette.stone[idx].rgb;
+}
+
 fn soil_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
     let idx = deterministic_palette_index(x + 31, y - 17, seed ^ 0x59du);
     return palette.soil[idx].rgb;
@@ -169,25 +190,41 @@ fn sand_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
     return palette.sand[idx].rgb;
 }
 
+fn grass_palette_color(x: i32, y: i32, seed: u32) -> vec3<f32> {
+    let idx = deterministic_palette_index(x - 7, y + 41, seed ^ 0x4c91u);
+    return palette.grass[idx].rgb;
+}
+
 fn choose_phase(
     water_density: f32,
+    stone_density: f32,
     soil_density: f32,
     sand_density: f32,
+    grass_density: f32,
     x: i32,
     y: i32,
     seed: u32,
 ) -> u32 {
-    let sum_density = max(water_density + soil_density + sand_density, 1.0e-6);
+    let sum_density =
+        max(water_density + stone_density + soil_density + sand_density + grass_density, 1.0e-6);
     let r = deterministic_rand01(x, y, seed ^ 0x13a7u);
     let water_ratio = water_density / sum_density;
+    let stone_ratio = stone_density / sum_density;
     let soil_ratio = soil_density / sum_density;
+    let sand_ratio = sand_density / sum_density;
     if r < water_ratio {
         return 0u;
     }
-    if r < water_ratio + soil_ratio {
+    if r < water_ratio + stone_ratio {
         return 1u;
     }
-    return 2u;
+    if r < water_ratio + stone_ratio + soil_ratio {
+        return 2u;
+    }
+    if r < water_ratio + stone_ratio + soil_ratio + sand_ratio {
+        return 3u;
+    }
+    return 4u;
 }
 
 @vertex
@@ -220,9 +257,11 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         discard;
     }
     let water_density = sample_density_water(dot_cell);
+    let stone_density = sample_density_stone(dot_cell);
     let soil_density = sample_density_soil(dot_cell);
     let sand_density = sample_density_sand(dot_cell);
-    let total_density = water_density + soil_density + sand_density;
+    let grass_density = sample_density_grass(dot_cell);
+    let total_density = water_density + stone_density + soil_density + sand_density + grass_density;
     if total_density < params.density_threshold {
         discard;
     }
@@ -236,17 +275,23 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     let phase = choose_phase(
         water_density,
+        stone_density,
         soil_density,
         sand_density,
+        grass_density,
         dot_cell.x,
         dot_cell.y,
         params.palette_seed,
     );
     var color = water_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
     if phase == 1u {
-        color = soil_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
+        color = stone_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
     } else if phase == 2u {
+        color = soil_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
+    } else if phase == 3u {
         color = sand_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
+    } else if phase == 4u {
+        color = grass_palette_color(dot_cell.x, dot_cell.y, params.palette_seed);
     }
     return vec4<f32>(color, 1.0);
 }
