@@ -300,7 +300,7 @@
 
 ### [MAT-BLOCK-01] ブロック材質拡張（stone granular / grass）と break 変換の GPU 化
 
-- Status: `In Progress`
+- Status: `Done`
 - 背景:
   - 現行の材質実装は `phase_id` 中心で、`stone granular` / `grass granular` のような「同一 phase 内の別材質」を保持できない。
   - world edit の `Break` ツールは `Delete` と同じ remove-only 動作で、solid cell を対応 granular へ変換する仕様になっていない。
@@ -310,13 +310,13 @@
   - `stone granular` を world edit / save-load / autoverify / render 経路で識別可能にする。
   - `grass solid` / `grass granular` を追加し、`grass solid` は soil と同物性、破壊時は `grass:soil = 1:3` 比率で粒子化する。
   - `Break` ツールを「solid cell を消して granular を GPU add/remove queue で生成する」挙動へ更新する。
-  - terrain 描画に grass edge ルールを追加し、隣接 solid が無い辺へ grass palette を約 2 dot 深さで適用する。
+  - terrain 描画に grass edge ルールを追加し、隣接 solid が無い辺へ grass palette を適用する。
 - Subtasks:
   - [x] `docs/tasks.md` に本 Work Unit を追加し、設計前提と検証artifactを明記する。
   - [x] `assets/params/material.ron` と対応 asset loader / active params を追加し、材質別パラメータを `physics.ron` から移管する。
   - [x] `TerrainMaterial` / `ParticleMaterial` / save-load / UI / autoverify を stone granular / grass solid / grass granular 対応へ拡張する。
   - [x] GPU 粒子が material id を保持できるようにし、water/terrain render で stone granular / grass granular を描き分ける。
-  - [ ] `Break` ツールを solid->granular 変換へ更新し、粒子追加は GPU world edit queue 経路で処理する。
+  - [x] `Break` ツールを solid->granular 変換へ更新し、粒子追加は GPU world edit queue 経路で処理する。
   - [x] terrain compose / far update に grass edge 描画を追加し、screenshot artifact で見た目を確認する。
   - [x] `cargo check` / `cargo test --lib` と runtime autoverify artifact で回帰確認する。
 - 完了条件:
@@ -328,9 +328,40 @@
   - 2026-03-12: Work Unit を追加。`material.ron` 導入、GPU material id 保持、break 変換、grass edge 描画、artifact 検証を一括で進める方針を確定。
   - 2026-03-12: `material.ron` / `MaterialParams` asset を追加し、材質別の APIC・境界摩擦・Drucker-Prager 物性・粒子数・break 出力を `physics.ron` から分離。grass の break を `GrassGranular x4 + SoilGranular x12` で params 化した。
   - 2026-03-12: `TerrainMaterial::Grass`, `ParticleMaterial::{StoneGranular,GrassSolid,GrassGranular}` を save/load・UI・scenario 表示・GPU packed material id 経路へ接続し、水ドット描画で stone/soil/sand/grass granular を分離表示できるよう更新した。
+  - 2026-03-12: `Break` ツールを solid cell 削除 + granular add queue 化へ更新し、terrain cell 更新は CPU `TerrainWorld` を正本としたまま、粒子生成は `GpuWorldEditCommand::AddParticles` で GPU world edit 経路へ送る構成にした。
   - 2026-03-12: terrain compose / far update を更新し、grass solid は fill を soil ベースに保ちつつ、露出辺のみ grass palette を約 2 dot 幅で描くよう変更。runtime screenshot artifact `/Users/yuuki.fj/Develop/particles/artifacts/autoverify/terrain_edit_grass_edge_verify.png` で上面の grass edge 表示を確認した。
   - 2026-03-12: `cargo check` / `cargo test --lib`（51件 pass）を再実行。runtime 検証で見つかった `material.ron` の fixed-array 記法、`mpm_types.wgsl` の packed slot mask literal、`water_dot_gpu` render bind group 本数不整合も修正した。
   - 2026-03-12: 地形差分の正本は `TerrainWorld`（CPU）とする前提で確定。`Delete` / `Break` とも terrain cell 更新は CPU 側 `set_cell` を正本とし、GPU は粒子編集と描画キャッシュ更新先として扱う。
+  - 2026-03-12: grass edge は `4 +/- 1` dot の低周波ノイズ厚みへ更新し、全ブロックの露出辺に約 3 dot 周期ノイズの欠けと外角 1 dot の確定欠けを追加した。Near が描画済みの領域では Far を出さないよう整理し、欠けが Far で埋まらない状態を確認した。
+
+### [REND-DOTLAYER-01] ドット絵描画レイヤー整理（Back/Main/Final Compose）
+
+- Status: `Planned`
+- 背景:
+  - 現行の `TerrainCompose` は地形描画に加えて空・Back・Far を含む最終色合成まで担っており、pass 名と責務が一致していない。
+  - 粒子描画は terrain cache を直接参照してセル単位で discard しているため、terrain 側のドット単位欠け表現と責務が分離していない。
+  - 今後、独立に動くオブジェクトや前後関係の増加を扱うには、低解像度ドット絵レイヤー単位で前景と背景を分離した構成が必要。
+- スコープ:
+  - 低解像度の `BackDotLayer` と `MainDotLayer` を分離し、背景と前景を別 render target で管理する。
+  - `MainDotLayer` は RGBA クリア後に粒子、terrain、将来の可動オブジェクトを順序付きで描く前景レイヤーとする。
+  - terrain pass は「地形だけ」を描く責務へ縮退し、filled dot は alpha 1、欠け dot は alpha 0 として先行描画済み粒子を残す。
+  - `FinalCompose` で `BackDotLayer` と `MainDotLayer` を合成し、実画面への拡大はこの最終段へ集約する。
+  - pixel perfect の最終調整は後続とし、まずは責務分離と今後の拡張しやすさを優先する。
+- Subtasks:
+  - [ ] 現行 render graph の pass 役割を棚卸しし、`TerrainCompose` / `WaterDotGpu` / Back/Far 更新の責務境界を `docs/tasks.md` 上で明文化する。
+  - [ ] 低解像度 `BackDotLayer` render target と生成 pass を追加し、空・Back・Far 補完をこのレイヤーへ移す。
+  - [ ] 低解像度 RGBA の `MainDotLayer` render target を追加し、粒子描画を最終画面ではなく main layer へ出力する。
+  - [ ] terrain 前景 pass を追加し、欠けた dot では alpha を残して粒子が見える構成へ移行する。
+  - [ ] 粒子 shader から terrain cache 参照によるセル単位 discard を外し、レイヤー順で前後関係を決める構成へ整理する。
+  - [ ] `FinalCompose` pass を追加し、`BackDotLayer + MainDotLayer (+ 将来の object layer)` を合成して画面へ出す。
+  - [ ] screenshot artifact で「terrain 欠けから粒子が見える」「Near 読み込み中だけ Far が補完される」「grass/soil edge 表現が維持される」を確認する。
+- 完了条件:
+  - 背景と前景が別 render target / pass に分離され、各 pass 名が実際の責務と一致している。
+  - 粒子は terrain cache を直接参照せず、前景レイヤー上の描画順だけで terrain と重なる。
+  - terrain 欠け部分では背景ではなく、先に描かれた粒子や将来の前景オブジェクトが見える。
+  - 最終合成段が `Back/Main` のみを知る構成になり、将来のオブジェクトレイヤー追加が render graph の局所変更で済む。
+- Progress:
+  - 2026-03-12: user 要望に基づき Work Unit を追加。pixel perfect 調整は保留とし、まずは低解像度ドット絵レイヤーの責務分離、`particles -> terrain` の前景順序、`Back/Main/Final Compose` への再編を進める方針を確定。
 
 ### [PARAM-HEX-01] RONカラー記法をhex形式へ拡張
 
