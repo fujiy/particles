@@ -65,8 +65,9 @@ pub struct GpuActiveTileRecord {
 const _: () = assert!(std::mem::size_of::<GpuActiveTileRecord>() == 8);
 
 // ---------------------------------------------------------------------------
-// GPU-side particle layout (matches mpm_types.wgsl::GpuParticle, 72 bytes)
-// Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) v_vol(4) phase_id(4) phi_p(4) home_slot+material(4) = 72
+// GPU-side particle layout (matches mpm_types.wgsl::GpuParticle, 80 bytes)
+// Layout: x(8) v(8) mass(4) v0(4) f(16) c(16) v_vol(4) phase_id(4) phi_p(4)
+//         home_slot+material(4) render_seed(4) pad(4) = 80
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
@@ -88,9 +89,26 @@ pub struct GpuParticle {
     pub phi_p: f32,
     /// Current occupied/home chunk slot id for this particle.
     pub home_chunk_slot_id: u32,
+    /// Stable per-particle seed used by render-side stochastic reconstruction.
+    pub render_seed: u32,
+    pub _pad0: u32,
 }
 
-const _: () = assert!(std::mem::size_of::<GpuParticle>() == 72);
+const _: () = assert!(std::mem::size_of::<GpuParticle>() == 80);
+
+pub fn stable_particle_render_seed(material: ParticleMaterial, pos: Vec2, ordinal: u32) -> u32 {
+    let mut state = pos.x.to_bits().wrapping_mul(0x9E37_79B9);
+    state ^= pos.y.to_bits().wrapping_mul(0x85EB_CA6B);
+    state ^= (crate::physics::material::particle_material_id(material) as u32)
+        .wrapping_mul(0xC2B2_AE35);
+    state ^= ordinal.wrapping_mul(0x27D4_EB2D);
+    state ^= state >> 16;
+    state = state.wrapping_mul(0x7FEB_352D);
+    state ^= state >> 15;
+    state = state.wrapping_mul(0x846C_A68B);
+    state ^= state >> 16;
+    state.max(1)
+}
 
 impl GpuParticle {
     pub fn from_cpu(
@@ -104,6 +122,32 @@ impl GpuParticle {
         phase_id: u8,
         material: ParticleMaterial,
     ) -> Self {
+        Self::from_cpu_with_seed(
+            pos,
+            vel,
+            mass,
+            rest_volume,
+            f,
+            c,
+            v_vol,
+            phase_id,
+            material,
+            stable_particle_render_seed(material, pos, 0),
+        )
+    }
+
+    pub fn from_cpu_with_seed(
+        pos: Vec2,
+        vel: Vec2,
+        mass: f32,
+        rest_volume: f32,
+        f: Mat2,
+        c: Mat2,
+        v_vol: f32,
+        phase_id: u8,
+        material: ParticleMaterial,
+        render_seed: u32,
+    ) -> Self {
         Self {
             x: pos.to_array(),
             v: vel.to_array(),
@@ -116,6 +160,8 @@ impl GpuParticle {
             phase_id: phase_id as u32,
             phi_p: 1.0,
             home_chunk_slot_id: pack_particle_home_slot(INVALID_PACKED_PARTICLE_SLOT, material),
+            render_seed: render_seed.max(1),
+            _pad0: 0,
         }
     }
 }

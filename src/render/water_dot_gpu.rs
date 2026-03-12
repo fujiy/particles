@@ -233,17 +233,8 @@ struct WaterDotGpuResources {
     params_buf: Buffer,
     palette_buf: Buffer,
     fallback_particle_buf: Buffer,
-    density_atomic_water_buf: Buffer,
-    density_atomic_stone_buf: Buffer,
-    density_atomic_soil_buf: Buffer,
-    density_atomic_sand_buf: Buffer,
-    density_atomic_grass_buf: Buffer,
-    blur_tmp_buf: Buffer,
-    blurred_density_water_buf: Buffer,
-    blurred_density_stone_buf: Buffer,
-    blurred_density_soil_buf: Buffer,
-    blurred_density_sand_buf: Buffer,
-    blurred_density_grass_buf: Buffer,
+    coverage_atomic_buf: Buffer,
+    winner_buf: Buffer,
 }
 
 impl WaterDotGpuResources {
@@ -300,28 +291,10 @@ impl WaterDotGpuResources {
         let required_dot_count = layout.dot_count();
         if required_dot_count > self.capacity_dot_count {
             let byte_size = required_dot_count * 4;
-            self.density_atomic_water_buf =
-                create_storage_buffer(render_device, "water_dot_density_atomic_water", byte_size);
-            self.density_atomic_stone_buf =
-                create_storage_buffer(render_device, "water_dot_density_atomic_stone", byte_size);
-            self.density_atomic_soil_buf =
-                create_storage_buffer(render_device, "water_dot_density_atomic_soil", byte_size);
-            self.density_atomic_sand_buf =
-                create_storage_buffer(render_device, "water_dot_density_atomic_sand", byte_size);
-            self.density_atomic_grass_buf =
-                create_storage_buffer(render_device, "water_dot_density_atomic_grass", byte_size);
-            self.blur_tmp_buf =
-                create_storage_buffer(render_device, "water_dot_blur_tmp", byte_size);
-            self.blurred_density_water_buf =
-                create_storage_buffer(render_device, "water_dot_blurred_density_water", byte_size);
-            self.blurred_density_stone_buf =
-                create_storage_buffer(render_device, "water_dot_blurred_density_stone", byte_size);
-            self.blurred_density_soil_buf =
-                create_storage_buffer(render_device, "water_dot_blurred_density_soil", byte_size);
-            self.blurred_density_sand_buf =
-                create_storage_buffer(render_device, "water_dot_blurred_density_sand", byte_size);
-            self.blurred_density_grass_buf =
-                create_storage_buffer(render_device, "water_dot_blurred_density_grass", byte_size);
+            self.coverage_atomic_buf =
+                create_storage_buffer(render_device, "water_dot_coverage_atomic", byte_size);
+            self.winner_buf =
+                create_storage_buffer(render_device, "water_dot_winner", byte_size);
             self.capacity_dot_count = required_dot_count;
         }
         self.layout = layout;
@@ -419,16 +392,6 @@ struct WaterDotPreprocessPipelines {
     layout: BindGroupLayout,
     clear_pipeline: CachedComputePipelineId,
     splat_pipeline: CachedComputePipelineId,
-    blur_x_water_pipeline: CachedComputePipelineId,
-    blur_y_water_pipeline: CachedComputePipelineId,
-    blur_x_stone_pipeline: CachedComputePipelineId,
-    blur_y_stone_pipeline: CachedComputePipelineId,
-    blur_x_soil_pipeline: CachedComputePipelineId,
-    blur_y_soil_pipeline: CachedComputePipelineId,
-    blur_x_sand_pipeline: CachedComputePipelineId,
-    blur_y_sand_pipeline: CachedComputePipelineId,
-    blur_x_grass_pipeline: CachedComputePipelineId,
-    blur_y_grass_pipeline: CachedComputePipelineId,
 }
 
 #[derive(Resource)]
@@ -523,57 +486,9 @@ fn init_water_dot_gpu_compute_resources(
         mapped_at_creation: false,
     });
 
-    let density_atomic_water_buf = create_storage_buffer(
-        &render_device,
-        "water_dot_density_atomic_water",
-        dot_count * 4,
-    );
-    let density_atomic_stone_buf = create_storage_buffer(
-        &render_device,
-        "water_dot_density_atomic_stone",
-        dot_count * 4,
-    );
-    let density_atomic_soil_buf = create_storage_buffer(
-        &render_device,
-        "water_dot_density_atomic_soil",
-        dot_count * 4,
-    );
-    let density_atomic_sand_buf = create_storage_buffer(
-        &render_device,
-        "water_dot_density_atomic_sand",
-        dot_count * 4,
-    );
-    let density_atomic_grass_buf = create_storage_buffer(
-        &render_device,
-        "water_dot_density_atomic_grass",
-        dot_count * 4,
-    );
-    let blur_tmp_buf = create_storage_buffer(&render_device, "water_dot_blur_tmp", dot_count * 4);
-    let blurred_density_water_buf = create_storage_buffer(
-        &render_device,
-        "water_dot_blurred_density_water",
-        dot_count * 4,
-    );
-    let blurred_density_stone_buf = create_storage_buffer(
-        &render_device,
-        "water_dot_blurred_density_stone",
-        dot_count * 4,
-    );
-    let blurred_density_soil_buf = create_storage_buffer(
-        &render_device,
-        "water_dot_blurred_density_soil",
-        dot_count * 4,
-    );
-    let blurred_density_sand_buf = create_storage_buffer(
-        &render_device,
-        "water_dot_blurred_density_sand",
-        dot_count * 4,
-    );
-    let blurred_density_grass_buf = create_storage_buffer(
-        &render_device,
-        "water_dot_blurred_density_grass",
-        dot_count * 4,
-    );
+    let coverage_atomic_buf =
+        create_storage_buffer(&render_device, "water_dot_coverage_atomic", dot_count * 4);
+    let winner_buf = create_storage_buffer(&render_device, "water_dot_winner", dot_count * 4);
 
     commands.insert_resource(WaterDotGpuResources {
         layout,
@@ -581,17 +496,8 @@ fn init_water_dot_gpu_compute_resources(
         params_buf,
         palette_buf,
         fallback_particle_buf,
-        density_atomic_water_buf,
-        density_atomic_stone_buf,
-        density_atomic_soil_buf,
-        density_atomic_sand_buf,
-        density_atomic_grass_buf,
-        blur_tmp_buf,
-        blurred_density_water_buf,
-        blurred_density_stone_buf,
-        blurred_density_soil_buf,
-        blurred_density_sand_buf,
-        blurred_density_grass_buf,
+        coverage_atomic_buf,
+        winner_buf,
     });
 
     let entries = BindGroupLayoutEntries::sequential(
@@ -599,15 +505,6 @@ fn init_water_dot_gpu_compute_resources(
         (
             uniform_buffer_sized(false, None),
             storage_buffer_read_only_sized(false, None),
-            storage_buffer_sized(false, None),
-            storage_buffer_sized(false, None),
-            storage_buffer_sized(false, None),
-            storage_buffer_sized(false, None),
-            storage_buffer_sized(false, None),
-            storage_buffer_sized(false, None),
-            storage_buffer_sized(false, None),
-            storage_buffer_sized(false, None),
-            storage_buffer_sized(false, None),
             storage_buffer_sized(false, None),
             storage_buffer_sized(false, None),
         ),
@@ -639,141 +536,10 @@ fn init_water_dot_gpu_compute_resources(
         entry_point: Some("splat_particles".into()),
         zero_initialize_workgroup_memory: false,
     });
-    let blur_x_water_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_x_water".into()),
-        layout: vec![BindGroupLayoutDescriptor::new(
-            "water_dot_preprocess_layout",
-            &*entries,
-        )],
-        push_constant_ranges: vec![],
-        shader: shader.clone(),
-        shader_defs: vec![],
-        entry_point: Some("blur_x_water".into()),
-        zero_initialize_workgroup_memory: false,
-    });
-    let blur_y_water_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_y_water".into()),
-        layout: vec![BindGroupLayoutDescriptor::new(
-            "water_dot_preprocess_layout",
-            &*entries,
-        )],
-        push_constant_ranges: vec![],
-        shader: shader.clone(),
-        shader_defs: vec![],
-        entry_point: Some("blur_y_water".into()),
-        zero_initialize_workgroup_memory: false,
-    });
-    let blur_x_stone_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_x_stone".into()),
-        layout: vec![BindGroupLayoutDescriptor::new(
-            "water_dot_preprocess_layout",
-            &*entries,
-        )],
-        push_constant_ranges: vec![],
-        shader: shader.clone(),
-        shader_defs: vec![],
-        entry_point: Some("blur_x_stone".into()),
-        zero_initialize_workgroup_memory: false,
-    });
-    let blur_y_stone_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_y_stone".into()),
-        layout: vec![BindGroupLayoutDescriptor::new(
-            "water_dot_preprocess_layout",
-            &*entries,
-        )],
-        push_constant_ranges: vec![],
-        shader: shader.clone(),
-        shader_defs: vec![],
-        entry_point: Some("blur_y_stone".into()),
-        zero_initialize_workgroup_memory: false,
-    });
-    let blur_x_soil_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_x_soil".into()),
-        layout: vec![BindGroupLayoutDescriptor::new(
-            "water_dot_preprocess_layout",
-            &*entries,
-        )],
-        push_constant_ranges: vec![],
-        shader: shader.clone(),
-        shader_defs: vec![],
-        entry_point: Some("blur_x_soil".into()),
-        zero_initialize_workgroup_memory: false,
-    });
-    let blur_y_soil_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_y_soil".into()),
-        layout: vec![BindGroupLayoutDescriptor::new(
-            "water_dot_preprocess_layout",
-            &*entries,
-        )],
-        push_constant_ranges: vec![],
-        shader: shader.clone(),
-        shader_defs: vec![],
-        entry_point: Some("blur_y_soil".into()),
-        zero_initialize_workgroup_memory: false,
-    });
-    let blur_x_sand_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_x_sand".into()),
-        layout: vec![BindGroupLayoutDescriptor::new(
-            "water_dot_preprocess_layout",
-            &*entries,
-        )],
-        push_constant_ranges: vec![],
-        shader: shader.clone(),
-        shader_defs: vec![],
-        entry_point: Some("blur_x_sand".into()),
-        zero_initialize_workgroup_memory: false,
-    });
-    let blur_y_sand_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_y_sand".into()),
-        layout: vec![BindGroupLayoutDescriptor::new(
-            "water_dot_preprocess_layout",
-            &*entries,
-        )],
-        push_constant_ranges: vec![],
-        shader: shader.clone(),
-        shader_defs: vec![],
-        entry_point: Some("blur_y_sand".into()),
-        zero_initialize_workgroup_memory: false,
-    });
-    let blur_x_grass_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_x_grass".into()),
-        layout: vec![BindGroupLayoutDescriptor::new(
-            "water_dot_preprocess_layout",
-            &*entries,
-        )],
-        push_constant_ranges: vec![],
-        shader: shader.clone(),
-        shader_defs: vec![],
-        entry_point: Some("blur_x_grass".into()),
-        zero_initialize_workgroup_memory: false,
-    });
-    let blur_y_grass_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-        label: Some("water_dot_blur_y_grass".into()),
-        layout: vec![BindGroupLayoutDescriptor::new(
-            "water_dot_preprocess_layout",
-            &*entries,
-        )],
-        push_constant_ranges: vec![],
-        shader: shader.clone(),
-        shader_defs: vec![],
-        entry_point: Some("blur_y_grass".into()),
-        zero_initialize_workgroup_memory: false,
-    });
-
     commands.insert_resource(WaterDotPreprocessPipelines {
         layout,
         clear_pipeline,
         splat_pipeline,
-        blur_x_water_pipeline,
-        blur_y_water_pipeline,
-        blur_x_stone_pipeline,
-        blur_y_stone_pipeline,
-        blur_x_soil_pipeline,
-        blur_y_soil_pipeline,
-        blur_x_sand_pipeline,
-        blur_y_sand_pipeline,
-        blur_x_grass_pipeline,
-        blur_y_grass_pipeline,
     });
 }
 
@@ -785,9 +551,6 @@ fn init_water_dot_gpu_render_pipeline(mut commands: Commands, asset_server: Res<
             (
                 uniform_buffer::<ViewUniform>(true),
                 uniform_buffer_sized(false, core::num::NonZeroU64::new(64)),
-                storage_buffer_read_only_sized(false, None),
-                storage_buffer_read_only_sized(false, None),
-                storage_buffer_read_only_sized(false, None),
                 storage_buffer_read_only_sized(false, None),
                 storage_buffer_read_only_sized(false, None),
                 uniform_buffer_sized(false, core::num::NonZeroU64::new(320)),
@@ -884,26 +647,6 @@ impl Node for WaterDotPreprocessNode {
             std::sync::atomic::AtomicBool::new(false);
         static SPLAT_WARNED: std::sync::atomic::AtomicBool =
             std::sync::atomic::AtomicBool::new(false);
-        static BLUR_X_WATER_WARNED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        static BLUR_Y_WATER_WARNED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        static BLUR_X_STONE_WARNED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        static BLUR_Y_STONE_WARNED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        static BLUR_X_SOIL_WARNED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        static BLUR_Y_SOIL_WARNED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        static BLUR_X_SAND_WARNED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        static BLUR_Y_SAND_WARNED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        static BLUR_X_GRASS_WARNED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        static BLUR_Y_GRASS_WARNED: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
 
         let Some(clear_pipeline) = pipeline_cache.get_compute_pipeline(pipelines.clear_pipeline)
         else {
@@ -931,17 +674,8 @@ impl Node for WaterDotPreprocessNode {
             &BindGroupEntries::sequential((
                 resources.params_buf.as_entire_binding(),
                 particle_binding,
-                resources.density_atomic_water_buf.as_entire_binding(),
-                resources.density_atomic_stone_buf.as_entire_binding(),
-                resources.density_atomic_soil_buf.as_entire_binding(),
-                resources.density_atomic_sand_buf.as_entire_binding(),
-                resources.density_atomic_grass_buf.as_entire_binding(),
-                resources.blur_tmp_buf.as_entire_binding(),
-                resources.blurred_density_water_buf.as_entire_binding(),
-                resources.blurred_density_stone_buf.as_entire_binding(),
-                resources.blurred_density_soil_buf.as_entire_binding(),
-                resources.blurred_density_sand_buf.as_entire_binding(),
-                resources.blurred_density_grass_buf.as_entire_binding(),
+                resources.coverage_atomic_buf.as_entire_binding(),
+                resources.winner_buf.as_entire_binding(),
             )),
         );
 
@@ -982,117 +716,6 @@ impl Node for WaterDotPreprocessNode {
             );
             return Ok(());
         };
-        let Some(blur_x_water_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipelines.blur_x_water_pipeline)
-        else {
-            warn_missing_compute_pipeline_once(
-                &BLUR_X_WATER_WARNED,
-                "blur_x_water",
-                pipelines.blur_x_water_pipeline,
-                pipeline_cache,
-            );
-            return Ok(());
-        };
-        let Some(blur_y_water_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipelines.blur_y_water_pipeline)
-        else {
-            warn_missing_compute_pipeline_once(
-                &BLUR_Y_WATER_WARNED,
-                "blur_y_water",
-                pipelines.blur_y_water_pipeline,
-                pipeline_cache,
-            );
-            return Ok(());
-        };
-        let Some(blur_x_stone_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipelines.blur_x_stone_pipeline)
-        else {
-            warn_missing_compute_pipeline_once(
-                &BLUR_X_STONE_WARNED,
-                "blur_x_stone",
-                pipelines.blur_x_stone_pipeline,
-                pipeline_cache,
-            );
-            return Ok(());
-        };
-        let Some(blur_y_stone_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipelines.blur_y_stone_pipeline)
-        else {
-            warn_missing_compute_pipeline_once(
-                &BLUR_Y_STONE_WARNED,
-                "blur_y_stone",
-                pipelines.blur_y_stone_pipeline,
-                pipeline_cache,
-            );
-            return Ok(());
-        };
-        let Some(blur_x_soil_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipelines.blur_x_soil_pipeline)
-        else {
-            warn_missing_compute_pipeline_once(
-                &BLUR_X_SOIL_WARNED,
-                "blur_x_soil",
-                pipelines.blur_x_soil_pipeline,
-                pipeline_cache,
-            );
-            return Ok(());
-        };
-        let Some(blur_y_soil_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipelines.blur_y_soil_pipeline)
-        else {
-            warn_missing_compute_pipeline_once(
-                &BLUR_Y_SOIL_WARNED,
-                "blur_y_soil",
-                pipelines.blur_y_soil_pipeline,
-                pipeline_cache,
-            );
-            return Ok(());
-        };
-        let Some(blur_x_sand_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipelines.blur_x_sand_pipeline)
-        else {
-            warn_missing_compute_pipeline_once(
-                &BLUR_X_SAND_WARNED,
-                "blur_x_sand",
-                pipelines.blur_x_sand_pipeline,
-                pipeline_cache,
-            );
-            return Ok(());
-        };
-        let Some(blur_y_sand_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipelines.blur_y_sand_pipeline)
-        else {
-            warn_missing_compute_pipeline_once(
-                &BLUR_Y_SAND_WARNED,
-                "blur_y_sand",
-                pipelines.blur_y_sand_pipeline,
-                pipeline_cache,
-            );
-            return Ok(());
-        };
-        let Some(blur_x_grass_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipelines.blur_x_grass_pipeline)
-        else {
-            warn_missing_compute_pipeline_once(
-                &BLUR_X_GRASS_WARNED,
-                "blur_x_grass",
-                pipelines.blur_x_grass_pipeline,
-                pipeline_cache,
-            );
-            return Ok(());
-        };
-        let Some(blur_y_grass_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipelines.blur_y_grass_pipeline)
-        else {
-            warn_missing_compute_pipeline_once(
-                &BLUR_Y_GRASS_WARNED,
-                "blur_y_grass",
-                pipelines.blur_y_grass_pipeline,
-                pipeline_cache,
-            );
-            return Ok(());
-        };
-
         {
             let profile_query = begin_gpu_pass_query(world, "water", "splat", encoder);
             let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
@@ -1104,156 +727,6 @@ impl Node for WaterDotPreprocessNode {
             pass.set_pipeline(splat_pipeline);
             pass.set_bind_group(0, &bind_group, &[]);
             pass.dispatch_workgroups(particle_workgroups, 1, 1);
-            drop(pass);
-            end_gpu_pass_query(world, encoder, profile_query);
-        }
-
-        {
-            let profile_query = begin_gpu_pass_query(world, "water", "blur_x_water", encoder);
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_x_water"),
-                timestamp_writes: profile_query
-                    .as_ref()
-                    .and_then(|query| query.compute_pass_timestamp_writes()),
-            });
-            pass.set_pipeline(blur_x_water_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
-            drop(pass);
-            end_gpu_pass_query(world, encoder, profile_query);
-        }
-
-        {
-            let profile_query = begin_gpu_pass_query(world, "water", "blur_y_water", encoder);
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_y_water"),
-                timestamp_writes: profile_query
-                    .as_ref()
-                    .and_then(|query| query.compute_pass_timestamp_writes()),
-            });
-            pass.set_pipeline(blur_y_water_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
-            drop(pass);
-            end_gpu_pass_query(world, encoder, profile_query);
-        }
-
-        {
-            let profile_query = begin_gpu_pass_query(world, "water", "blur_x_stone", encoder);
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_x_stone"),
-                timestamp_writes: profile_query
-                    .as_ref()
-                    .and_then(|query| query.compute_pass_timestamp_writes()),
-            });
-            pass.set_pipeline(blur_x_stone_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
-            drop(pass);
-            end_gpu_pass_query(world, encoder, profile_query);
-        }
-
-        {
-            let profile_query = begin_gpu_pass_query(world, "water", "blur_y_stone", encoder);
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_y_stone"),
-                timestamp_writes: profile_query
-                    .as_ref()
-                    .and_then(|query| query.compute_pass_timestamp_writes()),
-            });
-            pass.set_pipeline(blur_y_stone_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
-            drop(pass);
-            end_gpu_pass_query(world, encoder, profile_query);
-        }
-
-        {
-            let profile_query = begin_gpu_pass_query(world, "water", "blur_x_soil", encoder);
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_x_soil"),
-                timestamp_writes: profile_query
-                    .as_ref()
-                    .and_then(|query| query.compute_pass_timestamp_writes()),
-            });
-            pass.set_pipeline(blur_x_soil_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
-            drop(pass);
-            end_gpu_pass_query(world, encoder, profile_query);
-        }
-
-        {
-            let profile_query = begin_gpu_pass_query(world, "water", "blur_y_soil", encoder);
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_y_soil"),
-                timestamp_writes: profile_query
-                    .as_ref()
-                    .and_then(|query| query.compute_pass_timestamp_writes()),
-            });
-            pass.set_pipeline(blur_y_soil_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
-            drop(pass);
-            end_gpu_pass_query(world, encoder, profile_query);
-        }
-
-        {
-            let profile_query = begin_gpu_pass_query(world, "water", "blur_x_sand", encoder);
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_x_sand"),
-                timestamp_writes: profile_query
-                    .as_ref()
-                    .and_then(|query| query.compute_pass_timestamp_writes()),
-            });
-            pass.set_pipeline(blur_x_sand_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
-            drop(pass);
-            end_gpu_pass_query(world, encoder, profile_query);
-        }
-
-        {
-            let profile_query = begin_gpu_pass_query(world, "water", "blur_y_sand", encoder);
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_y_sand"),
-                timestamp_writes: profile_query
-                    .as_ref()
-                    .and_then(|query| query.compute_pass_timestamp_writes()),
-            });
-            pass.set_pipeline(blur_y_sand_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
-            drop(pass);
-            end_gpu_pass_query(world, encoder, profile_query);
-        }
-
-        {
-            let profile_query = begin_gpu_pass_query(world, "water", "blur_x_grass", encoder);
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_x_grass"),
-                timestamp_writes: profile_query
-                    .as_ref()
-                    .and_then(|query| query.compute_pass_timestamp_writes()),
-            });
-            pass.set_pipeline(blur_x_grass_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
-            drop(pass);
-            end_gpu_pass_query(world, encoder, profile_query);
-        }
-
-        {
-            let profile_query = begin_gpu_pass_query(world, "water", "blur_y_grass", encoder);
-            let mut pass = encoder.begin_compute_pass(&ComputePassDescriptor {
-                label: Some("water_dot_blur_y_grass"),
-                timestamp_writes: profile_query
-                    .as_ref()
-                    .and_then(|query| query.compute_pass_timestamp_writes()),
-            });
-            pass.set_pipeline(blur_y_grass_pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(dot_workgroups, 1, 1);
             drop(pass);
             end_gpu_pass_query(world, encoder, profile_query);
         }
@@ -1310,11 +783,8 @@ impl ViewNode for WaterDotGpuNode {
             &BindGroupEntries::sequential((
                 view_binding,
                 resources.params_buf.as_entire_binding(),
-                resources.blurred_density_water_buf.as_entire_binding(),
-                resources.blurred_density_stone_buf.as_entire_binding(),
-                resources.blurred_density_soil_buf.as_entire_binding(),
-                resources.blurred_density_sand_buf.as_entire_binding(),
-                resources.blurred_density_grass_buf.as_entire_binding(),
+                resources.coverage_atomic_buf.as_entire_binding(),
+                resources.winner_buf.as_entire_binding(),
                 resources.palette_buf.as_entire_binding(),
             )),
         );

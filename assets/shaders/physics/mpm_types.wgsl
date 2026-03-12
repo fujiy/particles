@@ -2,8 +2,9 @@
 // Imported by each compute shader via #import.
 #define_import_path particles::mpm_types
 
-// Particle storage layout (one array of GpuParticle, 72 bytes each).
-// Matches Rust GpuParticle: x(8)+v(8)+mass(4)+v0(4)+f(16)+c(16)+v_vol(4)+phase_id(4)+phi_p(4)+home_slot+material(4)=72
+// Particle storage layout (one array of GpuParticle, 80 bytes each).
+// Matches Rust GpuParticle: x(8)+v(8)+mass(4)+v0(4)+f(16)+c(16)+v_vol(4)+phase_id(4)+phi_p(4)
+// +home_slot+material(4)+render_seed(4)+pad(4)=80
 struct GpuParticle {
     // position (m)
     x: vec2<f32>,
@@ -31,6 +32,9 @@ struct GpuParticle {
     phi_p: f32,
     // Packed occupied/home chunk slot id (low 24 bits) + material id (high 8 bits).
     home_chunk_slot_id: u32,
+    // Stable per-particle seed used by render-side stochastic reconstruction.
+    render_seed: u32,
+    pad_particle: u32,
 }
 
 // Grid node layout.

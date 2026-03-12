@@ -51,10 +51,11 @@ fn gpu_particles_from_snapshot(
 ) -> Vec<GpuParticle> {
     particles
         .iter()
-        .filter_map(|particle| {
+        .enumerate()
+        .filter_map(|(particle_index, particle)| {
             let phase_id = mpm_phase_id_for_particle(particle.material)?;
             let mass = crate::physics::material::particle_properties(particle.material).mass;
-            Some(GpuParticle::from_cpu(
+            Some(GpuParticle::from_cpu_with_seed(
                 particle.position,
                 particle.velocity,
                 mass,
@@ -64,6 +65,11 @@ fn gpu_particles_from_snapshot(
                 0.0,
                 phase_id,
                 particle.material,
+                crate::physics::gpu_mpm::buffers::stable_particle_render_seed(
+                    particle.material,
+                    particle.position,
+                    particle_index as u32,
+                ),
             ))
         })
         .collect()

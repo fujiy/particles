@@ -2126,7 +2126,7 @@ fn append_particles_in_cell(
             }
             let offset = Vec2::new((x as f32 + 0.5) * spacing, (y as f32 + 0.5) * spacing);
             let p = cell_min + offset;
-            upload_particles.push(GpuParticle::from_cpu(
+            upload_particles.push(GpuParticle::from_cpu_with_seed(
                 p,
                 Vec2::ZERO,
                 props.mass,
@@ -2136,6 +2136,7 @@ fn append_particles_in_cell(
                 0.0,
                 phase_id,
                 material,
+                super::buffers::stable_particle_render_seed(material, p, spawned),
             ));
             spawned += 1;
         }

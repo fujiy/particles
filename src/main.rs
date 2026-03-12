@@ -1575,11 +1575,12 @@ fn apply_terrain_autoverify_ops(
     ) -> Vec<GpuParticle> {
         particles
             .iter()
-            .filter_map(|particle| {
+            .enumerate()
+            .filter_map(|(particle_index, particle)| {
                 let phase_id = mpm_phase_id_for_particle(particle.material)?;
                 let mass =
                     particles::physics::material::particle_properties(particle.material).mass;
-                Some(GpuParticle::from_cpu(
+                Some(GpuParticle::from_cpu_with_seed(
                     particle.position,
                     particle.velocity,
                     mass,
@@ -1589,6 +1590,11 @@ fn apply_terrain_autoverify_ops(
                     0.0,
                     phase_id,
                     particle.material,
+                    particles::physics::gpu_mpm::buffers::stable_particle_render_seed(
+                        particle.material,
+                        particle.position,
+                        particle_index as u32,
+                    ),
                 ))
             })
             .collect()

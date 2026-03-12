@@ -391,6 +391,38 @@
 
 ## Done (Recent)
 
+### [REND-WATER-RESERVOIR-01] Water Dot 前処理を材質別 blur から reservoir sampling へ置換
+
+- Status: `Done`
+- 背景:
+  - 現行の `water_dot_gpu` 前処理は `water/stone/soil/sand/grass` ごとに atomic density・blur 出力・`blur_x/y` compute pass を持っており、描画材質数に比例してコストとバッファ本数が増える。
+  - 将来的に粒子材質が数十種類以上へ増える前提では、材質ごと blur の構造は pass 数・帯域・メモリの全てで破綻する。
+  - ドット絵表示で本当に必要なのは「存在度 coverage」と「その dot の代表 appearance」であり、材質ごとの連続 density 場を全種類ぶん保持する必要はない。
+- スコープ:
+  - `coverage` は材質非依存の存在度として別集計し、dot の代表材質は weighted reservoir sampling/exponential race によって 1 つだけ選ぶ方式へ切り替える。
+  - 粒子側に描画用の安定乱数種 `particle_render_seed` を追加し、material id とは独立に保持する。
+  - reservoir の payload は `best key + best render material` の固定幅 packed 値とし、`atomicMin` ベースで GPU 更新する。
+  - blur は材質別には持たず、必要なら `coverage` のみを対象にした固定本数の軽量処理へ縮退する。
+- Subtasks:
+  - [x] 現行 `water_dot_gpu` 前処理の pass / buffer / profiler コストを整理し、置換対象を `docs/tasks.md` 上で明示する。
+  - [x] `GpuParticle` に安定な `particle_render_seed` を保持する経路を追加し、spawn / upload / readback / compaction 後も seed が不変になるよう更新する。
+  - [x] `coverage` 用 atomic buffer と reservoir 用 packed winner buffer を追加し、粒子中心 stencil で `coverage + atomicMin(payload)` を更新する compute pass を実装する。
+  - [x] `water_dot_gpu_mainline.wgsl` を reservoir resolve ベースへ切り替え、代表材質 id から palette を引いて dot 色を決定する。
+  - [x] 既存の材質別 `density_atomic_*` / `blurred_density_*` / `blur_x/y_*` pass を削除し、render コストが材質数に依存しない構成へ整理する。
+  - [x] profiler と runtime artifact で、`water` blur 系 scope が削減され、材質数増加時も前処理 cost が安定することを確認する。
+- 完了条件:
+  - `water_dot_gpu` 前処理が材質数に比例する blur pass / buffer 構造を持たない。
+  - dot ごとの見た目は `coverage + winner material` の固定幅情報から再構成される。
+  - `particle_render_seed` は material id とは独立で、粒子 compaction や chunk 移動後も描画ノイズが不必要に変化しない。
+  - profiler 上で前処理コストの主成分が材質数依存から切り離されている。
+- Progress:
+  - 2026-03-12: user 提案に基づき Work Unit を追加。材質別 blur を廃止し、粒子中心 stencil による `coverage + weighted reservoir winner` 方式へ置換する方針を確定した。`particle_render_seed` は material id のみでは不十分で、同材質粒子どうしの順位が固定化するため、粒子ごとに異なる安定 seed を保持する前提で進める。
+  - 2026-03-12: `GpuParticle` を 80 byte へ拡張し、Rust/WGSL の両方に `render_seed` を追加した。CPU 初期 upload、GPU chunk sync 由来追加、GPU world edit 由来追加の全経路で stable seed を埋めるよう更新した。
+  - 2026-03-12: `water_dot_preprocess.wgsl` を全面置換し、材質別 density/blur をやめて `coverage_atomic + winner_packed` の 2 buffer 構成へ整理した。粒子中心 stencil で `coverage` を集計しつつ、exponential race の key を `atomicMin` で競わせて winner material を選ぶ方式へ変更した。
+  - 2026-03-12: `water_dot_gpu_mainline.wgsl` を reservoir resolve ベースへ更新し、coverage 閾値と packed winner material だけから最終 dot 色を再構成するよう変更した。render pass は terrain cache を参照せず、palette 決定のみを担当する。
+  - 2026-03-12: `src/render/water_dot_gpu.rs` の前処理 resource/pipeline を整理し、材質別 `density_atomic_*` / `blurred_density_*` / `blur_x/y_*` を削除した。GPU profiler scope は `water/clear`・`water/splat`・`water/render` の固定本数のみになり、前処理 cost が材質数から切り離された。
+  - 2026-03-12: `cargo check` / `cargo test --lib`（51件 pass）を再実行。runtime verification として `cargo run -q -- --autoverify-config configs/autoverify/terrain_dot_layer_hole_water_drop.json` および `cargo run -q -- --autoverify-config configs/autoverify/profile_hud_water_drop.json` を実行し、`/Users/yuuki.fj/Develop/particles/artifacts/autoverify/terrain_dot_layer_hole_water_drop.png` で水面の dot 再構成を、`/Users/yuuki.fj/Develop/particles/artifacts/autoverify/profile_hud_water_drop.png` で reservoir 版パス構成の実行を確認した。途中で WGSL の 16 進リテラル表記不備を修正し、shader compile error が解消されたことも runtime で確認済み。
+
 ### [UI-PROFILE-01] 左上HUDのCPU/GPUプロファイル棒グラフ可視化
 
 - Status: `Done`

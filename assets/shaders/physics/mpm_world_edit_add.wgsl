@@ -42,6 +42,26 @@ fn particle_grid_axis(count: u32) -> u32 {
     return u32(ceil(sqrt(f32(max(count, 1u)))));
 }
 
+fn stable_particle_render_seed(
+    slot_id: u32,
+    local_cell_x: u32,
+    local_cell_y: u32,
+    ordinal: u32,
+    material_id: u32,
+) -> u32 {
+    var state = slot_id * 0x9e3779b9u;
+    state = state ^ (local_cell_x * 0x85ebca6bu);
+    state = state ^ (local_cell_y * 0xc2b2ae35u);
+    state = state ^ (ordinal * 0x27d4eb2du);
+    state = state ^ (material_id * 0x165667b1u);
+    state = state ^ (state >> 16u);
+    state = state * 0x7feb352du;
+    state = state ^ (state >> 15u);
+    state = state * 0x846ca68bu;
+    state = state ^ (state >> 16u);
+    return max(state, 1u);
+}
+
 @compute @workgroup_size(64)
 fn apply_world_edit_add(@builtin(global_invocation_id) gid: vec3<u32>) {
     let op_id = gid.x;
@@ -87,6 +107,14 @@ fn apply_world_edit_add(@builtin(global_invocation_id) gid: vec3<u32>) {
                 op.phase_id,
                 1.0,
                 pack_particle_home_slot(op.slot_id, op.material_id),
+                stable_particle_render_seed(
+                    op.slot_id,
+                    op.local_cell_x,
+                    op.local_cell_y,
+                    spawned,
+                    op.material_id,
+                ),
+                0u,
             );
             spawned += 1u;
         }
